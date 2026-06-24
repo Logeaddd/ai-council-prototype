@@ -1,0 +1,31 @@
+{
+  "tasks": [
+    {
+      "id": "simple-code-sum-numbers",
+      "title": "简单编程题：数组求和函数",
+      "complexity": "simple",
+      "reviewIntensity": 1,
+      "maxRounds": 2,
+      "prompt": "请用 JavaScript 写一个简单函数 sumNumbers(numbers)，接收数字数组并返回总和。要求：空数组返回 0；不要引入第三方库；给出一两个简短示例。",
+      "expectedKeywords": ["sumNumbers", "reduce", "0", "数组"]
+    },
+    {
+      "id": "medium-plan-reading-app",
+      "title": "计划书题：阅读习惯小工具",
+      "complexity": "medium",
+      "reviewIntensity": 2,
+      "maxRounds": 3,
+      "prompt": "请为一个个人阅读习惯追踪小工具写一份可执行的产品计划。目标用户是想稳定读书但容易中断的人。请包含核心功能、首版范围、用户流程、风险和下一步。",
+      "expectedKeywords": ["目标用户", "核心功能", "首版", "风险", "下一步"]
+    },
+    {
+      "id": "complex-philosophy-freedom",
+      "title": "哲学题：自由与责任",
+      "complexity": "complex",
+      "reviewIntensity": 2,
+      "maxRounds": 6,
+      "prompt": "请讨论“真正的自由是否必然包含责任”。要求：给出清晰立场，区分至少两种自由概念，回应一个反对意见，最后给出简短结论。",
+      "expectedKeywords": ["自由", "责任", "反对", "结论"]
+    }
+  ]
+}

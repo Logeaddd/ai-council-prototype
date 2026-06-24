@@ -1,0 +1,134 @@
+import http from "node:http";
+import net from "node:net";
+import { app, BrowserWindow, Menu, shell } from "electron";
+
+const DEFAULT_PORT = Number(process.env.AI_COUNCIL_UI_PORT || 4317);
+const HOST = "127.0.0.1";
+
+let mainWindow;
+
+app.setName("AI Council");
+
+const gotLock = app.requestSingleInstanceLock();
+if (!gotLock) {
+  app.quit();
+} else {
+  app.on("second-instance", () => {
+    if (!mainWindow) return;
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.focus();
+  });
+
+  app.whenReady().then(startDesktop).catch((error) => {
+    console.error(error);
+    app.quit();
+  });
+}
+
+app.on("window-all-closed", () => {
+  if (process.platform !== "darwin") app.quit();
+});
+
+app.on("activate", () => {
+  if (BrowserWindow.getAllWindows().length === 0) {
+    startDesktop().catch((error) => console.error(error));
+  }
+});
+
+async function startDesktop() {
+  if (mainWindow) return;
+  Menu.setApplicationMenu(null);
+  const port = await findOpenPort(DEFAULT_PORT);
+  process.env.AI_COUNCIL_UI_HOST = HOST;
+  process.env.AI_COUNCIL_UI_PORT = String(port);
+  await import("../src/server.js");
+  await waitForServer(port);
+
+  mainWindow = new BrowserWindow({
+    width: 1440,
+    height: 920,
+    minWidth: 1180,
+    minHeight: 760,
+    title: "AI Council",
+    backgroundColor: "#f3f4f5",
+    show: false,
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true
+    }
+  });
+
+  mainWindow.webContents.on("context-menu", (event) => {
+    event.preventDefault();
+  });
+
+  mainWindow.webContents.on("before-input-event", (event, input) => {
+    const key = String(input.key || "").toLowerCase();
+    const wantsDevTools = (input.control && input.shift && key === "i") || key === "f12";
+    if (!wantsDevTools) return;
+    event.preventDefault();
+    if (mainWindow.webContents.isDevToolsOpened()) {
+      mainWindow.webContents.closeDevTools();
+      return;
+    }
+    mainWindow.webContents.openDevTools({ mode: "detach" });
+  });
+
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    shell.openExternal(url);
+    return { action: "deny" };
+  });
+
+  mainWindow.once("ready-to-show", () => {
+    mainWindow.show();
+  });
+  mainWindow.on("closed", () => {
+    mainWindow = null;
+  });
+  await mainWindow.loadURL(`http://${HOST}:${port}`);
+}
+
+function findOpenPort(startPort) {
+  return new Promise((resolve, reject) => {
+    const tryPort = (port) => {
+      const server = net.createServer();
+      server.once("error", (error) => {
+        if (error.code === "EADDRINUSE") {
+          tryPort(port + 1);
+          return;
+        }
+        reject(error);
+      });
+      server.once("listening", () => {
+        server.close(() => resolve(port));
+      });
+      server.listen(port, HOST);
+    };
+    tryPort(startPort);
+  });
+}
+
+async function waitForServer(port) {
+  const url = `http://${HOST}:${port}/api/health`;
+  const started = Date.now();
+  while (Date.now() - started < 5000) {
+    if (await canReach(url)) return;
+    await new Promise((resolve) => setTimeout(resolve, 80));
+  }
+  throw new Error(`AI Council server did not start on ${url}`);
+}
+
+function canReach(url) {
+  return new Promise((resolve) => {
+    const req = http.get(url, (res) => {
+      res.resume();
+      resolve(res.statusCode === 200);
+    });
+    req.on("error", () => resolve(false));
+    req.setTimeout(500, () => {
+      req.destroy();
+      resolve(false);
+    });
+  });
+}

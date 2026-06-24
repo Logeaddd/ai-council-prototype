@@ -1,0 +1,2794 @@
+import { execFileSync } from "node:child_process";
+import fs from "node:fs";
+import http from "node:http";
+import os from "node:os";
+import path from "node:path";
+import test from "node:test";
+import assert from "node:assert/strict";
+import { runCouncil, runCouncilEvents } from "../src/discussionEngine.js";
+import { validateGroupConfig } from "../src/config.js";
+import { appendCompressedTranscriptChunk, readSummaryCache, writeGroupSharedSummary, writeMemberShortSummary } from "../src/summaryCache.js";
+import { appendSessionUsage, readGroupUsage } from "../src/usageStats.js";
+import { approveExecutionStandards, prepareExecutionStandards } from "../src/executionStandards.js";
+import { appendPrivateChatMessage } from "../src/privateChat.js";
+
+
+test("onModelCall records round and final model payloads", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-model-call-"));
+  const calls = [];
+  const group = validateGroupConfig({
+    id: "mock-call-log",
+    name: "Mock Call Log",
+    settings: {
+      maxRounds: 1,
+      minConsensusWeight: 1,
+      stopWhenAllSkip: true,
+      agentTimeoutMs: 1000,
+      allowSoloCouncil: true
+    },
+    agents: [
+      {
+        id: "judge",
+        name: "Judge",
+        role: "Judge",
+        provider: "mock",
+        apiBaseUrl: "mock://local",
+        model: "mock-judge",
+        weight: 1,
+        enabled: true,
+        judge: true
+      }
+    ]
+  });
+
+  await runCouncil("Question", group, tmp, { onModelCall: (call) => calls.push(call) });
+
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].phase, "round");
+  assert.equal(calls[0].agentId, "judge");
+  assert.match(calls[0].inputMessages.map((message) => message.content).join("\n"), /Question:/);
+  assert.match(calls[0].rawText, /status/);
+  assert.equal(calls[1].phase, "final");
+  assert.match(calls[1].inputMessages[0].content, /FinalDecision JSON object/);
+  assert.match(calls[1].rawText, /answer/);
+});
+
+test("final consensus_score is engine-controlled, not judge-controlled", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-"));
+  const group = validateGroupConfig({
+    id: "mock",
+    name: "Mock",
+    settings: {
+      maxRounds: 1,
+      minConsensusWeight: 0.75,
+      stopWhenAllSkip: true,
+      agentTimeoutMs: 1000
+    },
+    agents: [
+      {
+        id: "builder",
+        name: "Builder",
+        role: "Build",
+        provider: "mock",
+        apiBaseUrl: "mock://local",
+        model: "mock-builder",
+        weight: 1,
+        enabled: true
+      },
+      {
+        id: "critic",
+        name: "Critic",
+        role: "Critique",
+        provider: "mock",
+        apiBaseUrl: "mock://local",
+        model: "mock-critic",
+        weight: 1,
+        enabled: true,
+        mandatoryRedTeam: true
+      },
+      {
+        id: "judge",
+        name: "Judge",
+        role: "Judge",
+        provider: "mock",
+        apiBaseUrl: "mock://local",
+        model: "mock-judge",
+        weight: 1,
+        enabled: true,
+        judge: true
+      }
+    ]
+  });
+
+  const { session } = await runCouncil("Question", group, tmp);
+  const engineScore = session.consensusByRound.at(-1).score;
+  assert.equal(session.finalDecision.consensus_score, engineScore);
+});
+
+test("final_state is engine-controlled and unresolved blockers override judge prose", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-final-state-"));
+  const requests = [];
+  let callCount = 0;
+  const server = http.createServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    requests.push(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+    callCount += 1;
+    const payloads = [
+      {
+        status: "skip",
+        reason: "No objection."
+      },
+      {
+        status: "speak",
+        argument: "This cannot be called executable yet.",
+        objection_items: [
+          {
+            id: "missing-runtime-check",
+            issue: "The code has no runnable verification.",
+            severity: "blocker",
+            blocks_final: true,
+            in_scope: true,
+            why: "The user asked for an executable coding result.",
+            suggested_fix: "Add and run a minimal smoke test."
+          }
+        ],
+        confidence: 0.8,
+        memory_candidates: []
+      },
+      {
+        status: "skip",
+        reason: "No objection."
+      },
+      {
+        answer: "Judge claims this is ready.",
+        consensus_score: 1,
+        final_state: "ready_to_execute",
+        supporting_agents: ["Builder"],
+        dissenting_agents: [],
+        minority_report: "None.",
+        risks: [],
+        next_actions: [],
+        memory_candidates: []
+      }
+    ];
+    writeOpenAiStream(res, JSON.stringify(payloads[Math.min(callCount - 1, payloads.length - 1)]));
+  });
+  await listen(server);
+  const address = server.address();
+  const apiBaseUrl = `http://127.0.0.1:${address.port}/v1`;
+
+  try {
+    const baseAgent = {
+      provider: "openai-compatible",
+      apiBaseUrl,
+      apiKey: "secret-runtime-key",
+      model: "runtime-model",
+      weight: 1,
+      enabled: true,
+      providerLimits: { contextWindow: 12000, maxOutputTokens: 1000 }
+    };
+    const group = validateGroupConfig({
+      id: "final-state",
+      name: "Final State",
+      settings: {
+        maxRounds: 1,
+        minConsensusWeight: 0.75,
+        stopWhenAllSkip: true,
+        agentTimeoutMs: 1000
+      },
+      agents: [
+        { ...baseAgent, id: "builder", name: "Builder", role: "Builder" },
+        { ...baseAgent, id: "critic", name: "Critic", role: "Critic", mandatoryRedTeam: true },
+        { ...baseAgent, id: "judge", name: "Judge", role: "Judge", judge: true }
+      ]
+    });
+
+    const { session } = await runCouncil("Write executable code.", group, tmp);
+
+    assert.equal(requests.length, 3);
+    assert.equal(session.finalDecision.consensus_score, 1);
+    assert.equal(session.finalDecision.final_state, "failed_to_converge");
+    assert.equal(session.finalDecision.blocking_issues[0].id, "missing-runtime-check");
+    assert.match(session.finalDecision.risks.join("\n"), /BLOCKER missing-runtime-check/);
+  } finally {
+    await close(server);
+  }
+});
+
+test("default mock council reaches consensus after explicit non-red-team skips", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-"));
+  const group = validateGroupConfig({
+    id: "mock",
+    name: "Mock",
+    settings: {
+      maxRounds: 3,
+      minConsensusWeight: 0.75,
+      stopWhenAllSkip: true,
+      agentTimeoutMs: 1000
+    },
+    agents: [
+      {
+        id: "builder",
+        name: "Builder",
+        role: "Build",
+        provider: "mock",
+        apiBaseUrl: "mock://local",
+        model: "mock-builder",
+        weight: 1,
+        enabled: true
+      },
+      {
+        id: "critic",
+        name: "Critic",
+        role: "Critique",
+        provider: "mock",
+        apiBaseUrl: "mock://local",
+        model: "mock-critic",
+        weight: 1,
+        enabled: true,
+        mandatoryRedTeam: true
+      },
+      {
+        id: "judge",
+        name: "Judge",
+        role: "Judge",
+        provider: "mock",
+        apiBaseUrl: "mock://local",
+        model: "mock-judge",
+        weight: 1,
+        enabled: true,
+        judge: true
+      }
+    ]
+  });
+
+  const { session } = await runCouncil("Question", group, tmp);
+  assert.equal(session.consensusByRound.at(-1).score, 1);
+  assert.deepEqual([...new Set(session.messages.map((message) => message.round))], [1, 2]);
+  assert.equal(session.finalDecision.consensus_score, 1);
+});
+
+test("default judge is finalizer-only and does not spend a round call", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-"));
+  const group = validateGroupConfig({
+    id: "judge-non-voting",
+    name: "Judge Non Voting",
+    settings: {
+      maxRounds: 5,
+      minConsensusWeight: 1,
+      stopWhenAllSkip: true,
+      agentTimeoutMs: 1000
+    },
+    agents: [
+      {
+        id: "builder",
+        name: "Builder",
+        role: "Build",
+        provider: "mock",
+        apiBaseUrl: "mock://local",
+        model: "mock-builder",
+        weight: 1,
+        enabled: true
+      },
+      {
+        id: "critic",
+        name: "Critic",
+        role: "Critique",
+        provider: "mock",
+        apiBaseUrl: "mock://local",
+        model: "mock-critic",
+        weight: 1,
+        enabled: true,
+        mandatoryRedTeam: true
+      },
+      {
+        id: "judge",
+        name: "Judge",
+        role: "Judge",
+        provider: "mock",
+        apiBaseUrl: "mock://local",
+        model: "mock-judge",
+        weight: 1,
+        enabled: true,
+        judge: true
+      }
+    ]
+  });
+
+  const { session } = await runCouncil("Will the judge keep talking forever?", group, tmp);
+  const judgeRoundMessages = session.messages.filter((message) => message.agentId === "judge");
+
+  assert.equal(judgeRoundMessages.length, 0);
+  assert.equal(session.consensusByRound.at(-1).denominator, 1);
+  assert.equal(session.finalDecision.supporting_agents.includes("Builder"), true);
+});
+
+test("finalizer-only judge skips round calls and non-blocking reviewer risk does not force another round", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-finalizer-round-skip-"));
+  const requests = [];
+  let callCount = 0;
+  const server = http.createServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    requests.push(body);
+    callCount += 1;
+    const payloads = [
+      {
+        status: "speak",
+        position: "deliverable",
+        argument: "Use a direct reduce implementation with an initial zero.",
+        objections: [],
+        suggested_revision: "function sumNumbers(numbers) { return numbers.reduce((sum, n) => sum + n, 0); }",
+        confidence: 0.9,
+        memory_candidates: []
+      },
+      {
+        status: "speak",
+        position: "reviewer",
+        argument: "The implementation meets the user's simple numeric-array request. I only note that non-number inputs are out of scope.",
+        objections: ["Non-number inputs are not handled, but the user asked for a numeric array."],
+        objection_items: [
+          {
+            id: "non-number-inputs",
+            issue: "Non-number inputs are not handled, but the user asked for a numeric array.",
+            severity: "minor",
+            blocks_final: false,
+            in_scope: false,
+            why: "The original task explicitly says numeric array.",
+            suggested_fix: "Keep as a note, not a blocker."
+          }
+        ],
+        confidence: 0.85,
+        memory_candidates: []
+      },
+      {
+        answer: "Use the reduce implementation. Keep the non-number note as a non-blocking risk.",
+        consensus_score: 0,
+        supporting_agents: ["Builder"],
+        dissenting_agents: ["Reviewer"],
+        minority_report: "Reviewer noted an out-of-scope non-number input risk.",
+        risks: ["Non-number inputs are out of scope."],
+        next_actions: [],
+        memory_candidates: []
+      }
+    ];
+    writeOpenAiStream(res, JSON.stringify(payloads[Math.min(callCount - 1, payloads.length - 1)]));
+  });
+  await listen(server);
+  const apiBaseUrl = "http://127.0.0.1:" + server.address().port + "/v1";
+
+  try {
+    const baseAgent = {
+      provider: "openai-compatible",
+      apiBaseUrl,
+      apiKey: "secret-runtime-key",
+      model: "runtime-model",
+      weight: 1,
+      enabled: true,
+      providerLimits: { contextWindow: 12000, maxOutputTokens: 1000 }
+    };
+    const group = validateGroupConfig({
+      id: "judge-finalizer-only",
+      name: "Judge Finalizer Only",
+      settings: { maxRounds: 5, minConsensusWeight: 1, stopWhenAllSkip: true, agentTimeoutMs: 1000 },
+      agents: [
+        { ...baseAgent, id: "builder", name: "Builder", role: "Builder" },
+        { ...baseAgent, id: "reviewer", name: "Reviewer", role: "Reviewer", reviewer: true, mandatoryRedTeam: true, reviewIntensity: 1 },
+        { ...baseAgent, id: "judge", name: "Judge", role: "Judge", judge: true }
+      ]
+    });
+
+    const { session } = await runCouncil("请写 sumNumbers(numbers)。", group, tmp);
+
+    assert.equal(requests.length, 3);
+    assert.deepEqual(session.messages.map((message) => `${message.round}:${message.agentId}`), [
+      "1:builder",
+      "1:reviewer"
+    ]);
+    assert.equal(session.consensusByRound.length, 1);
+    assert.equal(session.finalDecision.final_state, "usable_with_risks");
+  } finally {
+    await close(server);
+  }
+});
+
+test("ordinary answer counterarguments do not force extra council rounds", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-counterargument-"));
+  const requests = [];
+  let callCount = 0;
+  const server = http.createServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    requests.push(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+    callCount += 1;
+    const payloads = [
+      {
+        status: "speak",
+        position: "answer",
+        argument: "Freedom includes responsibility. Counterargument handled inside the answer.",
+        objections: ["Responsibility might limit freedom, but this is already answered in the argument."],
+        objection_items: [
+          {
+            id: "handled-counterargument",
+            issue: "Responsibility might limit freedom, but this is already answered in the argument.",
+            severity: "minor",
+            blocks_final: false,
+            in_scope: true,
+            why: "This is part of the requested counterargument response.",
+            suggested_fix: "No extra round needed."
+          }
+        ],
+        suggested_revision: "Final answer with a handled counterargument.",
+        confidence: 0.9,
+        memory_candidates: []
+      },
+      {
+        answer: "Final answer with a handled counterargument.",
+        consensus_score: 0,
+        supporting_agents: ["Builder"],
+        dissenting_agents: [],
+        minority_report: "None.",
+        risks: [],
+        next_actions: [],
+        memory_candidates: []
+      }
+    ];
+    writeOpenAiStream(res, JSON.stringify(payloads[Math.min(callCount - 1, payloads.length - 1)]));
+  });
+  await listen(server);
+  const apiBaseUrl = "http://127.0.0.1:" + server.address().port + "/v1";
+
+  try {
+    const baseAgent = {
+      provider: "openai-compatible",
+      apiBaseUrl,
+      apiKey: "secret-runtime-key",
+      model: "runtime-model",
+      weight: 1,
+      enabled: true,
+      providerLimits: { contextWindow: 12000, maxOutputTokens: 1000 }
+    };
+    const group = validateGroupConfig({
+      id: "counterargument",
+      name: "Counterargument",
+      settings: { maxRounds: 5, minConsensusWeight: 1, stopWhenAllSkip: true, agentTimeoutMs: 1000 },
+      agents: [
+        { ...baseAgent, id: "builder", name: "Builder", role: "Builder" },
+        { ...baseAgent, id: "judge", name: "Judge", role: "Judge", judge: true }
+      ]
+    });
+
+    const { session } = await runCouncil("Discuss freedom and answer one counterargument.", group, tmp);
+
+    assert.equal(requests.length, 2);
+    assert.deepEqual(session.messages.map((message) => `${message.round}:${message.agentId}:${message.response.status}`), [
+      "1:builder:auto_completed"
+    ]);
+    assert.deepEqual(session.unresolvedObjections.builder, []);
+    assert.equal(session.consensusByRound.length, 1);
+    assert.equal(session.finalDecision.final_state, "ready_to_execute");
+  } finally {
+    await close(server);
+  }
+});
+
+test("stores display-ready dialogue with speaker prefix", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-"));
+  const group = validateGroupConfig({
+    id: "mock",
+    name: "Mock",
+    settings: {
+      maxRounds: 1,
+      minConsensusWeight: 0.75,
+      stopWhenAllSkip: true,
+      agentTimeoutMs: 1000
+    },
+    agents: [
+      {
+        id: "builder",
+        name: "Builder",
+        role: "Build",
+        provider: "mock",
+        apiBaseUrl: "mock://local",
+        model: "mock-builder",
+        weight: 1,
+        enabled: true
+      },
+      {
+        id: "critic",
+        name: "Critic",
+        role: "Critique",
+        provider: "mock",
+        apiBaseUrl: "mock://local",
+        model: "mock-critic",
+        weight: 1,
+        enabled: true,
+        mandatoryRedTeam: true
+      },
+      {
+        id: "judge",
+        name: "Judge",
+        role: "Judge",
+        provider: "mock",
+        apiBaseUrl: "mock://local",
+        model: "mock-judge",
+        weight: 1,
+        enabled: true,
+        judge: true
+      }
+    ]
+  });
+
+  const { session } = await runCouncil("Question", group, tmp);
+  assert.ok(session.messages[0].displayText.startsWith(`Builder${"\u8bf4\uff1a"}`));
+  assert.equal(session.messages[0].agentName, "Builder");
+});
+
+test("can write session output into selected group workspace", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-"));
+  const groupPath = path.join(tmp, "group");
+  fs.mkdirSync(path.join(groupPath, "sessions"), { recursive: true });
+  const group = validateGroupConfig({
+    id: "mock",
+    name: "Mock",
+    settings: {
+      maxRounds: 1,
+      minConsensusWeight: 0.75,
+      stopWhenAllSkip: true,
+      agentTimeoutMs: 1000
+    },
+    agents: [
+      {
+        id: "builder",
+        name: "Builder",
+        role: "Build",
+        provider: "mock",
+        apiBaseUrl: "mock://local",
+        model: "mock-builder",
+        weight: 1,
+        enabled: true
+      },
+      {
+        id: "critic",
+        name: "Critic",
+        role: "Critique",
+        provider: "mock",
+        apiBaseUrl: "mock://local",
+        model: "mock-critic",
+        weight: 1,
+        enabled: true,
+        mandatoryRedTeam: true
+      },
+      {
+        id: "judge",
+        name: "Judge",
+        role: "Judge",
+        provider: "mock",
+        apiBaseUrl: "mock://local",
+        model: "mock-judge",
+        weight: 1,
+        enabled: true,
+        judge: true
+      }
+    ]
+  });
+
+  const { sessionPath } = await runCouncil("Question", group, tmp, { groupPath });
+  assert.ok(sessionPath.startsWith(path.join(groupPath, "sessions")));
+  assert.ok(fs.existsSync(sessionPath));
+});
+
+test("event runner emits ordered per-agent progress before final result", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-"));
+  const group = validateGroupConfig({
+    id: "mock",
+    name: "Mock",
+    settings: {
+      maxRounds: 1,
+      minConsensusWeight: 0.75,
+      stopWhenAllSkip: true,
+      agentTimeoutMs: 1000
+    },
+    agents: [
+      {
+        id: "builder",
+        name: "Builder",
+        role: "Build",
+        provider: "mock",
+        apiBaseUrl: "mock://local",
+        model: "mock-builder",
+        weight: 1,
+        enabled: true
+      },
+      {
+        id: "critic",
+        name: "Critic",
+        role: "Critique",
+        provider: "mock",
+        apiBaseUrl: "mock://local",
+        model: "mock-critic",
+        weight: 1,
+        enabled: true,
+        mandatoryRedTeam: true
+      },
+      {
+        id: "judge",
+        name: "Judge",
+        role: "Judge",
+        provider: "mock",
+        apiBaseUrl: "mock://local",
+        model: "mock-judge",
+        weight: 1,
+        enabled: true,
+        judge: true
+      }
+    ]
+  });
+
+  const events = [];
+  for await (const event of runCouncilEvents("Question", group, tmp)) {
+    events.push(event);
+  }
+
+  assert.deepEqual(events
+    .filter((event) => event.type !== "agent_delta")
+    .slice(0, 6)
+    .map((event) => `${event.type}:${event.agentName || event.message?.agentName}`), [
+    "agent_start:Builder",
+    "agent_message:Builder",
+    "agent_start:Critic",
+    "agent_message:Critic",
+    "round_complete:undefined",
+    "final_start:Judge"
+  ]);
+  assert.equal(events.at(-1).type, "done");
+  assert.equal(events.at(-1).result.session.status, "completed");
+});
+
+test("event runner can emit token deltas before an agent message", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-"));
+  const group = validateGroupConfig({
+    id: "mock",
+    name: "Mock",
+    settings: {
+      maxRounds: 1,
+      minConsensusWeight: 0.75,
+      stopWhenAllSkip: true,
+      agentTimeoutMs: 1000
+    },
+    agents: [
+      {
+        id: "builder",
+        name: "Builder",
+        role: "Build",
+        provider: "mock",
+        apiBaseUrl: "mock://local",
+        model: "mock-builder",
+        weight: 1,
+        enabled: true
+      },
+      {
+        id: "critic",
+        name: "Critic",
+        role: "Critique",
+        provider: "mock",
+        apiBaseUrl: "mock://local",
+        model: "mock-critic",
+        weight: 1,
+        enabled: true,
+        mandatoryRedTeam: true
+      },
+      {
+        id: "judge",
+        name: "Judge",
+        role: "Judge",
+        provider: "mock",
+        apiBaseUrl: "mock://local",
+        model: "mock-judge",
+        weight: 1,
+        enabled: true,
+        judge: true
+      }
+    ]
+  });
+
+  const events = [];
+  for await (const event of runCouncilEvents("Question", group, tmp)) {
+    events.push(event);
+  }
+
+  const firstDelta = events.findIndex((event) => event.type === "agent_delta" && event.agentName === "Builder");
+  const firstMessage = events.findIndex((event) => event.type === "agent_message" && event.message.agentName === "Builder");
+  assert.ok(firstDelta > -1);
+  assert.ok(firstMessage > firstDelta);
+});
+
+test("event runner can continue from the next seat after a stopped agent", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-"));
+  const group = validateGroupConfig({
+    id: "mock",
+    name: "Mock",
+    settings: {
+      maxRounds: 1,
+      minConsensusWeight: 0.75,
+      stopWhenAllSkip: true,
+      agentTimeoutMs: 1000
+    },
+    agents: [
+      {
+        id: "builder",
+        name: "Builder",
+        role: "Build",
+        provider: "mock",
+        apiBaseUrl: "mock://local",
+        model: "mock-builder",
+        weight: 1,
+        enabled: true
+      },
+      {
+        id: "critic",
+        name: "Critic",
+        role: "Critique",
+        provider: "mock",
+        apiBaseUrl: "mock://local",
+        model: "mock-critic",
+        weight: 1,
+        enabled: true,
+        mandatoryRedTeam: true
+      },
+      {
+        id: "judge",
+        name: "Judge",
+        role: "Judge",
+        provider: "mock",
+        apiBaseUrl: "mock://local",
+        model: "mock-judge",
+        weight: 1,
+        enabled: true,
+        judge: true
+      }
+    ]
+  });
+
+  const events = [];
+  for await (const event of runCouncilEvents("Question", group, tmp, { startAfterAgentId: "builder" })) {
+    events.push(event);
+  }
+
+  const starts = events
+    .filter((event) => event.type === "agent_start")
+    .map((event) => event.agentName);
+  assert.deepEqual(starts, ["Critic"]);
+  assert.equal(events.at(-1).result.session.activeAgentIds.includes("builder"), false);
+});
+
+test("event runner can resume at the paused current agent", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-"));
+  const group = validateGroupConfig({
+    id: "mock",
+    name: "Mock",
+    settings: {
+      maxRounds: 1,
+      minConsensusWeight: 0.75,
+      stopWhenAllSkip: true,
+      agentTimeoutMs: 1000
+    },
+    agents: [
+      {
+        id: "builder",
+        name: "Builder",
+        role: "Build",
+        provider: "mock",
+        apiBaseUrl: "mock://local",
+        model: "mock-builder",
+        weight: 1,
+        enabled: true
+      },
+      {
+        id: "critic",
+        name: "Critic",
+        role: "Critique",
+        provider: "mock",
+        apiBaseUrl: "mock://local",
+        model: "mock-critic",
+        weight: 1,
+        enabled: true,
+        mandatoryRedTeam: true
+      },
+      {
+        id: "judge",
+        name: "Judge",
+        role: "Judge",
+        provider: "mock",
+        apiBaseUrl: "mock://local",
+        model: "mock-judge",
+        weight: 1,
+        enabled: true,
+        judge: true
+      }
+    ]
+  });
+
+  const events = [];
+  for await (const event of runCouncilEvents("Question", group, tmp, {
+    startAtAgentId: "critic",
+    resumeInstruction: "Continue the interrupted answer."
+  })) {
+    events.push(event);
+  }
+
+  const starts = events
+    .filter((event) => event.type === "agent_start")
+    .map((event) => event.agentName);
+  assert.deepEqual(starts, ["Critic"]);
+  assert.equal(events.at(-1).result.session.activeAgentIds.includes("builder"), false);
+  assert.equal(events.at(-1).result.session.activeAgentIds.includes("critic"), true);
+});
+
+test("runtime OpenAI-compatible agents use direct API keys without storing secrets", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-"));
+  const requests = [];
+  let callCount = 0;
+  const server = http.createServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    requests.push({
+      authorization: req.headers.authorization,
+      body
+    });
+    callCount += 1;
+    const payload = callCount === 1
+      ? {
+        status: "speak",
+        position: "support",
+        argument: "Use the real runtime API config.",
+        objections: [],
+        suggested_revision: "",
+        confidence: 0.8,
+        memory_candidates: []
+      }
+      : {
+        answer: "Runtime API config works.",
+        consensus_score: 0,
+        supporting_agents: ["Runtime Agent"],
+        dissenting_agents: [],
+        minority_report: "None.",
+        risks: [],
+        next_actions: [],
+        memory_candidates: []
+      };
+    writeOpenAiStream(res, JSON.stringify(payload));
+  });
+  await listen(server);
+  const address = server.address();
+  const apiBaseUrl = `http://127.0.0.1:${address.port}/v1`;
+
+  try {
+    const group = validateGroupConfig({
+      id: "runtime",
+      name: "Runtime",
+      settings: {
+        maxRounds: 1,
+        minConsensusWeight: 0.75,
+        stopWhenAllSkip: true,
+        agentTimeoutMs: 1000,
+        allowSoloCouncil: true
+      },
+      agents: [
+        {
+          id: "seat_01",
+          name: "Runtime Agent",
+          role: "Judge",
+          provider: "openai-compatible",
+          apiBaseUrl,
+          apiKey: "secret-runtime-key",
+          model: "runtime-model",
+          weight: 1,
+          enabled: true,
+          judge: true
+        }
+      ]
+    });
+
+    const { session, sessionPath } = await runCouncil("Question", group, tmp);
+    const written = fs.readFileSync(sessionPath, "utf8");
+    assert.equal(requests.length, 2);
+    assert.equal(requests[0].authorization, "Bearer secret-runtime-key");
+    assert.equal(requests[0].body.model, "runtime-model");
+    assert.equal(session.groupSnapshot.agents[0].apiKey, undefined);
+    assert.equal(session.groupSnapshot.agents[0].apiKeySet, true);
+    assert.doesNotMatch(written, /secret-runtime-key/);
+    assert.equal(session.finalDecision.answer, "Runtime API config works.");
+  } finally {
+    await close(server);
+  }
+});
+
+test("failed runtime calls become unavailable and do not count as support", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-"));
+  const requests = [];
+  const server = http.createServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    requests.push(body);
+    if (requests.length <= 2) {
+      res.writeHead(429, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: { message: "rate limited" } }));
+      return;
+    }
+    const payload = {
+      answer: "Fallback final summary.",
+      consensus_score: 0,
+      supporting_agents: [],
+      dissenting_agents: ["Runtime Agent"],
+      minority_report: "Runtime Agent was unavailable.",
+      risks: ["rate limited"],
+      next_actions: [],
+      memory_candidates: []
+    };
+    writeOpenAiStream(res, JSON.stringify(payload));
+  });
+  await listen(server);
+  const address = server.address();
+  const apiBaseUrl = `http://127.0.0.1:${address.port}/v1`;
+
+  try {
+    const group = validateGroupConfig({
+      id: "runtime-failure",
+      name: "Runtime Failure",
+      settings: {
+        maxRounds: 1,
+        minConsensusWeight: 0.75,
+        stopWhenAllSkip: true,
+        agentTimeoutMs: 1000,
+        allowSoloCouncil: true
+      },
+      agents: [
+        {
+          id: "seat_01",
+          name: "Runtime Agent",
+          role: "Judge",
+          provider: "openai-compatible",
+          apiBaseUrl,
+          apiKey: "secret-runtime-key",
+          model: "runtime-model",
+          weight: 1,
+          enabled: true,
+          judge: true
+        }
+      ]
+    });
+
+    const { session } = await runCouncil("Question", group, tmp);
+
+    assert.equal(session.messages[0].response.status, "unavailable");
+    assert.match(session.messages[0].response.reason, /agent_call_failed:seat_01/);
+    assert.equal(session.consensusByRound.at(-1).score, 0);
+    assert.deepEqual(session.consensusByRound.at(-1).supportingAgents, []);
+    assert.deepEqual(session.consensusByRound.at(-1).dissentingAgents, ["Runtime Agent"]);
+  } finally {
+    await close(server);
+  }
+});
+
+test("non-compressible core overflow marks an agent unavailable before API call", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-"));
+  let requestCount = 0;
+  const server = http.createServer(async (req, res) => {
+    requestCount += 1;
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const payload = {
+      answer: "No call should be needed for the overflowing agent.",
+      consensus_score: 0,
+      supporting_agents: [],
+      dissenting_agents: ["Tiny Agent"],
+      minority_report: "Tiny Agent context overflow.",
+      risks: ["context overflow"],
+      next_actions: [],
+      memory_candidates: []
+    };
+    writeOpenAiStream(res, JSON.stringify(payload));
+  });
+  await listen(server);
+  const address = server.address();
+  const apiBaseUrl = `http://127.0.0.1:${address.port}/v1`;
+
+  try {
+    const group = validateGroupConfig({
+      id: "core-overflow",
+      name: "Core Overflow",
+      settings: {
+        maxRounds: 1,
+        minConsensusWeight: 0.75,
+        stopWhenAllSkip: true,
+        agentTimeoutMs: 1000,
+        allowSoloCouncil: true
+      },
+      agents: [
+        {
+          id: "tiny",
+          name: "Tiny Agent",
+          role: "Judge",
+          provider: "openai-compatible",
+          apiBaseUrl,
+          apiKey: "secret-runtime-key",
+          model: "runtime-model",
+          weight: 1,
+          enabled: true,
+          judge: true,
+          providerLimits: {
+            contextWindow: 120,
+            maxOutputTokens: 50
+          },
+          tokenLimits: {
+            maxInputTokensPerCall: 60
+          }
+        }
+      ]
+    });
+    const question = "这是一个非常长的老板问题，用来触发不可压缩核心超过小模型上下文限制。".repeat(3);
+
+    const { session } = await runCouncil(question, group, tmp);
+
+    assert.equal(session.messages[0].response.status, "unavailable");
+    assert.match(session.messages[0].response.reason, /non_compressible_core_exceeds_input_limit/);
+    assert.equal(session.messages[0].contextStatus.coreOverflow, true);
+    assert.equal(session.consensusByRound.at(-1).score, 0);
+    assert.equal(requestCount, 0);
+  } finally {
+    await close(server);
+  }
+});
+
+test("member token session budget blocks provider call without skip support", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-"));
+  let requestCount = 0;
+  const server = http.createServer(async (req, res) => {
+    requestCount += 1;
+    for await (const _ of req) {
+      // Drain request body.
+    }
+    const payload = {
+      answer: "No member call should happen when the member budget is exceeded.",
+      consensus_score: 0,
+      supporting_agents: [],
+      dissenting_agents: ["Budgeted Agent"],
+      minority_report: "Budgeted Agent unavailable.",
+      risks: ["token budget exceeded"],
+      next_actions: [],
+      memory_candidates: []
+    };
+    writeOpenAiStream(res, JSON.stringify(payload));
+  });
+  await listen(server);
+  const address = server.address();
+  const apiBaseUrl = `http://127.0.0.1:${address.port}/v1`;
+
+  try {
+    const group = validateGroupConfig({
+      id: "token-budget",
+      name: "Token Budget",
+      settings: {
+        maxRounds: 1,
+        minConsensusWeight: 0.75,
+        stopWhenAllSkip: true,
+        agentTimeoutMs: 1000,
+        allowSoloCouncil: true
+      },
+      agents: [
+        {
+          id: "budgeted",
+          name: "Budgeted Agent",
+          role: "Judge",
+          provider: "openai-compatible",
+          apiBaseUrl,
+          apiKey: "secret-runtime-key",
+          model: "runtime-model",
+          weight: 1,
+          enabled: true,
+          judge: true,
+          providerLimits: {
+            contextWindow: 12000,
+            maxOutputTokens: 1000
+          },
+          tokenLimits: {
+            maxTokensPerSession: 10
+          }
+        }
+      ]
+    });
+
+    const { session } = await runCouncil("Question", group, tmp);
+
+    assert.equal(session.messages[0].response.status, "unavailable");
+    assert.match(session.messages[0].response.reason, /token_budget_exceeded/);
+    assert.equal(session.consensusByRound.at(-1).score, 0);
+    assert.equal(requestCount, 0);
+  } finally {
+    await close(server);
+  }
+});
+
+test("member cost session budget blocks provider call without skip support", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-cost-"));
+  const groupPath = path.join(tmp, "group");
+  fs.mkdirSync(path.join(groupPath, "members", "Budgeted Agent", "private_memory"), { recursive: true });
+  fs.mkdirSync(path.join(groupPath, "sessions"), { recursive: true });
+  const workspaceGroup = {
+    groupPath,
+    seats: [
+      {
+        seatId: "budgeted",
+        displayName: "Budgeted Agent",
+        currentModel: "runtime-model",
+        privateFolder: "members/Budgeted Agent",
+        role: "Judge"
+      }
+    ]
+  };
+  fs.writeFileSync(path.join(groupPath, "group.json"), JSON.stringify(workspaceGroup, null, 2), "utf8");
+  appendSessionUsage(groupPath, {
+    id: "previous",
+    groupId: "cost-budget",
+    messages: [
+      {
+        agentId: "budgeted",
+        agentName: "Budgeted Agent",
+        contextStatus: { totalTokens: 900000 },
+        response: { status: "skip", reason: "Previous usage." }
+      }
+    ]
+  }, workspaceGroup);
+  let requestCount = 0;
+  const server = http.createServer(async (req, res) => {
+    requestCount += 1;
+    for await (const _ of req) {
+      // Drain request body.
+    }
+    const payload = {
+      answer: "No member call should happen when the cost budget is exceeded.",
+      consensus_score: 0,
+      supporting_agents: [],
+      dissenting_agents: ["Budgeted Agent"],
+      minority_report: "Budgeted Agent unavailable.",
+      risks: ["cost budget exceeded"],
+      next_actions: [],
+      memory_candidates: []
+    };
+    writeOpenAiStream(res, JSON.stringify(payload));
+  });
+  await listen(server);
+  const address = server.address();
+  const apiBaseUrl = `http://127.0.0.1:${address.port}/v1`;
+
+  try {
+    const group = validateGroupConfig({
+      id: "cost-budget",
+      name: "Cost Budget",
+      settings: {
+        maxRounds: 1,
+        minConsensusWeight: 0.75,
+        stopWhenAllSkip: true,
+        agentTimeoutMs: 1000,
+        allowSoloCouncil: true
+      },
+      agents: [
+        {
+          id: "budgeted",
+          name: "Budgeted Agent",
+          role: "Judge",
+          provider: "openai-compatible",
+          apiBaseUrl,
+          apiKey: "secret-runtime-key",
+          model: "runtime-model",
+          weight: 1,
+          enabled: true,
+          judge: true,
+          pricing: { inputPerMillion: 1, outputPerMillion: 0 },
+          tokenLimits: {
+            maxCostPerSession: 0.5
+          }
+        }
+      ]
+    });
+
+    const { session } = await runCouncil("Question", group, tmp, { groupPath });
+
+    assert.equal(session.messages[0].response.status, "unavailable");
+    assert.match(session.messages[0].response.reason, /cost_budget_exceeded/);
+    assert.equal(session.consensusByRound.at(-1).score, 0);
+    assert.equal(requestCount, 0);
+  } finally {
+    await close(server);
+  }
+});
+
+test("member budget warning is surfaced without blocking provider call", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-budget-warning-"));
+  const groupPath = path.join(tmp, "group");
+  fs.mkdirSync(path.join(groupPath, "members", "Budget Watch", "private_memory"), { recursive: true });
+  fs.mkdirSync(path.join(groupPath, "sessions"), { recursive: true });
+  const workspaceGroup = {
+    groupPath,
+    seats: [
+      {
+        seatId: "watch",
+        displayName: "Budget Watch",
+        currentModel: "runtime-model",
+        privateFolder: "members/Budget Watch",
+        role: "Judge"
+      }
+    ]
+  };
+  fs.writeFileSync(path.join(groupPath, "group.json"), JSON.stringify(workspaceGroup, null, 2), "utf8");
+  appendSessionUsage(groupPath, {
+    id: "previous-warning",
+    groupId: "budget-warning",
+    messages: [
+      {
+        agentId: "watch",
+        agentName: "Budget Watch",
+        contextStatus: { totalTokens: 650000 },
+        response: { status: "skip", reason: "Previous usage." }
+      }
+    ]
+  }, workspaceGroup);
+  let requestCount = 0;
+  const server = http.createServer(async (req, res) => {
+    requestCount += 1;
+    for await (const _ of req) {
+      // Drain request body.
+    }
+    const payload = requestCount === 1
+      ? { status: "skip", reason: "Within budget but near warning." }
+      : {
+        answer: "Final answer.",
+        consensus_score: 1,
+        supporting_agents: ["Budget Watch"],
+        dissenting_agents: [],
+        minority_report: "None.",
+        risks: [],
+        next_actions: [],
+        memory_candidates: []
+      };
+    writeOpenAiStream(res, JSON.stringify(payload));
+  });
+  await listen(server);
+  const address = server.address();
+  const apiBaseUrl = `http://127.0.0.1:${address.port}/v1`;
+
+  try {
+    const group = validateGroupConfig({
+      id: "budget-warning",
+      name: "Budget Warning",
+      settings: {
+        maxRounds: 1,
+        minConsensusWeight: 0.75,
+        stopWhenAllSkip: true,
+        agentTimeoutMs: 1000,
+        allowSoloCouncil: true,
+        tokenLimits: {
+          warningThreshold: 0.6,
+          compressionThreshold: 0.75,
+          hardStopThreshold: 0.9
+        }
+      },
+      agents: [
+        {
+          id: "watch",
+          name: "Budget Watch",
+          role: "Judge",
+          provider: "openai-compatible",
+          apiBaseUrl,
+          apiKey: "secret-runtime-key",
+          model: "runtime-model",
+          weight: 1,
+          enabled: true,
+          judge: true,
+          pricing: { inputPerMillion: 1, outputPerMillion: 0 },
+          tokenLimits: {
+            maxCostPerSession: 1
+          }
+        }
+      ]
+    });
+
+    const { session } = await runCouncil("Question", group, tmp, { groupPath });
+
+    assert.equal(requestCount, 2);
+    assert.equal(session.messages[0].response.status, "skip");
+    assert.equal(session.messages[0].contextStatus.costBudgetStatus, "warning");
+    assert.equal(session.messages[0].contextStatus.budgetStatus, "warning");
+  } finally {
+    await close(server);
+  }
+});
+
+test("final judge core overflow falls back without provider call", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-"));
+  let requestCount = 0;
+  const server = http.createServer(async (req, res) => {
+    requestCount += 1;
+    for await (const _ of req) {
+      // Drain request body.
+    }
+    const payload = {
+      status: "skip",
+      reason: "No objection."
+    };
+    writeOpenAiStream(res, JSON.stringify(payload));
+  });
+  await listen(server);
+  const address = server.address();
+  const apiBaseUrl = `http://127.0.0.1:${address.port}/v1`;
+
+  try {
+    const baseAgent = {
+      provider: "openai-compatible",
+      apiBaseUrl,
+      apiKey: "secret-runtime-key",
+      model: "runtime-model",
+      weight: 1,
+      enabled: true,
+      providerLimits: {
+        contextWindow: 10000,
+        maxOutputTokens: 1000
+      }
+    };
+    const group = validateGroupConfig({
+      id: "final-overflow",
+      name: "Final Overflow",
+      settings: {
+        maxRounds: 1,
+        minConsensusWeight: 0.75,
+        stopWhenAllSkip: true,
+        agentTimeoutMs: 1000
+      },
+      agents: [
+        {
+          ...baseAgent,
+          id: "builder",
+          name: "Builder",
+          role: "Builder"
+        },
+        {
+          ...baseAgent,
+          id: "critic",
+          name: "Critic",
+          role: "Critic",
+          mandatoryRedTeam: true
+        },
+        {
+          ...baseAgent,
+          id: "judge",
+          name: "Judge",
+          role: "Judge",
+          judge: true,
+          providerLimits: {
+            contextWindow: 120,
+            maxOutputTokens: 50
+          },
+          tokenLimits: {
+            maxInputTokensPerCall: 60
+          }
+        }
+      ]
+    });
+    const question = "Long final synthesis context. ".repeat(20);
+
+    const events = [];
+    for await (const event of runCouncilEvents(question, group, tmp)) {
+      events.push(event);
+    }
+    const finalEvent = events.find((event) => event.type === "final_decision");
+
+    assert.equal(requestCount, 2);
+    assert.equal(finalEvent.contextStatus.coreOverflow, true);
+    assert.match(finalEvent.finalDecision.risks.join("\n"), /final_judge_unavailable:non_compressible_core_exceeds_input_limit/);
+  } finally {
+    await close(server);
+  }
+});
+
+test("final judge token budget falls back without final provider call", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-"));
+  let requestCount = 0;
+  const server = http.createServer(async (req, res) => {
+    requestCount += 1;
+    for await (const _ of req) {
+      // Drain request body.
+    }
+    const payload = {
+      status: "skip",
+      reason: "No objection."
+    };
+    writeOpenAiStream(res, JSON.stringify(payload));
+  });
+  await listen(server);
+  const address = server.address();
+  const apiBaseUrl = `http://127.0.0.1:${address.port}/v1`;
+
+  try {
+    const baseAgent = {
+      provider: "openai-compatible",
+      apiBaseUrl,
+      apiKey: "secret-runtime-key",
+      model: "runtime-model",
+      weight: 1,
+      enabled: true,
+      providerLimits: {
+        contextWindow: 12000,
+        maxOutputTokens: 1000
+      }
+    };
+    const group = validateGroupConfig({
+      id: "final-budget",
+      name: "Final Budget",
+      settings: {
+        maxRounds: 1,
+        minConsensusWeight: 0.75,
+        stopWhenAllSkip: true,
+        agentTimeoutMs: 1000
+      },
+      agents: [
+        {
+          ...baseAgent,
+          id: "builder",
+          name: "Builder",
+          role: "Builder"
+        },
+        {
+          ...baseAgent,
+          id: "critic",
+          name: "Critic",
+          role: "Critic",
+          mandatoryRedTeam: true
+        },
+        {
+          ...baseAgent,
+          id: "judge",
+          name: "Judge",
+          role: "Judge",
+          judge: true,
+          tokenLimits: {
+            maxTokensPerSession: 10
+          }
+        }
+      ]
+    });
+
+    const events = [];
+    for await (const event of runCouncilEvents("Question", group, tmp)) {
+      events.push(event);
+    }
+    const finalEvent = events.find((event) => event.type === "final_decision");
+
+    assert.equal(requestCount, 2);
+    assert.match(finalEvent.finalDecision.risks.join("\n"), /final_judge_unavailable:token_budget_exceeded/);
+  } finally {
+    await close(server);
+  }
+});
+
+test("final judge cost budget falls back without final provider call", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-final-cost-"));
+  const groupPath = path.join(tmp, "group");
+  fs.mkdirSync(path.join(groupPath, "members", "Judge", "private_memory"), { recursive: true });
+  fs.mkdirSync(path.join(groupPath, "sessions"), { recursive: true });
+  const workspaceGroup = {
+    groupPath,
+    seats: [
+      {
+        seatId: "judge",
+        displayName: "Judge",
+        currentModel: "runtime-model",
+        privateFolder: "members/Judge",
+        role: "Judge"
+      }
+    ]
+  };
+  fs.writeFileSync(path.join(groupPath, "group.json"), JSON.stringify(workspaceGroup, null, 2), "utf8");
+  appendSessionUsage(groupPath, {
+    id: "previous-final",
+    groupId: "final-cost",
+    messages: [
+      {
+        agentId: "judge",
+        agentName: "Judge",
+        contextStatus: { totalTokens: 900000 },
+        response: { status: "skip", reason: "Previous usage." }
+      }
+    ]
+  }, workspaceGroup);
+  let requestCount = 0;
+  const server = http.createServer(async (req, res) => {
+    requestCount += 1;
+    for await (const _ of req) {
+      // Drain request body.
+    }
+    const payload = {
+      status: "skip",
+      reason: "No objection."
+    };
+    writeOpenAiStream(res, JSON.stringify(payload));
+  });
+  await listen(server);
+  const address = server.address();
+  const apiBaseUrl = `http://127.0.0.1:${address.port}/v1`;
+
+  try {
+    const baseAgent = {
+      provider: "openai-compatible",
+      apiBaseUrl,
+      apiKey: "secret-runtime-key",
+      model: "runtime-model",
+      weight: 1,
+      enabled: true,
+      providerLimits: {
+        contextWindow: 12000,
+        maxOutputTokens: 1000
+      }
+    };
+    const group = validateGroupConfig({
+      id: "final-cost",
+      name: "Final Cost",
+      settings: {
+        maxRounds: 1,
+        minConsensusWeight: 0.75,
+        stopWhenAllSkip: true,
+        agentTimeoutMs: 1000
+      },
+      agents: [
+        {
+          ...baseAgent,
+          id: "builder",
+          name: "Builder",
+          role: "Builder"
+        },
+        {
+          ...baseAgent,
+          id: "critic",
+          name: "Critic",
+          role: "Critic",
+          mandatoryRedTeam: true
+        },
+        {
+          ...baseAgent,
+          id: "judge",
+          name: "Judge",
+          role: "Judge",
+          judge: true,
+          pricing: { inputPerMillion: 1, outputPerMillion: 0 },
+          tokenLimits: {
+            maxCostPerSession: 0.5
+          }
+        }
+      ]
+    });
+
+    const events = [];
+    for await (const event of runCouncilEvents("Question", group, tmp, { groupPath })) {
+      events.push(event);
+    }
+    const finalEvent = events.find((event) => event.type === "final_decision");
+
+    assert.equal(requestCount, 2);
+    assert.match(finalEvent.finalDecision.risks.join("\n"), /final_judge_unavailable:cost_budget_exceeded/);
+  } finally {
+    await close(server);
+  }
+});
+
+
+test("sessions preserve structured artifacts for final synthesis and saved output", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-"));
+  const requests = [];
+  let callCount = 0;
+  const server = http.createServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    requests.push(body);
+    callCount += 1;
+    const payload = callCount === 1
+      ? {
+        status: "speak",
+        position: "implemented",
+        argument: "I implemented the helper.",
+        objections: [],
+        suggested_revision: "The artifact contains the canonical code.",
+        artifacts: [
+          {
+            type: "code",
+            title: "todoStats.js",
+            content: "export function buildTodoStats(todos) { return {}; }"
+          }
+        ],
+        confidence: 0.8,
+        memory_candidates: []
+      }
+      : {
+        answer: "Artifact was preserved for review.",
+        consensus_score: 0,
+        supporting_agents: ["Runtime Agent"],
+        dissenting_agents: [],
+        minority_report: "None.",
+        risks: [],
+        next_actions: [],
+        memory_candidates: []
+      };
+    writeOpenAiStream(res, JSON.stringify(payload));
+  });
+  await listen(server);
+  const address = server.address();
+  const apiBaseUrl = `http://127.0.0.1:${address.port}/v1`;
+
+  try {
+    const group = validateGroupConfig({
+      id: "artifact-runtime",
+      name: "Artifact Runtime",
+      settings: {
+        maxRounds: 1,
+        minConsensusWeight: 0.75,
+        stopWhenAllSkip: true,
+        agentTimeoutMs: 1000,
+        allowSoloCouncil: true
+      },
+      agents: [
+        {
+          id: "seat_01",
+          name: "Runtime Agent",
+          role: "Judge",
+          provider: "openai-compatible",
+          apiBaseUrl,
+          apiKey: "secret-artifact-key",
+          model: "runtime-model",
+          weight: 1,
+          enabled: true,
+          judge: true
+        }
+      ]
+    });
+
+    const { session, sessionPath } = await runCouncil("Question", group, tmp);
+    const written = JSON.parse(fs.readFileSync(sessionPath, "utf8"));
+    const finalPrompt = requests[1].messages.at(-1).content;
+
+    assert.equal(session.artifacts.length, 1);
+    assert.equal(session.artifacts[0].source_agent_name, "Runtime Agent");
+    assert.equal(session.artifacts[0].content, "export function buildTodoStats(todos) { return {}; }");
+    assert.deepEqual(session.messages[0].artifacts, session.artifacts);
+    assert.equal(written.artifacts[0].title, "todoStats.js");
+    assert.match(finalPrompt, /"artifacts"/);
+    assert.match(finalPrompt, /buildTodoStats/);
+    assert.doesNotMatch(fs.readFileSync(sessionPath, "utf8"), /secret-artifact-key/);
+  } finally {
+    await close(server);
+  }
+});
+
+test("group sessions preserve sandboxed file operation proposals without executing them", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-file-proposals-"));
+  const groupPath = path.join(tmp, "group");
+  fs.mkdirSync(path.join(groupPath, "sessions"), { recursive: true });
+  fs.writeFileSync(path.join(groupPath, "group.json"), JSON.stringify({ groupPath, seats: [] }, null, 2), "utf8");
+
+  let callCount = 0;
+  const server = http.createServer(async (req, res) => {
+    for await (const _ of req) {
+      // Drain request body.
+    }
+    callCount += 1;
+    const payload = callCount === 1
+      ? {
+        status: "speak",
+        argument: "I propose file work for later approval.",
+        file_operations: [
+          {
+            op: "write",
+            path: "src/output.js",
+            content: "export const ok = true;",
+            reason: "Create the requested module after approval.",
+            expected_effect: "A module file exists."
+          },
+          {
+            op: "read",
+            path: ".env",
+            reason: "Try reading secrets.",
+            expected_effect: "Should be rejected."
+          }
+        ],
+        confidence: 0.8,
+        memory_candidates: []
+      }
+      : {
+        answer: "File operation proposals were captured for later approval.",
+        consensus_score: 1,
+        supporting_agents: ["Runtime Agent"],
+        dissenting_agents: [],
+        minority_report: "None.",
+        risks: [],
+        next_actions: ["Review pending file operation proposals."],
+        memory_candidates: []
+      };
+    writeOpenAiStream(res, JSON.stringify(payload));
+  });
+  await listen(server);
+  const address = server.address();
+  const apiBaseUrl = `http://127.0.0.1:${address.port}/v1`;
+
+  try {
+    const group = validateGroupConfig({
+      id: "file-proposals",
+      name: "File Proposals",
+      settings: {
+        maxRounds: 1,
+        minConsensusWeight: 0.75,
+        stopWhenAllSkip: true,
+        agentTimeoutMs: 1000,
+        allowSoloCouncil: true
+      },
+      agents: [
+        {
+          id: "runtime",
+          name: "Runtime Agent",
+          role: "Executor",
+          provider: "openai-compatible",
+          apiBaseUrl,
+          apiKey: "secret-runtime-key",
+          model: "runtime-model",
+          providerLimits: { contextWindow: 12000, maxOutputTokens: 1000 },
+          weight: 1,
+          enabled: true,
+          judge: true
+        }
+      ]
+    });
+
+    const { session, sessionPath } = await runCouncil("Propose a file change.", group, tmp, { groupPath });
+
+    assert.equal(session.fileOperationProposals.length, 1);
+    assert.equal(session.fileOperationProposals[0].path, "src/output.js");
+    assert.equal(session.fileOperationProposals[0].op, "write");
+    assert.equal(session.fileOperationProposals[0].source_agent_id, "runtime");
+    assert.equal(session.pendingFileOperationProposals.length, 0);
+    assert.deepEqual(session.rejectedFileOperationProposals.map((item) => item.code).sort(), [
+      "execution_standards_not_approved",
+      "forbidden_secret_file"
+    ]);
+    assert.equal(session.messages[0].fileOperationProposals.length, 1);
+    assert.equal(session.messages[0].pendingFileOperationProposals.length, 0);
+    assert.equal(fs.existsSync(path.join(groupPath, "src", "output.js")), false);
+
+    const written = JSON.parse(fs.readFileSync(sessionPath, "utf8"));
+    assert.equal(written.fileOperationProposals[0].path, "src/output.js");
+    assert.deepEqual(written.rejectedFileOperationProposals.map((item) => item.code).sort(), [
+      "execution_standards_not_approved",
+      "forbidden_secret_file"
+    ]);
+    assert.ok(fs.existsSync(path.join(groupPath, "shared", "logs", "file-ops.jsonl")));
+  } finally {
+    await close(server);
+  }
+});
+
+
+test("workspace round prompts gate file_operations by seat permission tier", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-file-permission-prompt-"));
+  const groupPath = path.join(tmp, "group");
+  fs.mkdirSync(path.join(groupPath, "sessions"), { recursive: true });
+  fs.writeFileSync(path.join(groupPath, "group.json"), JSON.stringify({
+    groupPath,
+    permissions: {
+      defaultTier: "text",
+      seatTiers: { executor: "full" }
+    },
+    seats: [
+      { seatId: "architect", displayName: "Architect", currentModel: "runtime-model", privateFolder: "members/Architect", role: "Architect" },
+      { seatId: "executor", displayName: "Executor", currentModel: "runtime-model", privateFolder: "members/Executor", role: "Executor" },
+      { seatId: "reviewer", displayName: "Reviewer", currentModel: "runtime-model", privateFolder: "members/Reviewer", role: "Reviewer" }
+    ]
+  }, null, 2), "utf8");
+
+  const requests = [];
+  let callCount = 0;
+  const server = http.createServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    requests.push(body);
+    callCount += 1;
+    if (callCount <= 3) {
+      writeOpenAiStream(res, JSON.stringify({ status: "skip", reason: "Prompt captured." }));
+      return;
+    }
+    writeOpenAiStream(res, JSON.stringify({
+      answer: "Done.",
+      consensus_score: 1,
+      supporting_agents: ["Architect", "Executor"],
+      dissenting_agents: [],
+      minority_report: "None.",
+      risks: [],
+      next_actions: [],
+      memory_candidates: []
+    }));
+  });
+  await listen(server);
+  const address = server.address();
+  const apiBaseUrl = "http://127.0.0.1:" + address.port + "/v1";
+
+  try {
+    const group = validateGroupConfig({
+      id: "file-permission-prompt",
+      name: "File Permission Prompt",
+      settings: {
+        maxRounds: 1,
+        minConsensusWeight: 1,
+        stopWhenAllSkip: true,
+        agentTimeoutMs: 1000
+      },
+      agents: [
+        { id: "architect", name: "Architect", role: "Architect", provider: "openai-compatible", apiBaseUrl, apiKey: "secret-runtime-key", model: "runtime-model", weight: 1, enabled: true },
+        { id: "executor", name: "Executor", role: "Executor", provider: "openai-compatible", apiBaseUrl, apiKey: "secret-runtime-key", model: "runtime-model", weight: 1, enabled: true },
+        { id: "reviewer", name: "Reviewer", role: "Reviewer", provider: "openai-compatible", apiBaseUrl, apiKey: "secret-runtime-key", model: "runtime-model", weight: 1, enabled: true, mandatoryRedTeam: true, judge: true }
+      ]
+    });
+
+    await runCouncil("Create a file.", group, tmp, { groupPath });
+
+    assert.match(requests[0].messages[0].content, /text-only file permission/);
+    assert.doesNotMatch(requests[0].messages[0].content, /MUST propose the change in file_operations/);
+    assert.match(requests[1].messages[0].content, /MUST propose the change in file_operations/);
+  } finally {
+    await close(server);
+  }
+});
+
+test("ready final state auto-executes safe file proposals for full tier", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-auto-exec-runtime-"));
+  const groupPath = path.join(tmp, "group");
+  fs.mkdirSync(path.join(groupPath, "sessions"), { recursive: true });
+  fs.writeFileSync(path.join(groupPath, "group.json"), JSON.stringify({
+    groupPath,
+    permissions: {
+      defaultTier: "full",
+      seatTiers: { runtime: "full" }
+    },
+    seats: [
+      {
+        seatId: "runtime",
+        displayName: "Runtime Agent",
+        currentModel: "runtime-model",
+        privateFolder: "members/RuntimeAgent",
+        role: "Executor"
+      }
+    ]
+  }, null, 2), "utf8");
+  git(groupPath, ["init"]);
+  git(groupPath, ["config", "user.email", "test@example.com"]);
+  git(groupPath, ["config", "user.name", "Test User"]);
+  git(groupPath, ["add", "--", "."]);
+  git(groupPath, ["commit", "-m", "test: initialize group"]);
+  prepareExecutionStandards({
+    groupPath,
+    finalAnswer: "Create the requested file after final approval.",
+    recorderSeatId: "runtime"
+  });
+  approveExecutionStandards({ groupPath, approvedBy: "user" });
+  git(groupPath, ["add", "--", "."]);
+  git(groupPath, ["commit", "-m", "test: approve standards"]);
+
+  const requests = [];
+  let callCount = 0;
+  const server = http.createServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    requests.push(body);
+    callCount += 1;
+    const roundPromptRequiresFileOperations = body.messages?.[0]?.content?.includes("MUST propose the change in file_operations");
+    const payload = callCount === 1
+      ? roundPromptRequiresFileOperations
+        ? {
+          status: "speak",
+          argument: "I propose the requested file operation.",
+          file_operations: [
+            {
+              op: "write",
+              path: "src/auto-created.js",
+              content: "export const autoCreated = true;\n",
+              reason: "Create the requested module.",
+              expected_effect: "The module exists on disk."
+            }
+          ],
+          confidence: 0.9,
+          memory_candidates: []
+        }
+        : {
+          status: "speak",
+          argument: "I can describe the file, but the prompt did not require file_operations.",
+          confidence: 0.5,
+          memory_candidates: []
+        }
+      : {
+        answer: "Ready to execute the proposed file operation.",
+        consensus_score: 1,
+        supporting_agents: ["Runtime Agent"],
+        dissenting_agents: [],
+        minority_report: "None.",
+        risks: [],
+        next_actions: [],
+        memory_candidates: []
+      };
+    writeOpenAiStream(res, JSON.stringify(payload));
+  });
+  await listen(server);
+  const address = server.address();
+  const apiBaseUrl = `http://127.0.0.1:${address.port}/v1`;
+
+  try {
+    const group = validateGroupConfig({
+      id: "auto-exec-runtime",
+      name: "Auto Exec Runtime",
+      settings: {
+        maxRounds: 1,
+        minConsensusWeight: 0.75,
+        stopWhenAllSkip: true,
+        agentTimeoutMs: 1000,
+        allowSoloCouncil: true
+      },
+      agents: [
+        {
+          id: "runtime",
+          name: "Runtime Agent",
+          role: "Executor",
+          provider: "openai-compatible",
+          apiBaseUrl,
+          apiKey: "secret-runtime-key",
+          model: "runtime-model",
+          providerLimits: { contextWindow: 12000, maxOutputTokens: 1000 },
+          weight: 1,
+          enabled: true,
+          judge: true
+        }
+      ]
+    });
+
+    const { session, sessionPath } = await runCouncil("Create a tiny module file.", group, tmp, { groupPath });
+    const targetPath = path.join(groupPath, "src", "auto-created.js");
+
+    assert.equal(requests.length, 2);
+    assert.match(requests[0].messages[0].content, /MUST propose the change in file_operations/);
+    assert.equal(session.fileOperationProposals.length, 1);
+    assert.equal(session.pendingFileOperationProposals.length, 1);
+    assert.equal(fs.readFileSync(targetPath, "utf8"), "export const autoCreated = true;\n");
+    assert.equal(session.finalDecision.final_state, "ready_to_execute");
+    assert.equal(session.fileOperationExecutionState, "executed");
+    assert.equal(session.finalDecision.file_execution_state, "executed");
+    assert.equal(session.fileOperationExecutionResults[0].status, "executed");
+    assert.match(session.fileOperationExecutionResults[0].commitHash, /^[0-9a-f]{7,}/);
+    const show = git(groupPath, ["show", "--name-only", "--format=", session.fileOperationExecutionResults[0].commitHash]);
+    assert.match(show, /src\/auto-created\.js/);
+    assert.match(show, /shared\/file-ops\/pending\//);
+    const written = JSON.parse(fs.readFileSync(sessionPath, "utf8"));
+    assert.equal(written.finalDecision.file_execution_state, "executed");
+  } finally {
+    await close(server);
+  }
+});
+
+test("final judge selection executes only selected file proposals", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-selected-file-runtime-"));
+  const groupPath = path.join(tmp, "group");
+  fs.mkdirSync(path.join(groupPath, "sessions"), { recursive: true });
+  fs.writeFileSync(path.join(groupPath, "group.json"), JSON.stringify({
+    groupPath,
+    permissions: {
+      defaultTier: "full",
+      seatTiers: { runtime: "full" }
+    },
+    seats: [
+      {
+        seatId: "runtime",
+        displayName: "Runtime Agent",
+        currentModel: "runtime-model",
+        privateFolder: "members/RuntimeAgent",
+        role: "Executor"
+      }
+    ]
+  }, null, 2), "utf8");
+  git(groupPath, ["init"]);
+  git(groupPath, ["config", "user.email", "test@example.com"]);
+  git(groupPath, ["config", "user.name", "Test User"]);
+  git(groupPath, ["add", "--", "."]);
+  git(groupPath, ["commit", "-m", "test: initialize group"]);
+  prepareExecutionStandards({
+    groupPath,
+    finalAnswer: "Create only the selected file proposal.",
+    recorderSeatId: "runtime"
+  });
+  approveExecutionStandards({ groupPath, approvedBy: "user" });
+  git(groupPath, ["add", "--", "."]);
+  git(groupPath, ["commit", "-m", "test: approve standards"]);
+
+  const requests = [];
+  let selectedProposalId = "";
+  let callCount = 0;
+  const server = http.createServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    requests.push(body);
+    callCount += 1;
+    if (callCount === 1) {
+      const roundPromptRequiresFileOperations = body.messages?.[0]?.content?.includes("MUST propose the change in file_operations");
+      writeOpenAiStream(res, JSON.stringify(roundPromptRequiresFileOperations ? {
+        status: "speak",
+        argument: "I propose one rejected and one selected file operation.",
+        file_operations: [
+          {
+            op: "write",
+            path: "src/rejected.js",
+            content: "export const rejected = true;\n",
+            reason: "This proposal should not be selected.",
+            expected_effect: "Rejected module exists."
+          },
+          {
+            op: "write",
+            path: "src/selected.js",
+            content: "export const selected = true;\n",
+            reason: "This proposal should be selected.",
+            expected_effect: "Selected module exists."
+          }
+        ],
+        confidence: 0.9,
+        memory_candidates: []
+      } : {
+        status: "speak",
+        argument: "I can describe the selected module, but the prompt did not require file_operations.",
+        confidence: 0.5,
+        memory_candidates: []
+      }));
+      return;
+    }
+
+    const finalPrompt = body.messages.at(-1).content;
+    const finalInput = JSON.parse(finalPrompt);
+    const selectedProposal = finalInput.pendingFileOperationProposals.find((proposal) => proposal.path === "src/selected.js");
+    selectedProposalId = selectedProposal.id;
+    writeOpenAiStream(res, JSON.stringify({
+      answer: "Ready to execute the selected file operation only.",
+      consensus_score: 1,
+      supporting_agents: ["Runtime Agent"],
+      dissenting_agents: [],
+      minority_report: "None.",
+      risks: [],
+      next_actions: [],
+      selected_file_operation_ids: [selectedProposal.id],
+      memory_candidates: []
+    }));
+  });
+  await listen(server);
+  const address = server.address();
+  const apiBaseUrl = `http://127.0.0.1:${address.port}/v1`;
+
+  try {
+    const group = validateGroupConfig({
+      id: "selected-file-runtime",
+      name: "Selected File Runtime",
+      settings: {
+        maxRounds: 1,
+        minConsensusWeight: 0.75,
+        stopWhenAllSkip: true,
+        agentTimeoutMs: 1000,
+        allowSoloCouncil: true
+      },
+      agents: [
+        {
+          id: "runtime",
+          name: "Runtime Agent",
+          role: "Executor",
+          provider: "openai-compatible",
+          apiBaseUrl,
+          apiKey: "secret-runtime-key",
+          model: "runtime-model",
+          providerLimits: { contextWindow: 12000, maxOutputTokens: 1000 },
+          weight: 1,
+          enabled: true,
+          judge: true
+        }
+      ]
+    });
+
+    const { session } = await runCouncil("Create only the selected module.", group, tmp, { groupPath });
+
+    assert.equal(requests.length, 2);
+    assert.match(requests[0].messages[0].content, /MUST propose the change in file_operations/);
+    assert.equal(session.fileOperationProposals.length, 2);
+    assert.equal(session.pendingFileOperationProposals.length, 2);
+    assert.equal(fs.existsSync(path.join(groupPath, "src", "selected.js")), true);
+    assert.equal(fs.existsSync(path.join(groupPath, "src", "rejected.js")), false);
+    assert.deepEqual(session.finalDecision.selected_file_operation_ids, [selectedProposalId]);
+    assert.equal(session.fileOperationExecutionResults.some((item) => item.status === "executed" && item.proposalId === selectedProposalId), true);
+    assert.equal(session.fileOperationExecutionResults.some((item) => item.status === "not_selected" && item.path === "src/rejected.js"), true);
+  } finally {
+    await close(server);
+  }
+});
+test("round prompts use member context sections instead of full transcript replay", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-"));
+  const requests = [];
+  let callCount = 0;
+  const server = http.createServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    requests.push(body);
+    callCount += 1;
+    const payloads = [
+      {
+        status: "speak",
+        argument: "Builder delivered artifact.",
+        objections: [],
+        artifacts: [{ type: "code", title: "impl.js", content: "export const impl = true;" }],
+        confidence: 0.8,
+        memory_candidates: []
+      },
+      {
+        status: "speak",
+        argument: "Red Team keeps a risk.",
+        objections: ["Risk must remain visible."],
+        objection_items: [
+          {
+            id: "visible-risk",
+            issue: "Risk must remain visible.",
+            severity: "blocker",
+            blocks_final: true,
+            in_scope: true,
+            why: "The user needs the risk preserved in later context.",
+            suggested_fix: "Keep the risk in member context and final synthesis."
+          }
+        ],
+        confidence: 0.8,
+        memory_candidates: []
+      },
+      {
+        status: "speak",
+        argument: "Builder sees and addresses the visible risk.",
+        objections: [],
+        suggested_revision: "Keep Risk must remain visible in the final output.",
+        confidence: 0.8,
+        memory_candidates: []
+      },
+      {
+        status: "skip",
+        reason: "No new objection."
+      },
+      {
+        answer: "Done.",
+        consensus_score: 0,
+        supporting_agents: ["Builder", "Judge"],
+        dissenting_agents: ["Critic"],
+        minority_report: "Risk must remain visible.",
+        risks: ["Risk must remain visible."],
+        next_actions: [],
+        memory_candidates: []
+      }
+    ];
+    writeOpenAiStream(res, JSON.stringify(payloads[Math.min(callCount - 1, payloads.length - 1)]));
+  });
+  await listen(server);
+  const address = server.address();
+  const apiBaseUrl = `http://127.0.0.1:${address.port}/v1`;
+
+  try {
+    const baseAgent = {
+      provider: "openai-compatible",
+      apiBaseUrl,
+      apiKey: "secret-runtime-key",
+      model: "runtime-model",
+      weight: 1,
+      enabled: true,
+      providerLimits: { contextWindow: 12000, maxOutputTokens: 1000 }
+    };
+    const group = validateGroupConfig({
+      id: "context-sections",
+      name: "Context Sections",
+      settings: {
+        maxRounds: 2,
+        minConsensusWeight: 0.75,
+        stopWhenAllSkip: true,
+        agentTimeoutMs: 1000
+      },
+      agents: [
+        { ...baseAgent, id: "builder", name: "Builder", role: "Builder" },
+        { ...baseAgent, id: "critic", name: "Critic", role: "Critic", mandatoryRedTeam: true },
+        { ...baseAgent, id: "judge", name: "Judge", role: "Judge", judge: true }
+      ]
+    });
+
+    await runCouncil("Question", group, tmp);
+    const secondRoundBuilderPrompt = requests[2].messages.at(-1).content;
+    const finalPrompt = requests.at(-1).messages.at(-1).content;
+
+    assert.match(secondRoundBuilderPrompt, /Member context:/);
+    assert.match(secondRoundBuilderPrompt, /Latest artifacts:/);
+    assert.match(secondRoundBuilderPrompt, /export const impl = true/);
+    assert.match(secondRoundBuilderPrompt, /Unresolved objections:/);
+    assert.match(secondRoundBuilderPrompt, /Risk must remain visible/);
+    assert.doesNotMatch(secondRoundBuilderPrompt, /Transcript so far:/);
+    assert.match(finalPrompt, /"memberContext"/);
+    assert.match(finalPrompt, /Latest artifacts:/);
+    assert.match(finalPrompt, /export const impl = true/);
+    assert.match(finalPrompt, /Risk must remain visible/);
+    assert.doesNotMatch(finalPrompt, /"transcript"/);
+  } finally {
+    await close(server);
+  }
+});
+
+test("round prompts include persisted member and group summaries", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-summary-"));
+  const groupPath = path.join(tmp, "group");
+  fs.mkdirSync(path.join(groupPath, "members", "Builder", "private_memory"), { recursive: true });
+  fs.mkdirSync(path.join(groupPath, "sessions"), { recursive: true });
+  const workspaceGroup = {
+    seats: [
+      {
+        seatId: "builder",
+        displayName: "Builder",
+        currentModel: "runtime-model",
+        privateFolder: "members/Builder",
+        role: "Builder"
+      }
+    ]
+  };
+  fs.writeFileSync(path.join(groupPath, "group.json"), JSON.stringify(workspaceGroup, null, 2), "utf8");
+  writeMemberShortSummary(groupPath, workspaceGroup.seats[0], "Builder private summary from cache.");
+  writeGroupSharedSummary(groupPath, "Group shared summary from cache.");
+  appendCompressedTranscriptChunk(groupPath, {
+    fromRound: 1,
+    toRound: 4,
+    summary: "Earlier transcript compressed into cache."
+  });
+
+  const requests = [];
+  const server = http.createServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    requests.push(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+    const payload = requests.length === 1
+      ? {
+        status: "speak",
+        argument: "I used the cached summaries.",
+        objections: [],
+        confidence: 0.8,
+        memory_candidates: []
+      }
+      : {
+        answer: "Done.",
+        consensus_score: 0,
+        supporting_agents: ["Builder"],
+        dissenting_agents: [],
+        minority_report: "None.",
+        risks: [],
+        next_actions: [],
+        memory_candidates: []
+      };
+    writeOpenAiStream(res, JSON.stringify(payload));
+  });
+  await listen(server);
+  const address = server.address();
+  const apiBaseUrl = `http://127.0.0.1:${address.port}/v1`;
+
+  try {
+    const group = validateGroupConfig({
+      id: "summary-runtime",
+      name: "Summary Runtime",
+      settings: {
+        maxRounds: 1,
+        minConsensusWeight: 0.75,
+        stopWhenAllSkip: true,
+        agentTimeoutMs: 1000,
+        allowSoloCouncil: true
+      },
+      agents: [
+        {
+          id: "builder",
+          name: "Builder",
+          role: "Builder",
+          provider: "openai-compatible",
+          apiBaseUrl,
+          apiKey: "secret-runtime-key",
+          model: "runtime-model",
+          weight: 1,
+          enabled: true,
+          judge: true,
+          providerLimits: { contextWindow: 12000, maxOutputTokens: 1000 }
+        }
+      ]
+    });
+
+    await runCouncil("Question", group, tmp, { groupPath });
+    const prompt = requests[0].messages.at(-1).content;
+
+    assert.match(prompt, /Builder private summary from cache/);
+    assert.match(prompt, /Group shared summary from cache/);
+    assert.match(prompt, /Earlier transcript compressed into cache/);
+  } finally {
+    await close(server);
+  }
+});
+
+test("group sessions append deterministic compressed transcript chunks", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-chunk-"));
+  const groupPath = path.join(tmp, "group");
+  fs.mkdirSync(path.join(groupPath, "sessions"), { recursive: true });
+  fs.mkdirSync(path.join(groupPath, "shared", "cache"), { recursive: true });
+  fs.writeFileSync(path.join(groupPath, "group.json"), JSON.stringify({ seats: [] }, null, 2), "utf8");
+  const group = validateGroupConfig({
+    id: "mock",
+    name: "Mock",
+    settings: {
+      maxRounds: 1,
+      minConsensusWeight: 0.75,
+      stopWhenAllSkip: true,
+      agentTimeoutMs: 1000
+    },
+    agents: [
+      {
+        id: "builder",
+        name: "Builder",
+        role: "Build",
+        provider: "mock",
+        apiBaseUrl: "mock://local",
+        model: "mock-builder",
+        weight: 1,
+        enabled: true
+      },
+      {
+        id: "critic",
+        name: "Critic",
+        role: "Critique",
+        provider: "mock",
+        apiBaseUrl: "mock://local",
+        model: "mock-critic",
+        weight: 1,
+        enabled: true,
+        mandatoryRedTeam: true
+      },
+      {
+        id: "judge",
+        name: "Judge",
+        role: "Judge",
+        provider: "mock",
+        apiBaseUrl: "mock://local",
+        model: "mock-judge",
+        weight: 1,
+        enabled: true,
+        judge: true
+      }
+    ]
+  });
+
+  const result = await runCouncil("Question", group, tmp, { groupPath });
+  const chunkFile = path.join(groupPath, "shared", "cache", "compressed-transcript.jsonl");
+
+  assert.ok(result.transcriptChunk);
+  assert.equal(result.transcriptChunk.sourceSessionId, result.session.id);
+  assert.ok(fs.existsSync(chunkFile));
+  assert.match(fs.readFileSync(chunkFile, "utf8"), /Builder/);
+});
+
+test("group sessions update deterministic summaries after completion", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-summary-update-"));
+  const groupPath = path.join(tmp, "group");
+  fs.mkdirSync(path.join(groupPath, "members", "Builder", "private_memory"), { recursive: true });
+  fs.mkdirSync(path.join(groupPath, "sessions"), { recursive: true });
+  const workspaceGroup = {
+    groupPath,
+    seats: [
+      {
+        seatId: "builder",
+        displayName: "Builder",
+        currentModel: "mock-builder",
+        privateFolder: "members/Builder",
+        role: "Builder"
+      }
+    ]
+  };
+  fs.writeFileSync(path.join(groupPath, "group.json"), JSON.stringify(workspaceGroup, null, 2), "utf8");
+  const group = validateGroupConfig({
+    id: "summary-update",
+    name: "Summary Update",
+    settings: {
+      maxRounds: 1,
+      minConsensusWeight: 0.75,
+      stopWhenAllSkip: true,
+      agentTimeoutMs: 1000,
+      allowSoloCouncil: true
+    },
+    agents: [
+      {
+        id: "builder",
+        name: "Builder",
+        role: "Judge",
+        provider: "mock",
+        apiBaseUrl: "mock://local",
+        model: "mock-builder",
+        weight: 1,
+        enabled: true,
+        judge: true
+      }
+    ]
+  });
+
+  const result = await runCouncil("Summarize after run.", group, tmp, { groupPath });
+  const cache = readSummaryCache(groupPath, { id: "builder", name: "Builder" }, workspaceGroup);
+
+  assert.ok(result.summaryUpdate);
+  assert.match(cache.groupSharedSummary, /Question: Summarize after run/);
+  assert.match(cache.memberShortSummary, /Member: Builder/);
+});
+
+test("group sessions persist usage stats as state, not cache", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-usage-runtime-"));
+  const groupPath = path.join(tmp, "group");
+  fs.mkdirSync(path.join(groupPath, "members", "Builder", "private_memory"), { recursive: true });
+  fs.mkdirSync(path.join(groupPath, "sessions"), { recursive: true });
+  fs.writeFileSync(path.join(groupPath, "group.json"), JSON.stringify({
+    groupPath,
+    seats: [
+      {
+        seatId: "builder",
+        displayName: "Builder",
+        currentModel: "mock-builder",
+        privateFolder: "members/Builder",
+        role: "Builder"
+      }
+    ]
+  }, null, 2), "utf8");
+  const group = validateGroupConfig({
+    id: "usage-runtime",
+    name: "Usage Runtime",
+    settings: {
+      maxRounds: 1,
+      minConsensusWeight: 0.75,
+      stopWhenAllSkip: true,
+      agentTimeoutMs: 1000,
+      allowSoloCouncil: true
+    },
+    agents: [
+      {
+        id: "builder",
+        name: "Builder",
+        role: "Judge",
+        provider: "mock",
+        apiBaseUrl: "mock://local",
+        model: "mock-builder",
+        weight: 1,
+        enabled: true,
+        judge: true
+      }
+    ]
+  });
+
+  const result = await runCouncil("Question", group, tmp, { groupPath });
+  const groupUsage = readGroupUsage(groupPath);
+  const memberUsagePath = path.join(groupPath, "members", "Builder", "private_memory", "usage.jsonl");
+
+  assert.ok(result.usageRecord);
+  assert.equal(groupUsage.length, 1);
+  assert.equal(groupUsage[0].sessionId, result.session.id);
+  assert.ok(groupUsage[0].totals.estimatedInputTokens > 0);
+  assert.ok(fs.existsSync(memberUsagePath));
+});
+
+test("private boss messages are visible only to the addressed agent", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-private-context-"));
+  const groupPath = path.join(tmp, "group");
+  fs.mkdirSync(path.join(groupPath, "members", "Builder", "inbox"), { recursive: true });
+  fs.mkdirSync(path.join(groupPath, "members", "Builder", "private_memory"), { recursive: true });
+  fs.mkdirSync(path.join(groupPath, "members", "Critic", "inbox"), { recursive: true });
+  fs.mkdirSync(path.join(groupPath, "members", "Critic", "private_memory"), { recursive: true });
+  fs.mkdirSync(path.join(groupPath, "sessions"), { recursive: true });
+  fs.writeFileSync(path.join(groupPath, "group.json"), JSON.stringify({
+    groupPath,
+    seats: [
+      { seatId: "builder", displayName: "Builder", currentModel: "runtime-model", privateFolder: "members/Builder", role: "Builder" },
+      { seatId: "critic", displayName: "Critic", currentModel: "runtime-model", privateFolder: "members/Critic", role: "Critic" },
+      { seatId: "judge", displayName: "Judge", currentModel: "runtime-model", privateFolder: "members/Builder", role: "Judge" }
+    ]
+  }, null, 2), "utf8");
+  const privateText = "\u53ea\u7ed9 Builder \u7684\u79c1\u804a\u4e0a\u4e0b\u6587";
+  fs.appendFileSync(path.join(groupPath, "members", "Builder", "inbox", "private-chat.jsonl"), JSON.stringify({
+    id: "pm_test",
+    seatId: "builder",
+    audience: "builder",
+    text: privateText,
+    createdAt: "2026-06-21T10:00:00.000Z"
+  }) + "\n", "utf8");
+
+  const requests = [];
+  const server = http.createServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    requests.push(body);
+    writeOpenAiStream(res, JSON.stringify({
+      status: "skip",
+      reason: "No objection.",
+      memory_candidates: []
+    }));
+  });
+  await listen(server);
+  const apiBaseUrl = "http://127.0.0.1:" + server.address().port + "/v1";
+
+  try {
+    const baseAgent = {
+      provider: "openai-compatible",
+      apiBaseUrl,
+      apiKey: "secret-runtime-key",
+      model: "runtime-model",
+      weight: 1,
+      enabled: true,
+      providerLimits: { contextWindow: 12000, maxOutputTokens: 1000 }
+    };
+    const group = validateGroupConfig({
+      id: "private-context",
+      name: "Private Context",
+      settings: {
+        maxRounds: 1,
+        minConsensusWeight: 0.75,
+        stopWhenAllSkip: true,
+        agentTimeoutMs: 1000
+      },
+      agents: [
+        { ...baseAgent, id: "builder", name: "Builder", role: "Builder" },
+        { ...baseAgent, id: "critic", name: "Critic", role: "Critic", mandatoryRedTeam: true },
+        { ...baseAgent, id: "judge", name: "Judge", role: "Judge", judge: true }
+      ]
+    });
+
+    await runCouncil("Question", group, tmp, { groupPath });
+
+    const builderPrompt = requests[0].messages.at(-1).content;
+    const criticPrompt = requests[1].messages.at(-1).content;
+    assert.match(builderPrompt, /Private boss messages/);
+    assert.match(builderPrompt, /Builder/);
+    assert.doesNotMatch(criticPrompt, /Private boss messages/);
+    assert.doesNotMatch(criticPrompt, /Builder \u7684\u79c1\u804a\u4e0a\u4e0b\u6587/);
+  } finally {
+    await close(server);
+  }
+});
+
+test("private chat memory reaches the same agent in council for browser-only seats", async () => {
+  // \u590d\u73b0\u7528\u6237 bug\uff1a\u524d\u7aef\u5ea7\u4f4d\u53ea\u5b58\u5185\u5b58\uff0cgroup.json \u7684 seats \u4e3a\u7a7a\u3002
+  // \u79c1\u804a\u544a\u8bc9 AI \u540d\u5b57\u540e\uff0c\u4f1a\u8bae\u4e2d\u540c\u4e00\u4e2a AI \u5fc5\u987b\u80fd\u8bfb\u5230\u3002
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-private-browser-"));
+  const groupPath = path.join(tmp, "group");
+  fs.mkdirSync(path.join(groupPath, "sessions"), { recursive: true });
+  // seats \u4e3a\u7a7a\uff0c\u6a21\u62df\u524d\u7aef\u521b\u5efa\u7684\u5de5\u4f5c\u533a\uff08\u5ea7\u4f4d\u53ea\u5728\u6d4f\u89c8\u5668\u5185\u5b58\u4e2d\uff09
+  fs.writeFileSync(path.join(groupPath, "group.json"), JSON.stringify({
+    groupPath,
+    seats: []
+  }, null, 2), "utf8");
+
+  // \u79c1\u804a\u5199\u5165\uff08POST /api/private-chat \u7684\u8def\u5f84\uff0c\u5e26\u524d\u7aef seat\uff09
+  const frontendSeat = { seatId: "seat_01", displayName: "\u82cf\u683c\u62c9\u5e95", role: "\u54f2\u5b66\u5bb6" };
+  appendPrivateChatMessage(groupPath, "seat_01", "\u6211\u53eb\u5c0f\u660e\uff0c\u8bf7\u8bb0\u4f4f\u6211\u7684\u540d\u5b57", { from: "boss", seat: frontendSeat });
+
+  const requests = [];
+  const server = http.createServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    requests.push(body);
+    writeOpenAiStream(res, JSON.stringify({ status: "skip", reason: "No objection.", memory_candidates: [] }));
+  });
+  await listen(server);
+  const apiBaseUrl = "http://127.0.0.1:" + server.address().port + "/v1";
+
+  try {
+    const baseAgent = {
+      provider: "openai-compatible",
+      apiBaseUrl,
+      apiKey: "secret-runtime-key",
+      model: "runtime-model",
+      weight: 1,
+      enabled: true,
+      providerLimits: { contextWindow: 12000, maxOutputTokens: 1000 }
+    };
+    // \u4f1a\u8bae agent \u4e0e\u79c1\u804a seat \u540c\u6e90\uff1aid=seat.seatId\uff0cname=displayName
+    const group = validateGroupConfig({
+      id: "private-browser",
+      name: "Private Browser",
+      settings: { maxRounds: 1, minConsensusWeight: 0.75, stopWhenAllSkip: true, agentTimeoutMs: 1000 },
+      agents: [
+        { ...baseAgent, id: "seat_01", name: "\u82cf\u683c\u62c9\u5e95", role: "\u54f2\u5b66\u5bb6" },
+        { ...baseAgent, id: "seat_02", name: "\u67cf\u62c9\u56fe", role: "\u8d28\u68c0", judge: true, mandatoryRedTeam: true }
+      ]
+    });
+
+    await runCouncil("\u6211\u53eb\u4ec0\u4e48\uff1f", group, tmp, { groupPath });
+
+    const seat01Prompt = requests[0].messages.at(-1).content;
+    // \u4fee\u590d\u524d\uff1a\u5ea7\u4f4d\u8bfb\u53d6\u8d70 fallback \u53ea\u7528 seatId \u547d\u540d\uff0c\u8bfb\u4e0d\u5230\u79c1\u804a \u2192 \u8fd9\u91cc\u4f1a\u62a5\u9519
+    assert.match(seat01Prompt, /Private boss messages/);
+    assert.match(seat01Prompt, /\u6211\u53eb\u5c0f\u660e/);
+  } finally {
+    await close(server);
+  }
+});
+
+
+test("no explicit judge uses the last effective speaker as fallback finalizer", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-no-judge-"));
+  const calls = [];
+  const group = validateGroupConfig({
+    id: "no-judge",
+    name: "No Judge",
+    settings: {
+      maxRounds: 1,
+      minConsensusWeight: 1,
+      stopWhenAllSkip: true,
+      agentTimeoutMs: 1000
+    },
+    agents: [
+      {
+        id: "builder",
+        name: "Builder",
+        role: "Build",
+        provider: "mock",
+        apiBaseUrl: "mock://local",
+        model: "mock-builder",
+        weight: 1,
+        enabled: true
+      },
+      {
+        id: "plain-judge-name",
+        name: "Judge Name Only",
+        role: "Judge",
+        provider: "mock",
+        apiBaseUrl: "mock://local",
+        model: "mock-judge-name-only",
+        weight: 1,
+        enabled: true
+      }
+    ]
+  });
+
+  const { session } = await runCouncil("Question", group, tmp, { onModelCall: (call) => calls.push(call) });
+  const finalCall = calls.find((call) => call.phase === "final");
+
+  assert.equal(finalCall.agentId, "plain-judge-name");
+  assert.equal(session.finalDecision.final_state, "ready_to_execute");
+  assert.equal(session.groupSnapshot.agents.find((agent) => agent.id === "plain-judge-name").judge, undefined);
+});
+
+test("explicit reviewer skip is forced in round one but ordinary critic may skip", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-reviewer-skip-"));
+  const requests = [];
+  const server = http.createServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    requests.push(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+    writeOpenAiStream(res, JSON.stringify({ status: "skip", reason: "No objection." }));
+  });
+  await listen(server);
+  const apiBaseUrl = "http://127.0.0.1:" + server.address().port + "/v1";
+
+  try {
+    const baseAgent = {
+      provider: "openai-compatible",
+      apiBaseUrl,
+      apiKey: "secret-runtime-key",
+      model: "runtime-model",
+      weight: 1,
+      enabled: true,
+      providerLimits: { contextWindow: 12000, maxOutputTokens: 1000 }
+    };
+    const group = validateGroupConfig({
+      id: "reviewer-skip",
+      name: "Reviewer Skip",
+      settings: { maxRounds: 1, minConsensusWeight: 1, stopWhenAllSkip: true, agentTimeoutMs: 1000 },
+      agents: [
+        { ...baseAgent, id: "critic-name-only", name: "Critic", role: "Critic" },
+        { ...baseAgent, id: "reviewer", name: "Reviewer", role: "Architect", reviewer: true, mandatoryRedTeam: true, reviewIntensity: 1 }
+      ]
+    });
+
+    const { session } = await runCouncil("Question", group, tmp);
+    const critic = session.messages.find((message) => message.agentId === "critic-name-only");
+    const reviewer = session.messages.find((message) => message.agentId === "reviewer");
+
+    assert.equal(critic.response.status, "skip");
+    assert.equal(reviewer.response.status, "speak");
+    assert.equal(reviewer.response.position, "reviewer_required");
+    assert.equal(requests.length, 3);
+  } finally {
+    await close(server);
+  }
+});
+
+test("cycle continuation context is injected into the next council prompt", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-cycle-continuation-"));
+  const requests = [];
+  const server = http.createServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    requests.push(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+    writeOpenAiStream(res, JSON.stringify({ status: "skip", reason: "Continuation acknowledged." }));
+  });
+  await listen(server);
+  const apiBaseUrl = "http://127.0.0.1:" + server.address().port + "/v1";
+
+  try {
+    const baseAgent = {
+      provider: "openai-compatible",
+      apiBaseUrl,
+      apiKey: "secret-runtime-key",
+      model: "runtime-model",
+      weight: 1,
+      enabled: true,
+      providerLimits: { contextWindow: 12000, maxOutputTokens: 1000 }
+    };
+    const group = validateGroupConfig({
+      id: "cycle",
+      name: "Cycle",
+      settings: { maxRounds: 1, minConsensusWeight: 1, stopWhenAllSkip: true, agentTimeoutMs: 1000 },
+      agents: [
+        { ...baseAgent, id: "builder", name: "Builder", role: "Builder" },
+        { ...baseAgent, id: "finalizer", name: "Finalizer", role: "Finalizer", judge: true }
+      ]
+    });
+
+    const { session } = await runCouncil("继续细化上一轮方案", group, tmp, {
+      continuationContext: {
+        previousSessionId: "session_previous",
+        previousQuestion: "上一轮问题",
+        finalState: "usable_with_risks",
+        finalAnswer: "上一轮最终结论",
+        summary: "上一轮压缩摘要",
+        blockingIssues: [{ id: "risk-1", issue: "阻断问题仍未解决" }],
+        risks: ["非阻断风险"],
+        nextActions: ["下一步动作"]
+      }
+    });
+
+    const firstPrompt = requests[0].messages.at(-1).content;
+    assert.equal(session.continuationContext.previousSessionId, "session_previous");
+    assert.match(firstPrompt, /Cycle continuation/);
+    assert.match(firstPrompt, /Previous session: session_previous/);
+    assert.match(firstPrompt, /上一轮最终结论/);
+    assert.match(firstPrompt, /阻断问题仍未解决/);
+    assert.match(firstPrompt, /下一步动作/);
+  } finally {
+    await close(server);
+  }
+});
+
+function git(cwd, args) {
+  return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+}
+
+function writeOpenAiStream(res, text) {
+  res.writeHead(200, { "Content-Type": "text/event-stream; charset=utf-8" });
+  res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: text } }] })}\n\n`);
+  res.write("data: [DONE]\n\n");
+  res.end();
+}
+
+function listen(server) {
+  return new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+}
+
+function close(server) {
+  return new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+}

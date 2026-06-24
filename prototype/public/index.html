@@ -1,0 +1,320 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>AI Council</title>
+    <link rel="stylesheet" href="./styles.css?v=review-intensity-1">
+  </head>
+  <body>
+    <main class="app">
+      <aside class="project-sidebar" aria-label="Groups">
+        <div class="sidebar-head">
+          <strong data-i18n="groupsTitle">&#23567;&#32452;</strong>
+          <button id="newGroupFromSidebar" class="sidebar-icon" type="button" data-i18n-title="newGroup" title="&#26032;&#24314;&#23567;&#32452;" aria-label="&#26032;&#24314;&#23567;&#32452;">+</button>
+        </div>
+        <input id="groupSearch" class="sidebar-search" data-i18n-placeholder="searchGroups" placeholder="&#25628;&#32034;&#23567;&#32452;">
+        <div class="sidebar-section">
+          <p class="sidebar-label" data-i18n="pinnedGroups">&#32622;&#39030;</p>
+          <div id="pinnedGroups" class="group-list"></div>
+        </div>
+        <div class="sidebar-section">
+          <p class="sidebar-label" data-i18n="recentGroups">&#26368;&#36817;&#23567;&#32452;</p>
+          <div id="sidebarGroups" class="group-list"></div>
+        </div>
+      </aside>
+
+      <section class="workspace-shell">
+      <header class="command-bar">
+        <div class="brand">
+          <h1>AI Council</h1>
+          <p id="status" class="muted" data-i18n="ready">&#23601;&#32490;&#12290;</p>
+        </div>
+
+
+        <nav class="workspace-tools" aria-label="Workspace tools">
+          <button type="button" class="tool-entry primary" data-open-panel="requirement" data-i18n="globalRequirement">&#20840;&#23616;&#35201;&#27714;</button>
+          <button type="button" class="tool-entry primary" data-open-panel="decisions" data-i18n="decisions">&#20250;&#35758;&#20915;&#35758;</button>
+          <button type="button" class="tool-entry secondary" data-open-panel="settings" data-i18n="toolsSettings">&#24037;&#20855;</button>
+        </nav>
+        <div class="mode-controls">
+          <button id="pauseCouncil" class="control-button" type="button" data-i18n="pauseDiscussion">&#26242;&#20572;&#35752;&#35770;</button>
+          <button id="stopCouncil" class="control-button danger-button" type="button" data-i18n="stopAll">&#20840;&#20307;&#20572;&#27490;</button>
+          <div class="segmented wide" aria-label="Conversation mode">
+            <button id="modeTable" class="active" type="button" data-i18n="modeTable">&#26700;&#38754;</button>
+            <button id="modeSide" type="button" data-i18n="modeSide">&#21491;&#20391;</button>
+          </div>
+          <label class="zoom-control">
+            <span data-i18n="zoom">&#32553;&#25918;</span>
+            <input id="tableZoom" type="range" min="82" max="122" value="100">
+          </label>
+          <div class="segmented" aria-label="Language">
+            <button id="langZh" type="button">&#20013;&#25991;</button>
+            <button id="langEn" type="button">EN</button>
+          </div>
+        </div>
+      </header>
+
+      <section class="main-grid">
+        <section class="table-zone">
+          <div class="table-tools" data-window-drag="table">
+            <div>
+              <h2 id="groupName" data-i18n="noGroup">&#26410;&#21152;&#36733;&#23567;&#32452;</h2>
+            </div>
+            <div class="table-actions">
+              <label class="rounds-control">
+                <span data-i18n="autonomousRounds">&#33258;&#20027;&#36718;&#27425;</span>
+                <input id="autonomousRounds" type="number" min="1" max="100" step="1" value="10">
+              </label>
+              <button id="checkAllSeats" class="control-button" type="button" data-i18n="checkAllSeats">&#26816;&#26597;&#25152;&#26377;&#24109;&#20301;</button>
+              <button class="icon-button" type="button" data-window-action="popout" data-window-target="table" data-i18n-title="popOut" title="&#24377;&#20986;" aria-label="&#24377;&#20986;">&#10697;</button>
+              <button class="icon-button" type="button" data-window-action="fullscreen" data-window-target="table" data-i18n-title="fullscreen" title="&#20840;&#23631;" aria-label="&#20840;&#23631;">&#9974;</button>
+              <button class="icon-button" type="button" data-window-action="restore" data-window-target="table" data-i18n-title="restoreWindow" title="&#36824;&#21407;" aria-label="&#36824;&#21407;">&#8601;</button>
+            </div>
+          </div>
+
+          <div class="poker-stage">
+            <div class="council-table strict-horizontal-table" id="councilTable">
+              <div class="owner-seat" id="ownerSeat">
+                <button class="avatar-button owner-avatar" id="ownerAvatar" type="button" title="&#37197;&#32622;&#32769;&#26495;">
+                  <span class="avatar-initial">B</span>
+                </button>
+                <input id="ownerLabel" class="seat-label-input" data-i18n-placeholder="ownerLabel" placeholder="&#32769;&#26495;">
+              </div>
+
+              <div class="table-felt">
+              <div id="tableConversation" class="table-conversation empty" data-i18n="noMessages">&#26242;&#26080;&#28040;&#24687;&#12290;</div>
+              </div>
+              <div id="membersList" class="seat-ring empty" data-i18n="noGroupLoaded">&#23578;&#26410;&#21152;&#36733;&#23567;&#32452;&#12290;</div>
+            </div>
+            <div id="tableResizeHandle" class="resize-handle resize-handle-corner" data-resize-edge="corner" data-i18n-title="resizeTable" title="&#35843;&#25972;&#26700;&#38754;" aria-label="&#35843;&#25972;&#26700;&#38754;"></div>
+            <div class="resize-edge resize-edge-right" data-resize-edge="right" data-i18n-title="resizeTable" title="&#35843;&#25972;&#26700;&#38754;"></div>
+            <div class="resize-edge resize-edge-bottom" data-resize-edge="bottom" data-i18n-title="resizeTable" title="&#35843;&#25972;&#26700;&#38754;"></div>
+          </div>
+        </section>
+
+        <aside class="right-panel transcript-only" id="rightPanel">
+          <div id="rightPanelResize" class="right-panel-resize" data-i18n-title="resizeTranscript" title="&#35843;&#25972;&#23545;&#35805;&#21306;" aria-label="&#35843;&#25972;&#23545;&#35805;&#21306;"></div>
+          <section class="panel-section transcript-section">
+            <div class="panel-head" data-window-drag="transcript">
+              <h2 data-i18n="conversation">&#23545;&#35805;&#35760;&#24405;</h2>
+              <div class="panel-head-actions">
+                <span class="tag" id="conversationModeTag" data-i18n="modeTable">&#26700;&#38754;</span>
+                <button class="icon-button" type="button" data-window-action="popout" data-window-target="transcript" data-i18n-title="popOut" title="&#24377;&#20986;" aria-label="&#24377;&#20986;">&#10697;</button>
+                <button class="icon-button" type="button" data-window-action="fullscreen" data-window-target="transcript" data-i18n-title="fullscreen" title="&#20840;&#23631;" aria-label="&#20840;&#23631;">&#9974;</button>
+                <button class="icon-button" type="button" data-window-action="restore" data-window-target="transcript" data-i18n-title="restoreWindow" title="&#36824;&#21407;" aria-label="&#36824;&#21407;">&#8601;</button>
+              </div>
+            </div>
+            <div id="conversation" class="conversation empty" data-i18n="noMessages">&#26242;&#26080;&#28040;&#24687;&#12290;</div>
+            <div id="panelTray" class="panel-tray" aria-label="Minimized panels"></div>
+            <div class="conversation-composer">
+              <input id="bossInterjection" data-i18n-placeholder="bossInput" placeholder="&#32769;&#26495;&#20808;&#21457;&#35805;">
+              <button id="sendBossInterjection" type="button" data-i18n="sendInterjection">&#21457;&#36865;</button>
+            </div>
+          </section>
+        </aside>
+      </section>
+
+      <div id="toolPanels" class="tool-panels">
+        <section id="membersPanel" class="tool-panel" data-tool-panel="members" hidden>
+          <div class="tool-panel-head" data-panel-drag="members">
+            <h2 data-i18n="members">&#25104;&#21592;</h2>
+            <div class="panel-head-actions">
+              <button class="icon-button" type="button" data-panel-action="minimize" data-panel-target="members" data-i18n-title="minimizePanel" title="&#26368;&#23567;&#21270;">&#8722;</button>
+              <button class="icon-button" type="button" data-panel-action="close" data-panel-target="members" data-i18n-title="closePanel" title="&#20851;&#38381;">&#215;</button>
+            </div>
+          </div>
+          <section class="panel-section compact-tools">
+            <details open>
+              <summary data-i18n="replaceMemberTitle">&#26367;&#25442;&#25104;&#21592;</summary>
+              <label><span data-i18n="seat">&#24109;&#20301;</span><input id="replaceSeat" value="seat_01"></label>
+              <label><span data-i18n="nextName">&#26032;&#21517;&#31216;</span><input id="nextName" value="gpt-6"></label>
+              <label class="check"><input id="newFolder" type="checkbox"> <span data-i18n="newPrivateFolder">&#26032;&#31169;&#20154;&#25991;&#20214;&#22841;</span></label>
+              <label><span data-i18n="folderName">&#25991;&#20214;&#22841;&#21517;</span><input id="folderName" value="gpt-6-fresh"></label>
+              <button id="replaceMember" type="button" data-i18n="replace">&#26367;&#25442;</button>
+            </details>
+            <div id="recentGroups" class="recent"></div>
+          </section>
+          <div class="tool-panel-resize" data-panel-resize="members"></div>
+        </section>
+
+        <section id="requirementPanel" class="tool-panel" data-tool-panel="requirement" hidden>
+          <div class="tool-panel-head" data-panel-drag="requirement">
+            <h2 data-i18n="globalRequirement">&#20840;&#23616;&#35201;&#27714;</h2>
+            <div class="panel-head-actions">
+              <button class="icon-button" type="button" data-panel-action="minimize" data-panel-target="requirement" data-i18n-title="minimizePanel" title="&#26368;&#23567;&#21270;">&#8722;</button>
+              <button class="icon-button" type="button" data-panel-action="close" data-panel-target="requirement" data-i18n-title="closePanel" title="&#20851;&#38381;">&#215;</button>
+            </div>
+          </div>
+          <section class="panel-section requirement-section">
+            <div class="panel-head">
+              <h2 data-i18n="globalRequirement">&#20840;&#23616;&#35201;&#27714;</h2>
+              <button id="saveGlobalRequirement" type="button" data-i18n="confirm">&#30830;&#35748;</button>
+            </div>
+            <input id="globalRequirement" data-i18n-placeholder="globalRequirementPlaceholder" placeholder="&#32473;&#25152;&#26377; AI &#30340;&#32422;&#26463;">
+          </section>
+          <div class="tool-panel-resize" data-panel-resize="requirement"></div>
+        </section>
+
+        <section id="decisionsPanel" class="tool-panel wide-tool-panel" data-tool-panel="decisions" hidden>
+          <div class="tool-panel-head" data-panel-drag="decisions">
+            <h2 data-i18n="decisions">&#20250;&#35758;&#20915;&#35758;</h2>
+            <div class="panel-head-actions">
+              <button class="icon-button" type="button" data-panel-action="minimize" data-panel-target="decisions" data-i18n-title="minimizePanel" title="&#26368;&#23567;&#21270;">&#8722;</button>
+              <button class="icon-button" type="button" data-panel-action="close" data-panel-target="decisions" data-i18n-title="closePanel" title="&#20851;&#38381;">&#215;</button>
+            </div>
+          </div>
+          <section class="panel-section decisions-section">
+            <div class="panel-head">
+              <h2 data-i18n="decisions">&#24635;&#32467;</h2>
+            </div>
+            <div id="decisionPanel" class="decision-panel empty"></div>
+            <div id="decisionAdvancedTools" hidden>
+              <div class="panel-head-actions">
+                <button id="prepareStandards" type="button" data-i18n="prepareStandards" data-i18n-title="prepareStandardsTitle" title="&#29983;&#25104;&#25191;&#34892;&#26631;&#20934;&#21644;&#26816;&#27979;&#26631;&#20934;&#65292;&#19981;&#25191;&#34892;&#25991;&#20214;&#25805;&#20316;&#12290;">&#29983;&#25104;&#25191;&#34892;&#26631;&#20934;</button>
+                <button id="approveStandards" type="button" data-i18n="approveStandards" data-i18n-title="approveStandardsTitle" title="&#30830;&#35748;&#36825;&#20123;&#26631;&#20934;&#21487;&#29992;&#20110;&#21518;&#32493;&#39564;&#25910;&#65292;&#19981;&#25191;&#34892;&#25991;&#20214;&#25805;&#20316;&#12290;">&#30830;&#35748;&#26631;&#20934;</button>
+                <button id="confirmDecision" type="button" data-i18n="confirmDecision" data-i18n-title="confirmDecisionTitle" title="&#25226;&#24403;&#21069;&#26368;&#32456;&#32467;&#35770;&#20445;&#23384;&#21040;&#20915;&#35758;&#21382;&#21490;&#65292;&#19981;&#33258;&#21160;&#25191;&#34892;&#12290;">&#20445;&#23384;&#26412;&#27425;&#32467;&#35770;</button>
+              </div>
+              <div id="standardsPanel" class="standards-panel empty" data-i18n="noStandards">&#23578;&#26410;&#20934;&#22791;&#25191;&#34892;&#26631;&#20934;&#12290;</div>
+              <div class="file-ops-wrap">
+                <div class="file-ops-head">
+                  <strong data-i18n="fileOperations">&#25991;&#20214;&#25552;&#35758;</strong>
+                  <button id="refreshFileOperations" type="button" data-i18n="refresh">&#21047;&#26032;</button>
+                </div>
+                <div id="fileOperationsPanel" class="file-ops-panel empty" data-i18n="noFileOperations">&#26242;&#26080;&#25991;&#20214;&#25805;&#20316;&#25552;&#35758;&#12290;</div>
+              </div>
+              <div id="decisionHistory" class="decision-history empty" data-i18n="noDecisions">&#26242;&#26080;&#20915;&#35758;&#12290;</div>
+            </div>
+          </section>
+          <div class="tool-panel-resize" data-panel-resize="decisions"></div>
+        </section>
+
+        <section id="settingsPanel" class="tool-panel" data-tool-panel="settings" hidden>
+          <div class="tool-panel-head" data-panel-drag="settings">
+            <h2 data-i18n="toolsSettings">&#24037;&#20855;</h2>
+            <div class="panel-head-actions">
+              <button class="icon-button" type="button" data-panel-action="minimize" data-panel-target="settings" data-i18n-title="minimizePanel" title="&#26368;&#23567;&#21270;">&#8722;</button>
+              <button class="icon-button" type="button" data-panel-action="close" data-panel-target="settings" data-i18n-title="closePanel" title="&#20851;&#38381;">&#215;</button>
+            </div>
+          </div>
+          <section class="panel-section settings-section">
+            <button type="button" data-open-panel="members" data-i18n="memberManagement">&#25104;&#21592;&#31649;&#29702;</button>
+            <div class="permission-control">
+              <label><span data-i18n="permissionTier">&#26435;&#38480;</span><select id="globalPermissionTier"></select></label>
+              <button id="applyGlobalPermission" type="button" data-i18n="applyAllPermissions">&#20840;&#20307;&#24212;&#29992;</button>
+            </div>
+            <div id="usageSummary" class="usage-summary empty" data-i18n="usageEmpty">&#26242;&#26080;&#29992;&#37327;&#35760;&#24405;&#12290;</div>
+          </section>
+          <section class="panel-section drafts-section">
+            <div class="panel-head">
+              <h2 data-i18n="recorderDraft">&#35760;&#24405;&#33609;&#31295;</h2>
+              <button id="createFromFinal" type="button" data-i18n="createFromFinal">&#32467;&#35770;&#21019;&#24314;&#33609;&#31295;</button>
+            </div>
+            <div class="draft-form">
+              <label><span data-i18n="recorderSeat">&#35760;&#24405;&#24109;</span><input id="recorder" value="seat_01"></label>
+              <label><span data-i18n="reviewers">&#22797;&#26597;&#24109;</span><input id="reviewers" value="seat_02"></label>
+              <label class="wide-field"><span data-i18n="content">&#20869;&#23481;</span><textarea id="draftContent">&#30028;&#38754;&#20445;&#25345;&#31616;&#27905;&#65292;&#25152;&#26377;&#21457;&#35328;&#20445;&#30041;&#12300;&#35282;&#33394;&#21517;&#35828;&#65306;&#20869;&#23481;&#12301;&#26684;&#24335;&#12290;</textarea></label>
+              <button id="createDraft" type="button" data-i18n="createDraft">&#21019;&#24314;&#33609;&#31295;</button>
+            </div>
+            <div class="filterbar" aria-label="Draft filters">
+              <button class="filter active" type="button" data-filter="" data-i18n="filterAll">&#20840;&#37096;</button>
+              <button class="filter" type="button" data-filter="pending_review" data-i18n="filterReview">&#24453;&#22797;&#26597;</button>
+              <button class="filter" type="button" data-filter="changes_requested" data-i18n="filterChanges">&#38656;&#20462;&#25913;</button>
+              <button class="filter" type="button" data-filter="pending_user_final_approval" data-i18n="filterApproval">&#24453;&#25209;&#20934;</button>
+              <button class="filter" type="button" data-filter="approved" data-i18n="filterApproved">&#24050;&#25209;&#20934;</button>
+            </div>
+            <div id="drafts" class="list"></div>
+          </section>
+          <div class="tool-panel-resize" data-panel-resize="settings"></div>
+        </section>
+      </div>
+      </section>
+    </main>
+
+    <div id="seatMenu" class="seat-menu" hidden>
+      <button type="button" data-seat-action="stopOne" data-i18n="stopOne">&#21333;&#20010;&#20572;&#27490;</button>
+      <button type="button" data-seat-action="kick" data-i18n="kick">&#36386;&#20986;&#22278;&#26700;</button>
+      <button type="button" data-seat-action="muteRound" data-i18n="muteRound">&#26412;&#36718;&#31105;&#35328;</button>
+      <button type="button" data-seat-action="muteForever" data-i18n="muteForever">&#27704;&#20037;&#31105;&#35328;</button>
+      <button type="button" data-seat-action="unmute" data-i18n="unmute">&#35299;&#38500;&#31105;&#35328;</button>
+      <button type="button" data-seat-action="permission" data-i18n="modifyPermission">&#20462;&#25913;&#26435;&#38480;</button>
+      <button type="button" data-seat-action="configure" data-i18n="configureApi">&#20462;&#25913;API&#37197;&#32622;</button>
+    </div>
+
+    <div id="groupMenu" class="seat-menu group-menu" hidden>
+      <button type="button" data-group-action="open" data-i18n="openGroup">&#25171;&#24320;</button>
+      <button type="button" data-group-action="pin" data-i18n="pinGroup">&#32622;&#39030;</button>
+      <button type="button" data-group-action="rename" data-i18n="renameGroup">&#37325;&#21629;&#21517;</button>
+      <button type="button" data-group-action="removeRecord" data-i18n="removeGroupRecord">&#21024;&#38500;&#35760;&#24405;</button>
+    </div>
+
+    <dialog id="groupDialog" class="seat-dialog group-dialog">
+      <form method="dialog">
+        <h2 data-i18n="newGroup">&#26032;&#24314;&#23567;&#32452;</h2>
+        <label><span data-i18n="groupNameLabel">&#23567;&#32452;&#21517;&#31216;</span><input id="groupFolderName" value="demo-group" data-i18n-placeholder="groupNamePlaceholder" placeholder="demo-group"></label>
+        <label><span data-i18n="groupsRoot">&#25152;&#26377;&#23567;&#32452;&#25991;&#20214;&#22841;</span><input id="groupsRoot" value="./workspace-ui"></label>
+        <label class="group-path-preview"><span data-i18n="actualGroupPath">&#23454;&#38469;&#36335;&#24452;</span><input id="groupPath" value="./workspace-ui/demo-group"></label>
+        <p class="permission-note" data-i18n="groupsRootNote">&#26032;&#24314;&#23567;&#32452;&#40664;&#35748;&#25918;&#22312;&#19978;&#38754;&#30340;&#24635;&#25991;&#20214;&#22841;&#19979;&#12290;&#12300;&#36873;&#25321;&#12301;&#29992;&#20110;&#26356;&#25442;&#24635;&#25991;&#20214;&#22841;&#25110;&#36733;&#20837;&#24050;&#26377;&#23567;&#32452;&#12290;</p>
+        <div class="group-dialog-actions">
+          <button id="chooseGroupFolder" type="button" data-i18n="chooseFolder">&#36873;&#25321;</button>
+          <button id="loadGroup" type="button" data-i18n="load">&#21152;&#36733;</button>
+          <button id="createGroup" type="button" data-i18n="createGroup">&#21019;&#24314;</button>
+          <button value="cancel" type="submit" data-i18n="cancel">&#21462;&#28040;</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="ownerDialog" class="seat-dialog">
+      <form method="dialog">
+        <h2 data-i18n="configureOwner">&#37197;&#32622;&#32769;&#26495;</h2>
+        <label><span data-i18n="ownerName">&#32769;&#26495;&#21517;&#31216;</span><input id="ownerDialogName" data-i18n-placeholder="ownerLabel" placeholder="&#32769;&#26495;"></label>
+        <label><span data-i18n="avatar">&#22836;&#20687;</span><input id="ownerDialogAvatar" type="file" accept="image/*"></label>
+        <div class="dialog-actions">
+          <button value="cancel" type="submit" data-i18n="cancel">&#21462;&#28040;</button>
+          <button id="saveOwnerConfig" value="default" type="button" data-i18n="save">&#20445;&#23384;</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="seatDialog" class="seat-dialog seat-config-dialog">
+      <form method="dialog">
+        <h2 class="dialog-title" data-i18n="configureSeat">&#37197;&#32622;&#24109;&#20301;</h2>
+        <input id="dialogSeatId" type="hidden">
+        <label><span data-i18n="providerPreset">Provider</span><select id="dialogProviderPreset"></select></label>
+        <label><span data-i18n="apiUrl">API URL</span><input id="dialogApiUrl" placeholder="https://api.example.com/v1"></label>
+        <div class="provider-actions dialog-wide"><button id="useOfficialProviderUrl" type="button" data-i18n="useOfficialUrl">Use official URL</button><button id="checkProviderHealth" type="button" data-i18n="checkProviderHealth">&#26816;&#26597;&#36830;&#25509;</button><button id="detectProviderModels" type="button" data-i18n="detectModels">Detect models</button></div>
+        <p id="providerDetectionStatus" class="permission-note provider-detection-status dialog-wide"></p>
+        <label><span data-i18n="apiKey">API Key</span><input id="dialogApiKey" type="password" autocomplete="off" placeholder="sk-..."></label>
+        <label><span data-i18n="modelName">&#27169;&#22411;&#21517;</span><input id="dialogModelName" data-i18n-placeholder="modelPlaceholder" placeholder="deepseek-chat"></label>
+        <label class="model-candidates-row"><span data-i18n="detectedModels">&#26816;&#27979;&#21040;&#30340;&#27169;&#22411;</span><select id="dialogModelCandidates" disabled><option value="" data-i18n="noDetectedModels">&#20808;&#26816;&#27979;&#27169;&#22411;</option></select></label>
+        <label><span data-i18n="permissionTier">&#26435;&#38480;</span><select id="dialogPermissionTier"></select></label>
+        <label><span data-i18n="roleName">&#35282;&#33394;&#21517;&#31216;</span><input id="dialogRoleName" placeholder="&#23548;&#28436;"></label>
+        <label class="check reviewer-toggle"><input id="dialogReviewer" type="checkbox"> <span data-i18n="setReviewer">&#35774;&#20026;&#23457;&#26597;&#32773;</span></label>
+        <label class="review-intensity-control"><span data-i18n="reviewIntensity">&#23457;&#26597;&#21147;&#24230;</span><input id="dialogReviewIntensity" type="range" min="1" max="3" step="1" value="2"><output id="dialogReviewIntensityValue" for="dialogReviewIntensity"></output></label>
+        <p id="reviewIntensityNote" class="permission-note review-intensity-note dialog-wide"></p>
+        <label><span data-i18n="avatar">&#22836;&#20687;</span><input id="dialogAvatar" type="file" accept="image/*"></label>
+        <p class="permission-note dialog-wide" data-i18n="apiPermissionNote">&#27169;&#22411; API &#21482;&#25509;&#25910;&#25991;&#26412;&#28040;&#24687;&#65292;&#19981;&#20250;&#33719;&#24471;&#26412;&#22320;&#25991;&#20214;&#35835;&#20889;&#26435;&#38480;&#12290;</p>
+        <div class="dialog-actions dialog-wide">
+          <button id="clearGroupApiKeys" value="clear" type="button" data-i18n="clearGroupApiKeys">&#28165;&#38500;&#26412;&#32452; Key</button>
+          <button value="cancel" type="submit" data-i18n="cancel">&#21462;&#28040;</button>
+          <button id="saveSeatConfig" value="default" type="button" data-i18n="save">&#20445;&#23384;</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="privateDialog" class="seat-dialog private-dialog">
+      <form method="dialog">
+        <h2 id="privateChatTitle">&#31169;&#32842;</h2>
+        <input id="privateSeatId" type="hidden">
+        <div id="privateChatLog" class="private-chat-log"></div>
+        <label><span data-i18n="privateInstruction">&#21333;&#29420;&#25351;&#20196;</span><textarea id="privateInstruction" placeholder="&#21482;&#21457;&#32473;&#36825;&#20010; Agent &#30340;&#25351;&#20196;"></textarea></label>
+        <div class="dialog-actions">
+          <button value="cancel" type="submit" data-i18n="cancel">&#21462;&#28040;</button>
+          <button id="sendPrivateInstruction" value="default" type="button" data-i18n="sendInterjection">&#21457;&#36865;</button>
+        </div>
+      </form>
+    </dialog>
+
+    <script type="module" src="./app.js?v=review-intensity-1"></script>
+  </body>
+</html>

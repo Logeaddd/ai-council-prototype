@@ -1,0 +1,26 @@
+{
+  "name": "ai-council-prototype",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "main": "./desktop/main.mjs",
+  "bin": {
+    "ai-council": "./src/cli.js"
+  },
+  "scripts": {
+    "start": "node ./src/cli.js",
+    "smoke": "node ./src/cli.js run --question \"Should we build the AI council prototype CLI-first?\" --group ./config/group.example.json",
+    "smoke:real": "node ./src/cli.js run --question \"Should this real API smoke test proceed?\" --group ./config/group.real.json --show-transcript",
+    "workspace:demo": "node ./src/cli.js workspace init-group --root ./workspace-demo --group-folder demo-group --members gpt-5,claude",
+    "write-flow:demo": "node ./src/cli.js write-flow create-draft --group-path ./workspace-demo/demo-group --recorder seat_01 --reviewers seat_02 --content \"Demo recorder draft.\"",
+    "ui": "node ./src/server.js",
+    "desktop": "electron ./desktop/main.mjs",
+    "test": "node --test test/*.test.js",
+    "show-memory": "node ./src/cli.js list-memory-pending",
+    "desktop:shortcut": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/install-desktop-shortcut.ps1",
+    "desktop:portable": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/build-portable.ps1"
+  },
+  "devDependencies": {
+    "electron": "^38.0.0"
+  }
+}

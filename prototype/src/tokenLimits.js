@@ -1,0 +1,139 @@
+const DEFAULT_CONTEXT_WINDOW = 16000;
+const DEFAULT_MAX_OUTPUT_TOKENS = 2048;
+const DEFAULT_WARNING_THRESHOLD = 0.6;
+const DEFAULT_COMPRESSION_THRESHOLD = 0.75;
+const DEFAULT_HARD_STOP_THRESHOLD = 0.9;
+const DEFAULT_SAFETY_MARGIN = 0.15;
+
+export function estimateTokens(text, options = {}) {
+  const value = String(text ?? "");
+  if (!value) return 0;
+
+  const safetyMargin = numberOr(options.safetyMargin, DEFAULT_SAFETY_MARGIN);
+  const base = estimateBaseTokens(value, options.contentType);
+  return Math.ceil(base * (1 + safetyMargin));
+}
+
+export function estimateMessagesTokens(messages, options = {}) {
+  const messageOverhead = numberOr(options.messageOverhead, 4);
+  const base = (messages || []).reduce((sum, message) => {
+    return sum
+      + estimateTokens(message?.role || "", options)
+      + estimateTokens(message?.content || "", options)
+      + messageOverhead;
+  }, 0);
+  return Math.ceil(base);
+}
+
+export function resolveEffectiveLimits(agent = {}, groupSettings = {}) {
+  const provider = agent.providerLimits || {};
+  const soft = {
+    ...(groupSettings.tokenLimits || {}),
+    ...(agent.tokenLimits || {})
+  };
+
+  const providerContextWindow = positiveNumber(provider.contextWindow) ?? DEFAULT_CONTEXT_WINDOW;
+  const providerMaxOutput = positiveNumber(provider.maxOutputTokens) ?? DEFAULT_MAX_OUTPUT_TOKENS;
+  const softMaxOutput = positiveNumber(soft.maxOutputTokensPerCall) ?? providerMaxOutput;
+  const effectiveOutputLimit = Math.max(1, Math.min(providerMaxOutput, softMaxOutput));
+  const requestedReserved = positiveNumber(soft.reservedOutputTokens) ?? effectiveOutputLimit;
+  const reservedOutputTokens = Math.max(requestedReserved, effectiveOutputLimit);
+  const providerInputLimit = Math.max(1, providerContextWindow - reservedOutputTokens);
+  const softInputLimit = positiveNumber(soft.maxInputTokensPerCall) ?? providerInputLimit;
+  const effectiveInputLimit = Math.max(1, Math.min(providerInputLimit, softInputLimit));
+
+  return {
+    contextWindow: providerContextWindow,
+    effectiveInputLimit,
+    effectiveOutputLimit,
+    reservedOutputTokens,
+    warningThreshold: clampRatio(soft.warningThreshold, DEFAULT_WARNING_THRESHOLD),
+    compressionThreshold: clampRatio(soft.compressionThreshold, DEFAULT_COMPRESSION_THRESHOLD),
+    hardStopThreshold: clampRatio(soft.hardStopThreshold, DEFAULT_HARD_STOP_THRESHOLD),
+    tokenBudget: minKnown(provider.remainingTokens, soft.maxTokensPerSession),
+    costBudget: minKnown(provider.remainingBalance, soft.maxCostPerSession),
+    rpmLimit: minKnown(provider.requestsPerMinute, soft.requestsPerMinute),
+    tpmLimit: minKnown(provider.tokensPerMinute, soft.tokensPerMinute)
+  };
+}
+
+export function assessSizeUsage(estimatedInputTokens, limits) {
+  return assessRatio(estimatedInputTokens, limits.effectiveInputLimit, {
+    warningThreshold: limits.warningThreshold,
+    compressionThreshold: limits.compressionThreshold,
+    hardStopThreshold: limits.hardStopThreshold,
+    normal: "normal",
+    warning: "warning",
+    compress: "compress",
+    stop: "stop"
+  });
+}
+
+export function assessBudgetUsage(value, budget, thresholds = {}) {
+  if (!positiveNumber(budget)) {
+    return { status: "unknown", ratio: undefined };
+  }
+  return assessRatio(value, budget, {
+    warningThreshold: clampRatio(thresholds.warningThreshold, DEFAULT_WARNING_THRESHOLD),
+    compressionThreshold: clampRatio(thresholds.confirmThreshold, DEFAULT_COMPRESSION_THRESHOLD),
+    hardStopThreshold: clampRatio(thresholds.hardStopThreshold, DEFAULT_HARD_STOP_THRESHOLD),
+    normal: "normal",
+    warning: "warning",
+    compress: "confirm",
+    stop: "pause"
+  });
+}
+
+export function hasCoreOverflow(coreTokens, limits) {
+  return coreTokens > limits.effectiveInputLimit;
+}
+
+function estimateBaseTokens(value, contentType) {
+  if (contentType === "code" || looksLikeCodeOrJson(value)) return value.length / 2 * 1.3;
+  const cjk = countCjk(value);
+  const nonWhitespace = value.replace(/\s/g, "").length;
+  if (nonWhitespace === 0) return 0;
+  const cjkRatio = cjk / nonWhitespace;
+  if (cjkRatio > 0.6) return value.length * 1.8;
+  if (cjkRatio > 0.15) return value.length * 1.3;
+  return value.length / 3 * 1.25;
+}
+
+function looksLikeCodeOrJson(value) {
+  const trimmed = value.trim();
+  if ((trimmed.startsWith("{") && trimmed.endsWith("}")) || (trimmed.startsWith("[") && trimmed.endsWith("]"))) return true;
+  return /\b(function|class|const|let|var|return|import|export)\b/.test(value);
+}
+
+function countCjk(value) {
+  const matches = value.match(/[\u3400-\u9fff\uf900-\ufaff]/g);
+  return matches ? matches.length : 0;
+}
+
+function assessRatio(value, limit, labels) {
+  const denominator = positiveNumber(limit);
+  if (!denominator) return { status: "unknown", ratio: undefined };
+  const ratio = Math.max(0, numberOr(value, 0) / denominator);
+  if (ratio >= labels.hardStopThreshold) return { status: labels.stop, ratio };
+  if (ratio >= labels.compressionThreshold) return { status: labels.compress, ratio };
+  if (ratio >= labels.warningThreshold) return { status: labels.warning, ratio };
+  return { status: labels.normal, ratio };
+}
+
+function minKnown(...values) {
+  const known = values.map(positiveNumber).filter((value) => value !== undefined);
+  return known.length ? Math.min(...known) : undefined;
+}
+
+function positiveNumber(value) {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
+function numberOr(value, fallback) {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function clampRatio(value, fallback) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
+  return Math.max(0.01, Math.min(0.99, value));
+}
