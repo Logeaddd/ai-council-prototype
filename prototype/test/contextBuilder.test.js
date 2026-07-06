@@ -166,6 +166,48 @@ test("context prompt sections include file operation execution results", () => {
   assert.match(core, /overwrite_requires_confirmation/);
 });
 
+test("independent member context hides other ordinary members' answers", () => {
+  const context = buildMemberContext({
+    ...agent,
+    id: "alpha",
+    name: "Alpha",
+    mandatoryRedTeam: false
+  }, {
+    question: "Answer independently.",
+    unresolvedObjections: {
+      beta: ["BETA_LEDGER_SECRET"],
+      alpha: ["ALPHA_LEDGER_SECRET"]
+    },
+    artifacts: [
+      { id: "a1", round: 1, type: "note", source_agent_id: "alpha", content: "ALPHA_ARTIFACT_SECRET" },
+      { id: "b1", round: 1, type: "note", source_agent_id: "beta", content: "BETA_ARTIFACT_SECRET" }
+    ],
+    messages: [
+      { round: 1, agentId: "alpha", agentName: "Alpha", response: { status: "speak", argument: "ALPHA_MESSAGE_SECRET" } },
+      { round: 1, agentId: "beta", agentName: "Beta", response: { status: "speak", argument: "BETA_MESSAGE_SECRET" } }
+    ],
+    fileOperationExecutionResults: [
+      { source_agent_id: "alpha", path: "alpha.js", status: "executed" },
+      { source_agent_id: "beta", path: "beta.js", status: "executed" }
+    ]
+  }, {
+    transcriptVisibility: "own",
+    recentMessageLimit: 10
+  });
+  const sections = buildContextPromptSections(context);
+  const combined = sections.map((section) => section.content).join("\n");
+
+  assert.equal(context.transcriptVisibility, "own");
+  assert.match(combined, /ALPHA_MESSAGE_SECRET/);
+  assert.match(combined, /ALPHA_ARTIFACT_SECRET/);
+  assert.match(combined, /ALPHA_LEDGER_SECRET/);
+  assert.match(combined, /alpha\.js/);
+  assert.doesNotMatch(combined, /BETA_MESSAGE_SECRET/);
+  assert.doesNotMatch(combined, /BETA_ARTIFACT_SECRET/);
+  assert.doesNotMatch(combined, /BETA_LEDGER_SECRET/);
+  assert.doesNotMatch(combined, /beta\.js/);
+});
+
 
 test("context prompt sections include private boss messages for the addressed member", () => {
   const context = buildMemberContext(agent, {

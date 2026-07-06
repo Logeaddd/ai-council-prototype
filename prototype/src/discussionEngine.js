@@ -3,7 +3,7 @@ import { buildFinalPrompt, buildRoundPrompt } from "./promptBuilder.js";
 import { buildContextPromptSections, buildMemberContext } from "./contextBuilder.js";
 import { parseFinalDecision, parseRoundResponse } from "./responseParser.js";
 import { makeId, nowIso } from "./types.js";
-import { isConsensusParticipant, isSupportingResponse, latestResponses, markAutoCompletedResponses, scoreConsensus, shouldStop, updateUnresolvedObjections } from "./consensusEngine.js";
+import { isConsensusParticipant, scoreConsensus, shouldStop, updateUnresolvedObjections } from "./consensusEngine.js";
 import { appendMemoryCandidates, writeGroupSession, writeSession } from "./storage.js";
 import { assessBudgetUsage, assessSizeUsage } from "./tokenLimits.js";
 import { appendSessionTranscriptChunk, readSummaryCache, updateDeterministicSummaries } from "./summaryCache.js";
@@ -27,9 +27,11 @@ export async function runCouncil(question, group, baseDir, options = {}) {
 
 export async function* runCouncilEvents(question, group, baseDir, options = {}) {
   const enabledAgents = group.agents.filter((agent) => agent.enabled);
+  const workMode = normalizeWorkMode(group.settings?.workMode);
   const firstRoundAgents = selectFirstRoundAgents(enabledAgents, {
     startAfterAgentId: options.startAfterAgentId,
-    startAtAgentId: options.startAtAgentId
+    startAtAgentId: options.startAtAgentId,
+    workMode
   });
   const globalRequirement = options.globalRequirement || group.settings?.globalRequirement || "";
   const continuationContext = normalizeContinuationContext(options.continuationContext);
@@ -59,11 +61,13 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
     for (const agent of agentsToCall) {
       throwIfAborted(options.signal);
       const seat = findWorkspaceSeat(workspaceGroup, agent);
+      const transcriptVisibility = contextVisibilityForAgent(agent, workMode);
       const memberContext = buildMemberContext(agent, session, {
         question,
         groupSettings: group.settings,
         globalRequirement,
         continuationContext,
+        transcriptVisibility,
         latestBossInstruction: options.latestBossInstruction || "",
         ...loadSummaryContext(options.groupPath, agent),
         privateBossMessages: loadPrivateBossMessages(options.groupPath, agent)
@@ -119,13 +123,18 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
         contextSections: buildContextPromptSections(memberContext),
         fileOperationContext: Boolean(options.groupPath),
         fileOperationPermissionTier: effectiveWorkspacePermissionTier(workspaceGroup, agent),
-        groupSettings: group.settings
+        groupSettings: group.settings,
+        independentAnswerMode: transcriptVisibility === "own",
+        hideOpenObjectionLedger: transcriptVisibility === "own"
       });
       const modelCallRecord = notifyModelCall(options, {
+        sessionId: session.id,
         phase: "round",
         round,
         agentId: agent.id,
         agentName: agent.name,
+        model: agent.model || "",
+        provider: agent.provider || "",
         inputMessages: messages
       });
       const streamingCall = startAgentCallWithDeltaQueue(agent, messages, group.settings.agentTimeoutMs, options.signal);
@@ -194,8 +203,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
 
     if (!results.length) break;
 
-    markAutoCompletedResponses(session, enabledAgents);
-    consensus = scoreConsensus(enabledAgents, session);
+    consensus = scoreConsensus(enabledAgents, session, { round });
     session.consensusByRound.push({ round, ...consensus });
     yield {
       type: "round_complete",
@@ -258,9 +266,12 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
       contextSections: buildContextPromptSections(finalContext)
     });
     const modelCallRecord = notifyModelCall(options, {
+      sessionId: session.id,
       phase: "final",
       agentId: judge.id,
       agentName: judge.name,
+      model: judge.model || "",
+      provider: judge.provider || "",
       inputMessages: finalMessages
     });
     const finalRaw = await safeCall(judge, finalMessages, group.settings.agentTimeoutMs, options.signal);
@@ -299,6 +310,8 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
   const result = { session, sessionPath, memoryRecords, transcriptChunk, summaryUpdate, usageRecord };
   yield {
     type: "final_decision",
+    agentId: judge.id,
+    agentName: judge.name,
     session,
     finalDecision: session.finalDecision,
     contextStatus: finalContextStatus,
@@ -312,9 +325,15 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
 }
 
 function notifyModelCall(options = {}, record = {}) {
-  if (typeof options.onModelCall !== "function") return undefined;
   const safeRecord = { ...record };
-  options.onModelCall(safeRecord);
+  if (options.groupPath) {
+    Object.defineProperty(safeRecord, "__trace", {
+      value: { groupPath: options.groupPath },
+      enumerable: false
+    });
+    appendModelCallTrace(safeRecord, { event: "start" });
+  }
+  if (typeof options.onModelCall === "function") options.onModelCall(safeRecord);
   return safeRecord;
 }
 
@@ -322,6 +341,48 @@ function completeModelCall(record, raw = {}) {
   if (!record) return;
   if (raw.error) record.error = raw.error;
   else record.rawText = raw.text || "";
+  appendModelCallTrace(record, { event: "complete", raw });
+}
+
+function appendModelCallTrace(record, { event, raw } = {}) {
+  const groupPath = record?.__trace?.groupPath;
+  if (!groupPath) return;
+  const filePath = path.join(path.resolve(groupPath), "shared", "logs", "model-calls.jsonl");
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  const payload = {
+    event,
+    createdAt: nowIso(),
+    sessionId: record.sessionId || "",
+    phase: record.phase || "",
+    round: record.round,
+    agentId: record.agentId || "",
+    agentName: record.agentName || "",
+    provider: record.provider || "",
+    model: record.model || "",
+    input: summarizePromptMessages(record.inputMessages || [])
+  };
+  if (raw?.error) payload.error = String(raw.error).slice(0, 500);
+  if (raw?.text != null) payload.output = summarizeText(raw.text);
+  fs.appendFileSync(filePath, `${JSON.stringify(payload)}\n`, "utf8");
+}
+
+function summarizePromptMessages(messages = []) {
+  const combined = messages.map((message) => {
+    const content = typeof message.content === "string"
+      ? message.content
+      : JSON.stringify(message.content || "");
+    return `${message.role || "unknown"}: ${content}`;
+  }).join("\n\n");
+  return summarizeText(combined);
+}
+
+function summarizeText(value) {
+  const text = String(value || "");
+  return {
+    chars: text.length,
+    head: text.slice(0, 600),
+    tail: text.length > 600 ? text.slice(-600) : ""
+  };
 }
 
 function effectiveWorkspacePermissionTier(workspaceGroup, agent) {
@@ -334,12 +395,7 @@ function selectAgents(enabledAgents, session, round, firstRoundAgents = enabledA
   const roundEligibleAgents = enabledAgents.filter((agent) => participatesInRound(agent, enabledAgents));
   const firstRoundEligible = firstRoundAgents.filter((agent) => participatesInRound(agent, enabledAgents));
   if (round === 1) return firstRoundEligible;
-  const latest = latestResponses(session);
-  return roundEligibleAgents.filter((agent) => {
-    if (agent.mandatoryRedTeam) return reviewerNeedsFollowUp(session, agent, latest.get(agent.id));
-    if (!isConsensusParticipant(agent)) return false;
-    return !isSupportingResponse(latest.get(agent.id));
-  });
+  return roundEligibleAgents;
 }
 
 function participatesInRound(agent, enabledAgents) {
@@ -349,16 +405,6 @@ function participatesInRound(agent, enabledAgents) {
   return enabledAgents.length <= 1;
 }
 
-function reviewerNeedsFollowUp(session, agent, latestResponse) {
-  if (!latestResponse) return true;
-  if (latestResponse.status === "unavailable" || latestResponse.status === "error") return false;
-  const ledger = session.objectionLedger?.[agent.id];
-  if (ledger && Object.keys(ledger).length) {
-    return Object.values(ledger).some((item) => item.status !== "resolved" && item.blocks_final);
-  }
-  return Boolean(session.unresolvedObjections?.[agent.id]?.length);
-}
-
 function recordObjections(session, agent, response, round, groupSettings) {
   updateUnresolvedObjections(session, agent, response);
   applyObjectionLedger(session, agent, response, { round, groupSettings });
@@ -366,10 +412,36 @@ function recordObjections(session, agent, response, round, groupSettings) {
 
 function selectFirstRoundAgents(enabledAgents, options = {}) {
   const startId = options.startAtAgentId || options.startAfterAgentId;
+  const base = !startId ? enabledAgents : sliceFirstRoundAgents(enabledAgents, options);
+  return options.workMode === "independent" ? orderIndependentFirstRound(base) : base;
+}
+
+function sliceFirstRoundAgents(enabledAgents, options = {}) {
+  const startId = options.startAtAgentId || options.startAfterAgentId;
   if (!startId) return enabledAgents;
   const index = enabledAgents.findIndex((agent) => agent.id === startId);
   if (index < 0) return enabledAgents;
   return enabledAgents.slice(index + (options.startAfterAgentId ? 1 : 0));
+}
+
+function orderIndependentFirstRound(agents) {
+  return [...agents].sort((a, b) => independentFirstRoundPhase(a) - independentFirstRoundPhase(b));
+}
+
+function independentFirstRoundPhase(agent) {
+  if (agent.judge && !isReviewerLike(agent)) return 3;
+  if (isReviewerLike(agent)) return 2;
+  return 1;
+}
+
+function normalizeWorkMode(value) {
+  return value === "independent" ? "independent" : "collab";
+}
+
+function contextVisibilityForAgent(agent, workMode) {
+  if (workMode !== "independent") return "full";
+  if (agent.judge || isReviewerLike(agent)) return "full";
+  return "own";
 }
 
 function selectFinalizer(enabledAgents, session) {

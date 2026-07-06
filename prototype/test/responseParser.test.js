@@ -77,6 +77,15 @@ test("round response parser preserves unavailable status", () => {
   });
 });
 
+test("round response parser does not treat non-json provider output as a normal speech", () => {
+  const parsed = parseRoundResponse("用户洪:我的2 question question 0: 0: 0");
+
+  assert.equal(parsed.status, "unavailable");
+  assert.equal(parsed.retryable, true);
+  assert.match(parsed.reason, /invalid_json_response/);
+  assert.match(parsed.reason, /question question/);
+});
+
 test("round response parser preserves structured objection items and resolved ids", () => {
   const parsed = parseRoundResponse(JSON.stringify({
     status: "speak",

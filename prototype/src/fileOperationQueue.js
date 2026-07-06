@@ -203,6 +203,7 @@ function auditRecord(action, item) {
   return {
     id: item.id,
     action,
+    status: item.status,
     op: item.op,
     path: item.path,
     code: item.code,

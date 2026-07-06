@@ -22,6 +22,7 @@ export function buildRoundPrompt(agent, question, session, round, options = {}) 
         nonReviewerObjectionLine(agent),
         completionSkipLine(agent),
         redTeamDutyLine(agent, round),
+        independentAnswerModeLine(options),
         reviewProtocolLine(agent, options),
         fileOperationProtocolLine(options),
         "If speaking, use keys: status, position, argument, objections, objection_items, resolved_ids, suggested_revision, artifacts, file_operations, confidence, memory_candidates.",
@@ -40,7 +41,7 @@ export function buildRoundPrompt(agent, question, session, round, options = {}) 
         `Round: ${round}`,
         options.contextSections ? "Member context:" : "Transcript so far:",
         transcript || "(none)",
-        formatOpenObjectionLedger(session)
+        options.hideOpenObjectionLedger ? "Open objection ledger: (hidden in independent answer mode)" : formatOpenObjectionLedger(session)
       ].join("\n\n")
     }
   ];
@@ -101,6 +102,11 @@ function nonReviewerObjectionLine(agent) {
 function redTeamDutyLine(agent, round) {
   if (!isReviewerLike(agent) || round === 1) return "";
   return "You are an explicitly assigned reviewer. Do not use completion-only agreement as a reason to skip; only skip if your earlier objections are resolved or preserved and you have no new in-scope risk.";
+}
+
+function independentAnswerModeLine(options = {}) {
+  if (!options.independentAnswerMode) return "";
+  return "Independent answer mode: answer the boss question independently. Other ordinary members' answers are intentionally hidden from you.";
 }
 
 

@@ -59,7 +59,13 @@ function writeGroupIndex(baseDir, index) {
 }
 
 function groupIndexPath(baseDir) {
-  return path.join(baseDir, "user-data", "groups-index.json");
+  return path.join(userDataDir(baseDir), "groups-index.json");
+}
+
+function userDataDir(baseDir) {
+  return process.env.AI_COUNCIL_DATA_DIR
+    ? path.resolve(process.env.AI_COUNCIL_DATA_DIR)
+    : path.join(baseDir, "user-data");
 }
 
 function emptyIndex() {

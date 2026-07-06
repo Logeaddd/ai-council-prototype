@@ -7,9 +7,11 @@ export function buildMemberContext(agent, session, options = {}) {
   const originalQuestion = session.question || options.question || "";
   const latestBossInstruction = options.latestBossInstruction || "";
   const continuationContext = normalizeContinuationContext(options.continuationContext);
-  const latestArtifacts = selectLatestArtifacts(session.artifacts || []);
-  const unresolvedObjections = session.unresolvedObjections || {};
-  const fileOperationExecutionResults = session.fileOperationExecutionResults || [];
+  const transcriptVisibility = normalizeTranscriptVisibility(options.transcriptVisibility);
+  const visibleMessages = selectVisibleMessages(session.messages || [], agent, transcriptVisibility);
+  const latestArtifacts = selectLatestArtifacts(selectVisibleArtifacts(session.artifacts || [], agent, transcriptVisibility));
+  const unresolvedObjections = selectVisibleObjections(session.unresolvedObjections || {}, agent, transcriptVisibility);
+  const fileOperationExecutionResults = selectVisibleFileOperationResults(session.fileOperationExecutionResults || [], agent, transcriptVisibility);
   const stable = {
     roleIdentity: agent.role || agent.name,
     memberName: agent.name,
@@ -35,7 +37,7 @@ export function buildMemberContext(agent, session, options = {}) {
   const stableMessages = contextMessagesFromStable(stable);
   const coreMessages = contextMessagesFromCore(core);
   const summaryMessages = contextMessagesFromSummaries(summaries);
-  const requestedRecentTranscript = selectRecentTranscript(session.messages || [], options.recentMessageLimit);
+  const requestedRecentTranscript = selectRecentTranscript(visibleMessages, options.recentMessageLimit);
   const recentTranscript = fitRecentTranscriptToLimit({
     stableMessages,
     coreMessages,
@@ -59,6 +61,7 @@ export function buildMemberContext(agent, session, options = {}) {
     agentId: agent.id,
     agentName: agent.name,
     mandatoryRedTeam: Boolean(agent.mandatoryRedTeam),
+    transcriptVisibility,
     limits,
     stable,
     core,
@@ -122,6 +125,34 @@ function selectLatestArtifacts(artifacts) {
     }
   }
   return [...latestByKey.values()];
+}
+
+function normalizeTranscriptVisibility(value) {
+  return value === "own" ? "own" : "full";
+}
+
+function selectVisibleMessages(messages, agent, visibility) {
+  if (visibility === "full") return messages;
+  return messages.filter((message) => message.agentId === agent.id);
+}
+
+function selectVisibleArtifacts(artifacts, agent, visibility) {
+  if (visibility === "full") return artifacts;
+  return artifacts.filter((artifact) => artifact.source_agent_id === agent.id || artifact.agentId === agent.id);
+}
+
+function selectVisibleObjections(unresolvedObjections, agent, visibility) {
+  if (visibility === "full") return unresolvedObjections;
+  const own = unresolvedObjections?.[agent.id];
+  return own ? { [agent.id]: own } : {};
+}
+
+function selectVisibleFileOperationResults(results, agent, visibility) {
+  if (visibility === "full") return results;
+  return results.filter((item) => {
+    const source = item.source_agent_id || item.sourceAgentId || item.proposedBy?.seatId || item.proposedBy?.id;
+    return source === agent.id;
+  });
 }
 
 function selectRecentTranscript(messages, limit = DEFAULT_RECENT_MESSAGES) {

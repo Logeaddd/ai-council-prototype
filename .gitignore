@@ -49,6 +49,9 @@ WORKSPACE_MODEL.md
 
 node_modules/
 dist/
+prototype/dist-installer/
+prototype/新议会组/
+_review_shots/
 coverage/
 *.tmp
 *.bak

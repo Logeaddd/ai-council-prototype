@@ -13,6 +13,7 @@ const FRAMEWORK_STATE_FILES = [
   "shared/harness/verification-standard.md",
   "shared/harness/standards.json",
   "shared/logs/file-ops.jsonl",
+  "shared/logs/model-calls.jsonl",
   "shared/logs/workspace.log"
 ];
 
@@ -32,6 +33,24 @@ export function approvePendingFileOperation(options = {}) {
   updatePendingFileOperationProposal(groupPath, approved);
   appendFileOperationAuditLog(groupPath, "approved", approved);
   return approved;
+}
+
+export function rejectPendingFileOperation(options = {}) {
+  const groupPath = requirePath(options.groupPath, "groupPath");
+  const proposal = readPendingFileOperationProposal(groupPath, options.proposalId);
+  if (proposal.status !== "pending_user_approval") {
+    throw new Error(`File operation ${proposal.id} is not pending user approval`);
+  }
+  const rejected = {
+    ...proposal,
+    status: "rejected",
+    rejectedBy: String(options.rejectedBy || "user"),
+    rejectedAt: nowIso(),
+    rejectReason: String(options.reason || "rejected by user")
+  };
+  updatePendingFileOperationProposal(groupPath, rejected);
+  appendFileOperationAuditLog(groupPath, "rejected", rejected);
+  return rejected;
 }
 
 

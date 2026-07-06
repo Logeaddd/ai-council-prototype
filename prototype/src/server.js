@@ -4,11 +4,11 @@ import { execFile } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { readAppSettings, updateAppSettings } from "./appSettings.js";
+import { readAppSettings, updateAppSettings, userDataDir } from "./appSettings.js";
 import { loadJson, validateGroupConfig, validateRuntimeEnv } from "./config.js";
 import { runCouncil, runCouncilEvents } from "./discussionEngine.js";
 import { approveExecutionStandards, prepareExecutionStandards, readExecutionStandards } from "./executionStandards.js";
-import { approvePendingFileOperation, autoApprovePendingFileOperation, executeApprovedFileOperation } from "./fileOperationExecutor.js";
+import { approvePendingFileOperation, autoApprovePendingFileOperation, executeApprovedFileOperation, rejectPendingFileOperation } from "./fileOperationExecutor.js";
 import { listFileOperationReviewItems, readFileOperationAuditLog } from "./fileOperationQueue.js";
 import { readGroupIndex, recordIdForPath, removeGroupIndexRecord, updateGroupIndexRecord, upsertGroupIndexRecord } from "./groupIndex.js";
 import { resolveInside } from "./pathGuards.js";
@@ -17,16 +17,18 @@ import { appendPrivateChatMessage, readPrivateChatMessages, readPrivateContextMe
 import { listProviderPresets } from "./providerRegistry.js";
 import { discoverProviderModels, checkProviderHealth } from "./modelDiscovery.js";
 import { readUsageSnapshot } from "./usageStats.js";
-import { initGroupWorkspace, replaceMember } from "./workspaceManager.js";
+import { addMember, initGroupWorkspace, replaceMember } from "./workspaceManager.js";
 import { addReview, createRecorderDraft, finalizeDraft, listApproved, listDrafts } from "./writeFlow.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const baseDir = path.resolve(__dirname, "..");
-const publicDir = path.join(baseDir, "public");
+const rendererOutDir = path.join(baseDir, "renderer", "out");
+const publicDir = rendererOutDir;
 const port = Number(process.env.AI_COUNCIL_UI_PORT || 4317);
 const host = process.env.AI_COUNCIL_UI_HOST || "127.0.0.1";
-const allowedWorkspaceRoot = path.resolve(process.env.AI_COUNCIL_WORKSPACE_ROOT || baseDir);
-const defaultGroupsRoot = path.join(baseDir, "workspace-ui");
+const dataDir = userDataDir(baseDir);
+const allowedWorkspaceRoot = path.resolve(process.env.AI_COUNCIL_WORKSPACE_ROOT || (process.env.AI_COUNCIL_DATA_DIR ? dataDir : baseDir));
+const defaultGroupsRoot = path.join(process.env.AI_COUNCIL_DATA_DIR ? dataDir : baseDir, "workspace-ui");
 const execFileAsync = promisify(execFile);
 
 const server = http.createServer(async (req, res) => {
@@ -60,7 +62,7 @@ async function handleApi(req, res, url) {
         canReadLocalFiles: false,
         canWriteLocalFiles: false,
         canCallLocalTools: false,
-        transport: "openai-compatible chat/completions text messages only"
+        transport: "OpenAI-compatible /chat/completions and Anthropic /messages text calls"
       },
       localServer: {
         canReadWriteWorkspaceFiles: true,
@@ -196,6 +198,14 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (req.method === "POST" && url.pathname === "/api/workspace/add-member") {
+    const body = await readBody(req);
+    body.groupPath = resolveWorkspacePath(body.groupPath, "groupPath");
+    const result = addMember(body);
+    sendJson(res, 200, result);
+    return;
+  }
+
   if (req.method === "POST" && url.pathname === "/api/groups-index/upsert") {
     const body = await readBody(req);
     const groupPath = resolveWorkspacePath(body.path || body.groupPath, "groupPath");
@@ -221,7 +231,19 @@ async function handleApi(req, res, url) {
 
   if (req.method === "POST" && url.pathname === "/api/groups-index/remove") {
     const body = await readBody(req);
-    sendJson(res, 200, removeGroupIndexRecord(baseDir, String(body.id || "")));
+    const id = String(body.id || "");
+    const index = readGroupIndex(baseDir);
+    const record = index.groups.find((item) => item.id === id);
+    if (!record) throw new Error(`Unknown group id: ${id}`);
+    let deletedPath;
+    if (body.deleteData) {
+      deletedPath = deleteWorkspaceGroupFolder(record.path);
+    }
+    sendJson(res, 200, {
+      ok: true,
+      index: removeGroupIndexRecord(baseDir, id),
+      deletedPath
+    });
     return;
   }
 
@@ -272,6 +294,13 @@ async function handleApi(req, res, url) {
     const body = await readBody(req);
     body.groupPath = resolveWorkspacePath(body.groupPath, "groupPath");
     sendJson(res, 200, approvePendingFileOperation(body));
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/file-operations/reject") {
+    const body = await readBody(req);
+    body.groupPath = resolveWorkspacePath(body.groupPath, "groupPath");
+    sendJson(res, 200, rejectPendingFileOperation(body));
     return;
   }
 
@@ -326,6 +355,26 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (req.method === "POST" && url.pathname === "/api/group/settings") {
+    const body = await readBody(req);
+    const groupPath = resolveWorkspacePath(body.groupPath, "groupPath");
+    const group = updateGroupSettings(groupPath, body);
+    sendJson(res, 200, { ok: true, group });
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/group/seat") {
+    const body = await readBody(req);
+    const groupPath = resolveWorkspacePath(body.groupPath, "groupPath");
+    const tier = body.permission || body.tier;
+    if (requiresGit(tier)) {
+      const status = await gitStatus();
+      if (!status.ok) throw new Error("Git is required before enabling tool permissions.");
+    }
+    sendJson(res, 200, updateGroupSeat(groupPath, body));
+    return;
+  }
+
   if (req.method === "POST" && url.pathname === "/api/council/events") {
     const body = await readBody(req);
     const group = loadCouncilGroupFromRequest(body);
@@ -361,7 +410,16 @@ function serveStatic(res, pathname) {
   const types = {
     ".html": "text/html; charset=utf-8",
     ".css": "text/css; charset=utf-8",
-    ".js": "text/javascript; charset=utf-8"
+    ".js": "text/javascript; charset=utf-8",
+    ".json": "application/json; charset=utf-8",
+    ".svg": "image/svg+xml",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".ico": "image/x-icon",
+    ".woff": "font/woff",
+    ".woff2": "font/woff2"
   };
   res.writeHead(200, { "Content-Type": types[ext] || "application/octet-stream" });
   fs.createReadStream(filePath).pipe(res);
@@ -379,6 +437,19 @@ function groupIndexRecordFromGroup(group) {
     pinned: false,
     lastOpenedAt: new Date().toISOString()
   };
+}
+
+function deleteWorkspaceGroupFolder(inputPath) {
+  const groupPath = resolveWorkspacePath(inputPath, "groupPath");
+  const groupConfigPath = path.join(groupPath, "group.json");
+  if (!fs.existsSync(groupConfigPath)) {
+    throw new Error("Cannot delete group data because group.json was not found");
+  }
+  if (path.resolve(groupPath) === path.resolve(allowedWorkspaceRoot)) {
+    throw new Error("Cannot delete the workspace root");
+  }
+  fs.rmSync(groupPath, { recursive: true, force: true });
+  return groupPath;
 }
 
 async function replyToPrivateMessage(groupPath, seatId, body) {
@@ -404,7 +475,7 @@ async function replyToPrivateMessage(groupPath, seatId, body) {
     if (!text) return null;
     return appendPrivateChatMessage(groupPath, seatId, text, { from: seatId, seat: body.seat });
   } catch (error) {
-    return appendPrivateChatMessage(groupPath, seatId, `（回复失败：${error.message}）`, { from: seatId, seat: body.seat });
+    return appendPrivateChatMessage(groupPath, seatId, `（回复失败：${error.message}）`, { from: seatId, seat: body.seat, status: "error" });
   }
 }
 
@@ -440,6 +511,24 @@ function updateGroupGlobalRequirement(groupPath, globalRequirement) {
   return group;
 }
 
+function updateGroupSettings(groupPath, settings = {}) {
+  const groupFile = path.join(groupPath, "group.json");
+  const group = readJson(groupFile);
+  const nextSettings = { ...(group.settings || {}) };
+  if (settings.globalRequirement !== undefined) {
+    nextSettings.globalRequirement = String(settings.globalRequirement || "").trim();
+  }
+  if (settings.maxRounds !== undefined) {
+    nextSettings.maxRounds = normalizeMaxRounds(settings.maxRounds);
+  }
+  if (settings.workMode !== undefined) {
+    nextSettings.workMode = normalizeWorkMode(settings.workMode);
+  }
+  group.settings = nextSettings;
+  fs.writeFileSync(groupFile, JSON.stringify(group, null, 2), "utf8");
+  return group;
+}
+
 function updateGroupPermissions(groupPath, permissions = {}) {
   const groupFile = path.join(groupPath, "group.json");
   const group = readJson(groupFile);
@@ -451,6 +540,90 @@ function updateGroupPermissions(groupPath, permissions = {}) {
   group.permissions = { defaultTier, seatTiers };
   fs.writeFileSync(groupFile, JSON.stringify(group, null, 2), "utf8");
   return group;
+}
+
+function updateGroupSeat(groupPath, body = {}) {
+  const groupFile = path.join(groupPath, "group.json");
+  const group = readJson(groupFile);
+  const seatId = String(body.seatId || "").trim();
+  if (!seatId) throw new Error("Missing seatId");
+  const seats = group.seats || group.agents || [];
+  const seat = seats.find((item) => (item.seatId || item.id) === seatId);
+  if (!seat) throw new Error(`Unknown seatId: ${seatId}`);
+
+  const patch = body.patch && typeof body.patch === "object" ? body.patch : body;
+  if (patch.displayName !== undefined || patch.name !== undefined) {
+    seat.displayName = cleanOptionalString(patch.displayName ?? patch.name);
+  }
+  if (patch.model !== undefined || patch.currentModel !== undefined) {
+    const model = cleanOptionalString(patch.model ?? patch.currentModel);
+    seat.currentModel = model;
+    seat.model = model;
+  }
+  if (patch.apiBaseUrl !== undefined || patch.apiUrl !== undefined) {
+    const apiBaseUrl = cleanOptionalString(patch.apiBaseUrl ?? patch.apiUrl);
+    seat.apiBaseUrl = apiBaseUrl;
+    seat.apiUrl = apiBaseUrl;
+  }
+  if (patch.providerPreset !== undefined) {
+    seat.providerPreset = cleanOptionalString(patch.providerPreset);
+  }
+  if (patch.apiKey !== undefined) {
+    const apiKey = cleanOptionalString(patch.apiKey);
+    if (apiKey && !apiKey.includes("***")) seat.apiKey = apiKey;
+  }
+  if (patch.enabled !== undefined) {
+    seat.enabled = Boolean(patch.enabled);
+  }
+  if (patch.reviewIntensity !== undefined) {
+    seat.reviewIntensity = normalizeReviewIntensity(patch.reviewIntensity);
+  }
+  if (patch.role !== undefined) {
+    applySeatRole(seat, patch.role);
+  }
+  const permission = patch.permission || patch.tier;
+  if (permission !== undefined) {
+    group.permissions = group.permissions || { defaultTier: "text", seatTiers: {} };
+    group.permissions.defaultTier = normalizePermissionTier(group.permissions.defaultTier || "text");
+    group.permissions.seatTiers = group.permissions.seatTiers || {};
+    group.permissions.seatTiers[seatId] = normalizePermissionTier(permission);
+  }
+
+  fs.writeFileSync(groupFile, JSON.stringify(group, null, 2), "utf8");
+  return { ok: true, group, seat };
+}
+
+function applySeatRole(seat, role) {
+  const normalized = String(role || "ordinary");
+  if (normalized === "reviewer") {
+    seat.reviewer = true;
+    seat.mandatoryRedTeam = true;
+    seat.judge = false;
+    return;
+  }
+  if (normalized === "summarizer") {
+    seat.reviewer = false;
+    seat.mandatoryRedTeam = false;
+    seat.judge = true;
+    return;
+  }
+  seat.reviewer = false;
+  seat.mandatoryRedTeam = false;
+  seat.judge = false;
+}
+
+function normalizeWorkMode(value) {
+  return value === "independent" ? "independent" : "collab";
+}
+
+function normalizeReviewIntensity(value) {
+  const count = Number.parseInt(String(value || 2), 10);
+  if (count === 1 || count === 2 || count === 3) return count;
+  return 2;
+}
+
+function cleanOptionalString(value) {
+  return String(value || "").trim();
 }
 
 async function gitStatus() {

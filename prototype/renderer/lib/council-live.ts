@@ -1,0 +1,723 @@
+"use client"
+
+import type {
+  AgentMember,
+  AgentState,
+  Blocker,
+  DecisionState,
+  FileOperation,
+  FileOpStatus,
+  Group,
+  Permission,
+  Role,
+  TranscriptItem,
+  UsageSummary,
+  WorkMode,
+} from "@/lib/council-data"
+
+export interface GroupIndexRecord {
+  id: string
+  name: string
+  path: string
+  pinned?: boolean
+  lastOpenedAt?: string
+}
+
+export interface GroupIndexResponse {
+  version?: number
+  lastGroupId?: string
+  groups?: GroupIndexRecord[]
+}
+
+export interface WorkspaceSeat {
+  seatId?: string
+  id?: string
+  displayName?: string
+  name?: string
+  currentModel?: string
+  model?: string
+  role?: string
+  team?: string
+  weight?: number
+  enabled?: boolean
+  reviewer?: boolean
+  mandatoryRedTeam?: boolean
+  judge?: boolean
+  reviewIntensity?: number
+  apiUrl?: string
+  apiBaseUrl?: string
+  apiKey?: string
+  providerPreset?: string
+}
+
+export interface WorkspaceGroup {
+  id?: string
+  name?: string
+  groupFolderName?: string
+  groupPath?: string
+  seats?: WorkspaceSeat[]
+  agents?: WorkspaceSeat[]
+  settings?: {
+    maxRounds?: number
+    globalRequirement?: string
+    [key: string]: unknown
+  }
+  permissions?: {
+    defaultTier?: Permission
+    seatTiers?: Record<string, Permission>
+  }
+}
+
+export interface CouncilEvent {
+  type: string
+  round?: number
+  agentId?: string
+  agentName?: string
+  delta?: string
+  message?: CouncilMessage
+  consensus?: unknown
+  session?: CouncilSession
+  finalDecision?: CouncilFinalDecision
+  result?: {
+    session?: CouncilSession
+  }
+  error?: string
+  createdAt?: string
+}
+
+export interface CouncilMessage {
+  round?: number
+  agentId: string
+  agentName: string
+  displayText?: string
+  response?: {
+    status?: string
+    argument?: string
+    reason?: string
+    objections?: unknown[]
+    unresolved_objections?: unknown[]
+  }
+  contextStatus?: {
+    totalTokens?: number
+  }
+  createdAt?: string
+  partial?: boolean
+}
+
+export interface CouncilFinalDecision {
+  final_state?: string
+  answer?: string
+  confidence?: number
+  consensus_score?: number
+  risks?: string[]
+  unresolved_blockers?: RawBlocker[]
+  blocking_issues?: RawBlocker[]
+  file_execution_state?: string
+  file_execution_results?: unknown[]
+}
+
+export interface CouncilSession {
+  id?: string
+  question?: string
+  messages?: CouncilMessage[]
+  finalDecision?: CouncilFinalDecision
+}
+
+interface RawBlocker {
+  id?: string
+  issue?: string
+  title?: string
+  why?: string
+  suggested_fix?: string
+  severity?: string
+  raisedBy?: string
+  source_agent_name?: string
+}
+
+export async function api<T>(path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
+  const response = await fetch(path, body === undefined
+    ? { signal }
+    : {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal,
+      })
+  const data = await response.json().catch(() => ({}))
+  if (!response.ok) {
+    throw new Error(String((data as { error?: string }).error || "请求失败"))
+  }
+  return data as T
+}
+
+export async function streamCouncilEvents(
+  body: unknown,
+  onEvent: (event: CouncilEvent) => void,
+  signal?: AbortSignal,
+) {
+  const response = await fetch("/api/council/events", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal,
+  })
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}))
+    throw new Error(String((data as { error?: string }).error || "讨论启动失败"))
+  }
+  if (!response.body) throw new Error("浏览器不支持流式读取")
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ""
+
+  while (true) {
+    const { value, done } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const chunks = buffer.split("\n\n")
+    buffer = chunks.pop() || ""
+    for (const chunk of chunks) {
+      const event = parseSseChunk(chunk)
+      if (event) onEvent(event)
+    }
+  }
+
+  if (buffer.trim()) {
+    const event = parseSseChunk(buffer)
+    if (event) onEvent(event)
+  }
+}
+
+export function groupRecordToUiGroup(record: GroupIndexRecord): Group & { path: string } {
+  return {
+    id: record.id,
+    name: record.name || "未命名议会组",
+    path: record.path,
+    mode: "collab",
+    pinned: Boolean(record.pinned),
+    memberCount: 0,
+    lastActive: formatLastActive(record.lastOpenedAt),
+  }
+}
+
+export function workspaceGroupToMembers(
+  group: WorkspaceGroup | null,
+  states: Record<string, AgentState>,
+  usageMembers: UsageMember[] = [],
+  mutedSeatIds: string[] = [],
+): AgentMember[] {
+  const seats = normalizeSeats(group)
+  const permissions = group?.permissions || {}
+  const defaultTier = permissions.defaultTier || "text"
+  const muted = new Set(mutedSeatIds)
+  return seats.map((seat, index) => {
+    const id = seat.seatId || seat.id || `seat_${String(index + 1).padStart(2, "0")}`
+    const reviewer = Boolean(seat.reviewer || seat.mandatoryRedTeam)
+    const judge = Boolean(seat.judge)
+    const role: Role = judge ? "summarizer" : reviewer ? "reviewer" : "ordinary"
+    const usage = usageMembers.find((item) => item.seatId === id)
+    const totals = usage?.totals || {}
+    const baseUrl = seat.apiUrl || seat.apiBaseUrl || ""
+    const provider = inferProviderName(baseUrl, seat.providerPreset)
+    return {
+      id,
+      name: seat.displayName || seat.name || seat.role || id,
+      role,
+      provider,
+      model: seat.model || seat.currentModel || "未配置模型",
+      baseUrl,
+      apiKey: seat.apiKey ? "set" : provider === "Mock" ? "local" : "unset",
+      permission: permissions.seatTiers?.[id] || defaultTier,
+      state: states[id] || "idle",
+      reviewer,
+      reviewIntensity: normalizeIntensity(seat.reviewIntensity),
+      tokensIn: Number(totals.estimatedInputTokens || 0),
+      tokensOut: Number(totals.estimatedOutputTokens || 0),
+      latencyMs: null,
+      healthy: states[id] !== "unavailable",
+      muted: muted.has(id),
+    }
+  })
+}
+
+export function workspaceGroupToRuntimeGroup(
+  group: WorkspaceGroup,
+  maxRounds: number,
+  mutedSeatIds: string[] = [],
+  workMode: WorkMode = "collab",
+) {
+  const muted = new Set(mutedSeatIds)
+  const seats = normalizeSeats(group)
+  return {
+    id: group.id || "ui-runtime-council",
+    name: group.name || group.groupFolderName || "AI Council",
+    settings: {
+      ...(group.settings || {}),
+      allowSoloCouncil: seats.filter((seat, index) => {
+        const id = seat.seatId || seat.id || `seat_${String(index + 1).padStart(2, "0")}`
+        return seat.enabled !== false && !muted.has(id)
+      }).length === 1,
+      maxRounds,
+      workMode,
+    },
+    agents: seats.map((seat, index) => {
+      const id = seat.seatId || seat.id || `seat_${String(index + 1).padStart(2, "0")}`
+      const baseUrl = seat.apiUrl || seat.apiBaseUrl || ""
+      const apiKey = seat.apiKey || ""
+      const reviewer = Boolean(seat.reviewer || seat.mandatoryRedTeam)
+      const judge = Boolean(seat.judge)
+      const role = seat.role || seat.team || seat.displayName || id
+      return {
+        id,
+        name: seat.displayName || seat.name || role,
+        role,
+        team: seat.team || "",
+        provider: runtimeProviderForSeat(seat.providerPreset, baseUrl, apiKey),
+        providerPreset: seat.providerPreset || inferProviderPreset(baseUrl),
+        apiBaseUrl: baseUrl || "mock://local",
+        apiKey,
+        model: seat.model || seat.currentModel || "mock-builder",
+        weight: Number(seat.weight || 1),
+        enabled: seat.enabled !== false && !muted.has(id),
+        reviewer,
+        mandatoryRedTeam: reviewer,
+        judge,
+        ...(reviewer ? { reviewIntensity: normalizeIntensity(seat.reviewIntensity) } : {}),
+      }
+    }),
+  }
+}
+
+export function messageToTranscriptItem(message: CouncilMessage, totalRounds: number): TranscriptItem {
+  return {
+    kind: "message",
+    id: `${message.agentId}-${message.round || 0}-${message.createdAt || Date.now()}`,
+    agentId: message.agentId,
+    visibility: message.response?.unresolved_objections?.length ? "review" : "public",
+    time: formatTime(message.createdAt),
+    state: responseStatusToAgentState(message.response?.status, Boolean(message.partial)),
+    body: cleanDisplayText(message),
+    tokens: Number(message.contextStatus?.totalTokens || 0) || undefined,
+  }
+}
+
+export function finalDecisionToTranscriptItem(event: CouncilEvent): TranscriptItem | null {
+  if (!event.agentId || !event.finalDecision?.answer) return null
+  return {
+    kind: "message",
+    id: `final-${event.agentId}-${event.createdAt || Date.now()}`,
+    agentId: event.agentId,
+    visibility: "public",
+    time: formatTime(event.createdAt),
+    state: "completed",
+    body: event.finalDecision.answer,
+  }
+}
+
+export function finalDecisionToUiDecision(finalDecision?: CouncilFinalDecision) {
+  const state = finalStateToDecisionState(finalDecision?.final_state)
+  return {
+    state,
+    confidence: normalizeConfidence(finalDecision?.confidence ?? finalDecision?.consensus_score),
+    summary: finalDecision?.answer || "还没有最终决议。",
+  }
+}
+
+export function finalDecisionToBlockers(finalDecision?: CouncilFinalDecision): Blocker[] {
+  const raw = finalDecision?.unresolved_blockers || finalDecision?.blocking_issues || []
+  return raw.map((item, index) => ({
+    id: item.id || `blocker-${index + 1}`,
+    raisedBy: item.raisedBy || item.source_agent_name || "审查者",
+    severity: String(item.severity || "").toLowerCase().includes("block")
+      ? "high"
+      : "medium",
+    title: item.title || item.issue || "未解决问题",
+    detail: item.why || item.suggested_fix || item.issue || "",
+  }))
+}
+
+export interface UsageMember {
+  seatId?: string
+  totals?: {
+    calls?: number
+    estimatedInputTokens?: number
+    estimatedOutputTokens?: number
+    unavailableCount?: number
+  }
+}
+
+export interface UsageSnapshot {
+  totals?: {
+    calls?: number
+    estimatedInputTokens?: number
+    estimatedOutputTokens?: number
+    unavailableCount?: number
+  }
+  members?: UsageMember[]
+}
+
+export interface ProviderPresetRecord {
+  id: string
+  label?: string
+  name?: string
+  transport?: string
+  officialBaseUrl?: string
+  baseUrl?: string
+  defaultModel?: string
+  models?: string[]
+  modelsEndpoint?: string
+  customUrl?: boolean
+  keyless?: boolean
+}
+
+export interface ModelDiscoveryResult {
+  ok: boolean
+  source: "real_response" | "timeout_inference" | "cache" | "error" | string
+  providerId: string
+  apiBaseUrl: string
+  models: Array<{ id: string; owned_by?: string }>
+  defaultModel?: string
+  status?: number
+  error?: string
+}
+
+export interface ProviderHealthResult {
+  ok: boolean
+  source: "real_response" | "timeout_inference" | "cache" | "error" | string
+  providerId: string
+  apiBaseUrl: string
+  status?: number
+  modelCount?: number
+  defaultModel?: string
+  error?: string
+}
+
+export interface AppSettings {
+  groupsRoot?: string
+  firstRunComplete?: boolean
+}
+
+export function usageSnapshotToSummary(snapshot?: UsageSnapshot | null): UsageSummary {
+  const totals = snapshot?.totals || {}
+  const input = Number(totals.estimatedInputTokens || 0)
+  const output = Number(totals.estimatedOutputTokens || 0)
+  return {
+    tokensTotal: input + output,
+    tokensBudget: null,
+    tokenAccounting: input + output > 0 ? "estimated" : "unknown",
+    costUsd: null,
+    costBudgetUsd: null,
+    costAccounting: "not_configured",
+    apiCalls: Number(totals.calls || 0),
+    apiErrors: Number(totals.unavailableCount || 0),
+    avgLatencyMs: 0,
+  }
+}
+
+export function usageSnapshotDelta(
+  snapshot?: UsageSnapshot | null,
+  baseline?: UsageSnapshot | null,
+): UsageSnapshot | null {
+  if (!snapshot) return null
+  const baselineMembers = new Map(
+    (baseline?.members || []).map((member) => [member.seatId || "", member]),
+  )
+  return {
+    totals: subtractUsageTotals(snapshot.totals, baseline?.totals),
+    members: (snapshot.members || []).map((member) => ({
+      ...member,
+      totals: subtractUsageTotals(
+        member.totals,
+        baselineMembers.get(member.seatId || "")?.totals,
+      ),
+    })),
+  }
+}
+
+function subtractUsageTotals(
+  current?: UsageSnapshot["totals"],
+  baseline?: UsageSnapshot["totals"],
+): NonNullable<UsageSnapshot["totals"]> {
+  return {
+    calls: Math.max(0, Number(current?.calls || 0) - Number(baseline?.calls || 0)),
+    estimatedInputTokens: Math.max(
+      0,
+      Number(current?.estimatedInputTokens || 0) - Number(baseline?.estimatedInputTokens || 0),
+    ),
+    estimatedOutputTokens: Math.max(
+      0,
+      Number(current?.estimatedOutputTokens || 0) - Number(baseline?.estimatedOutputTokens || 0),
+    ),
+    unavailableCount: Math.max(
+      0,
+      Number(current?.unavailableCount || 0) - Number(baseline?.unavailableCount || 0),
+    ),
+  }
+}
+
+export async function fetchProviderPresets() {
+  return api<{ providers: ProviderPresetRecord[] }>("/api/providers")
+}
+
+export async function discoverModels(body: {
+  providerId: string
+  apiBaseUrl: string
+  apiKey?: string
+  useCache?: boolean
+}) {
+  return api<ModelDiscoveryResult>("/api/models/discover", {
+    ...body,
+    timeoutMs: 8000,
+  })
+}
+
+export async function checkProviderHealth(body: {
+  providerId: string
+  apiBaseUrl: string
+  apiKey?: string
+  useCache?: boolean
+}) {
+  return api<ProviderHealthResult>("/api/models/health", {
+    ...body,
+    timeoutMs: 8000,
+  })
+}
+
+export async function fetchAppSettings() {
+  return api<AppSettings>("/api/app-settings")
+}
+
+export async function createWorkspaceGroup(body: {
+  root: string
+  groupFolderName: string
+  members: Array<Record<string, unknown>>
+}) {
+  return api<WorkspaceGroup>("/api/workspace/init", body)
+}
+
+export async function updateGroupIndexRecord(body: { id: string; pinned?: boolean }) {
+  return api<GroupIndexResponse>("/api/groups-index/update", body)
+}
+
+export async function deleteWorkspaceGroup(body: { id: string }) {
+  return api<{ ok: boolean; index: GroupIndexResponse; deletedPath?: string }>(
+    "/api/groups-index/remove",
+    {
+      ...body,
+      deleteData: true,
+    },
+  )
+}
+
+export async function addWorkspaceMember(body: {
+  groupPath: string
+  displayName?: string
+  providerPreset?: string
+  apiBaseUrl?: string
+  model?: string
+  apiKey?: string
+  permission?: Permission
+  role?: Role
+  reviewIntensity?: 1 | 2 | 3
+}) {
+  return api<{ ok: boolean; group: WorkspaceGroup; seat: WorkspaceSeat }>(
+    "/api/workspace/add-member",
+    body,
+  )
+}
+
+export async function saveGroupSettings(body: {
+  groupPath: string
+  globalRequirement: string
+  maxRounds: number
+  workMode: WorkMode
+}) {
+  return api<{ ok: boolean; group: WorkspaceGroup }>("/api/group/settings", body)
+}
+
+export async function saveSeatConfig(body: {
+  groupPath: string
+  seatId: string
+  displayName: string
+  providerPreset: string
+  apiBaseUrl: string
+  model: string
+  apiKey?: string
+  permission: Permission
+  role: Role
+  reviewIntensity: 1 | 2 | 3
+}) {
+  return api<{ ok: boolean; group: WorkspaceGroup }>("/api/group/seat", body)
+}
+
+export async function approveFileOperation(groupPath: string, proposalId: string) {
+  return api<unknown>("/api/file-operations/approve", {
+    groupPath,
+    proposalId,
+    approvedBy: "user",
+    dangerousConfirmed: true,
+  })
+}
+
+export async function rejectFileOperation(groupPath: string, proposalId: string) {
+  return api<unknown>("/api/file-operations/reject", {
+    groupPath,
+    proposalId,
+    rejectedBy: "user",
+  })
+}
+
+export async function executeFileOperation(groupPath: string, proposalId: string) {
+  return api<unknown>("/api/file-operations/execute", {
+    groupPath,
+    proposalId,
+    dangerousConfirmed: true,
+  })
+}
+
+export function fileOperationsToUi(data?: { pending?: unknown[]; audit?: unknown[] } | null): FileOperation[] {
+  const pending = data?.pending || []
+  const audit = data?.audit || []
+  const pendingIds = new Set(pending.map((raw) => ((raw || {}) as RawFileOperation).id).filter(Boolean))
+  const seenAuditIds = new Set<string>()
+  const terminalAudit = audit.filter((raw) => {
+    const item = (raw || {}) as RawFileOperation
+    if (!item.id || pendingIds.has(item.id) || seenAuditIds.has(item.id)) return false
+    const status = terminalAuditFileOpStatus(item.status, item.action)
+    if (!status) return false
+    seenAuditIds.add(item.id)
+    return true
+  })
+
+  return [
+    ...pending.map((raw, index) => fileOperationToUi(raw, index, false)).filter(Boolean),
+    ...terminalAudit.map((raw, index) => fileOperationToUi(raw, pending.length + index, true)).filter(Boolean),
+  ].slice(0, 8) as FileOperation[]
+}
+
+interface RawFileOperation {
+  id?: string
+  path?: string
+  op?: string
+  action?: string
+  status?: string
+  source_agent_name?: string
+  source_agent_id?: string
+  agentName?: string
+  commitHash?: string
+  commit?: string
+}
+
+function parseSseChunk(chunk: string): CouncilEvent | null {
+  const dataLines = chunk
+    .split("\n")
+    .filter((line) => line.startsWith("data: "))
+    .map((line) => line.slice(6))
+  if (!dataLines.length) return null
+  return JSON.parse(dataLines.join("\n")) as CouncilEvent
+}
+
+function normalizeSeats(group: WorkspaceGroup | null): WorkspaceSeat[] {
+  return (group?.seats || group?.agents || []).filter(Boolean)
+}
+
+function responseStatusToAgentState(status?: string, partial = false): AgentState {
+  if (partial) return "speaking"
+  if (status === "skip") return "skipped"
+  if (status === "unavailable" || status === "error") return "unavailable"
+  if (status) return "completed"
+  return "idle"
+}
+
+function cleanDisplayText(message: CouncilMessage): string {
+  const body = message.response?.argument || message.displayText || message.response?.reason || ""
+  return String(body || "").replace(/^[^：:]{1,40}[：:]\s*/, "").trim() || "（无正文）"
+}
+
+function finalStateToDecisionState(value?: string): DecisionState {
+  if (value === "ready_to_execute") return "executable"
+  if (value === "usable_with_risks") return "risky"
+  if (value === "failed_to_converge") return "diverged"
+  return "revise"
+}
+
+function normalizeConfidence(value?: number): number {
+  const raw = Number(value)
+  if (!Number.isFinite(raw)) return 0
+  const pct = raw <= 1 ? raw * 100 : raw
+  return Math.max(0, Math.min(100, Math.round(pct)))
+}
+
+function normalizeIntensity(value?: number): 1 | 2 | 3 {
+  return value === 1 || value === 2 || value === 3 ? value : 2
+}
+
+function inferProviderPreset(baseUrl = "") {
+  const lower = baseUrl.toLowerCase()
+  if (lower.includes("anthropic.com")) return "anthropic"
+  if (lower.includes("deepseek")) return "deepseek"
+  if (lower.includes("openrouter")) return "openrouter"
+  if (lower.includes("localhost") || lower.includes("11434")) return "ollama"
+  return "custom"
+}
+
+function inferProviderName(baseUrl = "", preset = "") {
+  if (!baseUrl || baseUrl === "mock://local") return "Mock"
+  if (preset) return preset
+  return inferProviderPreset(baseUrl)
+}
+
+function runtimeProviderForSeat(providerPreset = "", baseUrl = "", apiKey = "") {
+  if (!baseUrl) return "mock"
+  const preset = providerPreset || inferProviderPreset(baseUrl)
+  const keyless = ["ollama", "lmstudio", "vllm-local"].includes(preset)
+  if (!apiKey && !keyless) return "mock"
+  if (preset === "anthropic") return "anthropic-messages"
+  return "openai-compatible"
+}
+
+function fileOperationToUi(raw: unknown, index: number, auditOnly: boolean): FileOperation | null {
+  const item = (raw || {}) as RawFileOperation
+  const status = auditOnly ? terminalAuditFileOpStatus(item.status, item.action) : fileOpStatus(item.status)
+  if (!status) return null
+  return {
+    id: item.id || `file-op-${index + 1}`,
+    path: item.path || "",
+    action: item.op || item.action || "文件操作",
+    status,
+    proposedBy: item.source_agent_name || item.source_agent_id || item.agentName || "AI",
+    commit: item.commitHash || item.commit,
+  }
+}
+
+function fileOpStatus(status?: string): FileOpStatus {
+  if (status === "approved") return "approved"
+  if (status === "executed" || status === "committed") return "executed"
+  if (status === "rejected" || status === "superseded" || status === "unsafe_op") return "rejected"
+  return "pending"
+}
+
+function terminalAuditFileOpStatus(status?: string, action?: string): FileOpStatus | null {
+  const value = status || action
+  if (value === "executed" || value === "committed") return "executed"
+  if (value === "rejected" || value === "superseded" || value === "unsafe_op") return "rejected"
+  return null
+}
+
+function formatLastActive(value?: string) {
+  if (!value) return "未打开"
+  const time = new Date(value).getTime()
+  if (!Number.isFinite(time)) return "最近"
+  const diff = Date.now() - time
+  if (diff < 60_000) return "刚刚"
+  if (diff < 3_600_000) return `${Math.max(1, Math.round(diff / 60_000))} 分钟前`
+  if (diff < 86_400_000) return `${Math.max(1, Math.round(diff / 3_600_000))} 小时前`
+  return `${Math.max(1, Math.round(diff / 86_400_000))} 天前`
+}
+
+function formatTime(value?: string) {
+  const date = value ? new Date(value) : new Date()
+  if (!Number.isFinite(date.getTime())) return new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })
+  return date.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })
+}

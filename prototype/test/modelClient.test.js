@@ -1,7 +1,7 @@
 import http from "node:http";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildOpenAiCompatiblePayload, callAgent } from "../src/modelClient.js";
+import { buildAnthropicMessagesPayload, buildOpenAiCompatiblePayload, callAgent } from "../src/modelClient.js";
 
 test("OpenAI-compatible client retries retryable rate-limit responses", async () => {
   let requestCount = 0;
@@ -28,13 +28,34 @@ test("OpenAI-compatible client retries retryable rate-limit responses", async ()
       apiKey: "secret-test-key",
       model: "runtime-model",
       retry: { maxRetries: 1, backoffMs: 0 }
-    }, [{ role: "user", content: "Question" }], { timeoutMs: 1000 });
+    }, [{ role: "user", content: "Question" }], {
+      timeoutMs: 1000,
+      allowUnsafePrivateNetwork: true
+    });
 
     assert.equal(requestCount, 2);
     assert.match(text, /Recovered/);
   } finally {
     await close(server);
   }
+});
+
+test("OpenAI-compatible client rejects unsafe metadata and private API base URLs", async () => {
+  await assert.rejects(() => callAgent({
+    id: "metadata-agent",
+    provider: "openai-compatible",
+    apiBaseUrl: "http://169.254.169.254/latest",
+    apiKey: "secret-test-key",
+    model: "runtime-model"
+  }, [{ role: "user", content: "Question" }], { timeoutMs: 1000 }), /Blocked unsafe API base URL/);
+
+  await assert.rejects(() => callAgent({
+    id: "private-agent",
+    provider: "openai-compatible",
+    apiBaseUrl: "http://192.168.1.10/v1",
+    apiKey: "secret-test-key",
+    model: "runtime-model"
+  }, [{ role: "user", content: "Question" }], { timeoutMs: 1000 }), /Blocked unsafe API base URL/);
 });
 
 test("OpenAI-compatible client does not retry non-retryable errors", async () => {
@@ -58,7 +79,10 @@ test("OpenAI-compatible client does not retry non-retryable errors", async () =>
       apiKey: "secret-test-key",
       model: "runtime-model",
       retry: { maxRetries: 2, backoffMs: 0 }
-    }, [{ role: "user", content: "Question" }], { timeoutMs: 1000 }), /HTTP 400/);
+    }, [{ role: "user", content: "Question" }], {
+      timeoutMs: 1000,
+      allowUnsafePrivateNetwork: true
+    }), /HTTP 400/);
 
     assert.equal(requestCount, 1);
   } finally {
@@ -89,6 +113,7 @@ test("OpenAI-compatible client schedules requests through rate limits", async ()
   };
   const options = {
     timeoutMs: 1000,
+    allowUnsafePrivateNetwork: true,
     rateWindowMs: 100,
     now: () => clock,
     sleep: async (ms) => {
@@ -117,6 +142,16 @@ test("OpenAI-compatible payload does not add provider cache metadata by default"
 
   assert.equal(payload.messages, messages);
   assert.equal(typeof payload.messages[1].content, "string");
+  assert.equal(payload.max_tokens, 4096);
+});
+
+test("OpenAI-compatible payload includes configurable max_tokens for Claude-style proxies", () => {
+  const payload = buildOpenAiCompatiblePayload({ maxTokens: 1234 }, {
+    model: "runtime-model",
+    messages: [{ role: "user", content: "Question" }]
+  });
+
+  assert.equal(payload.max_tokens, 1234);
 });
 
 test("OpenAI-compatible payload can add explicit provider prompt cache block after question", () => {
@@ -159,7 +194,10 @@ test("OpenAI-compatible HTTP request keeps default message content as plain stri
     }, [
       { role: "system", content: "Return JSON only." },
       { role: "user", content: "Question: Build it.\n\nRound: 1\n\nMember context:\nPlain" }
-    ], { timeoutMs: 1000 });
+    ], {
+      timeoutMs: 1000,
+      allowUnsafePrivateNetwork: true
+    });
 
     assert.equal(typeof requestBody.messages[1].content, "string");
   } finally {
@@ -190,13 +228,79 @@ test("OpenAI-compatible HTTP request sends cache metadata only when explicitly e
     }, [
       { role: "system", content: "Return JSON only." },
       { role: "user", content: "Question: Build it.\n\nRound: 1\n\nMember context:\nVolatile" }
-    ], { timeoutMs: 1000 });
+    ], {
+      timeoutMs: 1000,
+      allowUnsafePrivateNetwork: true
+    });
 
     assert.equal(requestBody.messages[1].content[0].text, "Question: Build it.");
     assert.deepEqual(requestBody.messages[1].content[0].cache_control, { type: "ephemeral" });
   } finally {
     await close(server);
   }
+});
+
+test("Anthropic official client uses Messages API headers and parses text", async () => {
+  let requestBody;
+  let requestHeaders;
+  let requestUrl;
+  const server = http.createServer(async (req, res) => {
+    requestUrl = req.url;
+    requestHeaders = req.headers;
+    requestBody = JSON.parse(await readRequestBody(req));
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({
+      content: [{ type: "text", text: JSON.stringify({ status: "skip", reason: "Claude accepted." }) }]
+    }));
+  });
+  await listen(server);
+  const address = server.address();
+
+  try {
+    const text = await callAgent({
+      id: "claude-agent",
+      provider: "anthropic-messages",
+      apiBaseUrl: `http://127.0.0.1:${address.port}/v1`,
+      apiKey: "anthropic-test-key",
+      model: "claude-test-model"
+    }, [
+      { role: "system", content: "Return JSON only." },
+      { role: "user", content: "Question: Build it." }
+    ], {
+      timeoutMs: 1000,
+      allowUnsafePrivateNetwork: true
+    });
+
+    assert.equal(requestUrl, "/v1/messages");
+    assert.equal(requestHeaders["x-api-key"], "anthropic-test-key");
+    assert.equal(requestHeaders["anthropic-version"], "2023-06-01");
+    assert.equal(requestBody.model, "claude-test-model");
+    assert.equal(requestBody.system, "Return JSON only.");
+    assert.deepEqual(requestBody.messages, [{ role: "user", content: "Question: Build it." }]);
+    assert.match(text, /Claude accepted/);
+  } finally {
+    await close(server);
+  }
+});
+
+test("Anthropic payload separates system from user messages", () => {
+  const payload = buildAnthropicMessagesPayload({ maxTokens: 123 }, {
+    model: "claude-test-model",
+    messages: [
+      { role: "system", content: "System A" },
+      { role: "system", content: "System B" },
+      { role: "assistant", content: "Previous answer" },
+      { role: "user", content: "Question" }
+    ]
+  });
+
+  assert.equal(payload.model, "claude-test-model");
+  assert.equal(payload.system, "System A\n\nSystem B");
+  assert.equal(payload.max_tokens, 123);
+  assert.deepEqual(payload.messages, [
+    { role: "assistant", content: "Previous answer" },
+    { role: "user", content: "Question" }
+  ]);
 });
 
 function writeOpenAiStream(res, text) {

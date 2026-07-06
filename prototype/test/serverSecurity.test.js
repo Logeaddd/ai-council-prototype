@@ -48,14 +48,17 @@ test("server clamps requested autonomous max rounds", () => {
   assert.match(serverJs, /Math\.min\(100, Math\.max\(1, count\)\)/);
 });
 
-test("server exposes group index endpoints without folder deletion", () => {
+test("server exposes group index endpoints with guarded real group deletion", () => {
   const serverJs = fs.readFileSync(path.join(root, "src", "server.js"), "utf8");
   const gitignore = readRepoGitignore();
   assert.match(serverJs, /\/api\/groups-index/);
   assert.match(serverJs, /upsertGroupIndexRecord/);
   assert.match(serverJs, /removeGroupIndexRecord/);
   assert.match(serverJs, /resolveWorkspacePath\(body\.path \|\| body\.groupPath, "groupPath"\)/);
-  assert.doesNotMatch(serverJs, /rmSync\(.*group/i);
+  assert.match(serverJs, /deleteWorkspaceGroupFolder/);
+  assert.match(serverJs, /resolveWorkspacePath\(inputPath, "groupPath"\)/);
+  assert.match(serverJs, /group\.json/);
+  assert.match(serverJs, /fs\.rmSync\(groupPath, \{ recursive: true, force: true \}\)/);
   assert.match(gitignore, /prototype\/user-data\//);
 });
 
@@ -72,6 +75,24 @@ test("server persists global requirements inside guarded group paths", () => {
   assert.match(serverJs, /resolveWorkspacePath\(body\.groupPath, "groupPath"\)/);
   assert.match(serverJs, /updateGroupGlobalRequirement/);
   assert.match(serverJs, /globalRequirement: String\(globalRequirement \|\| ""\)\.trim\(\)/);
+});
+
+test("server exposes guarded group settings and seat config persistence", () => {
+  const serverJs = fs.readFileSync(path.join(root, "src", "server.js"), "utf8");
+  const workspaceManagerJs = fs.readFileSync(path.join(root, "src", "workspaceManager.js"), "utf8");
+  assert.match(serverJs, /\/api\/group\/settings/);
+  assert.match(serverJs, /\/api\/group\/seat/);
+  assert.match(serverJs, /\/api\/workspace\/add-member/);
+  assert.match(serverJs, /updateGroupSettings/);
+  assert.match(serverJs, /updateGroupSeat/);
+  assert.match(serverJs, /resolveWorkspacePath\(body\.groupPath, "groupPath"\)/);
+  assert.match(serverJs, /addMember\(body\)/);
+  assert.match(workspaceManagerJs, /export function addMember/);
+  assert.match(workspaceManagerJs, /nextSeatId/);
+  assert.match(workspaceManagerJs, /createMemberDirs\(privateFolder\)/);
+  assert.match(serverJs, /normalizeMaxRounds\(settings\.maxRounds\)/);
+  assert.match(serverJs, /group\.permissions\.seatTiers\[seatId\] = normalizePermissionTier\(permission\)/);
+  assert.match(serverJs, /Git is required before enabling tool permissions/);
 });
 
 test("server gates tool permission tiers on git", () => {
@@ -91,7 +112,9 @@ test("server stores app settings under local user-data and guards groups root", 
   assert.match(serverJs, /readAppSettings/);
   assert.match(serverJs, /updateAppSettings/);
   assert.match(serverJs, /resolveWorkspaceRoot\(body\.groupsRoot\)/);
+  assert.match(serverJs, /AI_COUNCIL_DATA_DIR/);
   assert.match(appSettingsJs, /user-data/);
+  assert.match(appSettingsJs, /userDataDir/);
   assert.match(appSettingsJs, /app-settings\.json/);
   assert.match(appSettingsJs, /groupsRoot/);
 });
@@ -112,6 +135,7 @@ test("server exposes guarded file operation endpoints", () => {
   assert.match(serverJs, /listFileOperationReviewItems/);
   assert.match(serverJs, /readFileOperationAuditLog/);
   assert.match(serverJs, /approvePendingFileOperation/);
+  assert.match(serverJs, /rejectPendingFileOperation/);
   assert.match(serverJs, /autoApprovePendingFileOperation/);
   assert.match(serverJs, /executeApprovedFileOperation/);
   assert.match(serverJs, /resolveWorkspacePath\(requireQuery\(url, "groupPath"\), "groupPath"\)/);

@@ -17,7 +17,13 @@ export function updateAppSettings(baseDir, patch, defaults = {}) {
 }
 
 export function appSettingsPath(baseDir) {
-  return path.join(baseDir, "user-data", "app-settings.json");
+  return path.join(userDataDir(baseDir), "app-settings.json");
+}
+
+export function userDataDir(baseDir) {
+  return process.env.AI_COUNCIL_DATA_DIR
+    ? path.resolve(process.env.AI_COUNCIL_DATA_DIR)
+    : path.join(baseDir, "user-data");
 }
 
 function normalizeSettings(value = {}) {

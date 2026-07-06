@@ -40,7 +40,14 @@ export function initGroupWorkspace(options) {
       role: member.role || "",
       team: member.team || "",
       weight: member.weight ?? 1,
-      enabled: member.enabled ?? true
+      enabled: member.enabled ?? true,
+      reviewer: Boolean(member.reviewer),
+      mandatoryRedTeam: Boolean(member.mandatoryRedTeam || member.reviewer),
+      judge: Boolean(member.judge),
+      providerPreset: member.providerPreset || "",
+      apiBaseUrl: member.apiBaseUrl || member.apiUrl || "",
+      apiUrl: member.apiUrl || member.apiBaseUrl || "",
+      apiKey: member.apiKey || ""
     };
   });
 
@@ -93,6 +100,63 @@ export function replaceMember(options) {
   return { group, seat, previous };
 }
 
+export function addMember(options) {
+  const groupPath = path.resolve(requireOption(options.groupPath, "groupPath"));
+  const groupFile = path.join(groupPath, "group.json");
+  const group = JSON.parse(fs.readFileSync(groupFile, "utf8"));
+  const seats = group.seats || group.agents || [];
+  const seatId = options.seatId || nextSeatId(seats);
+  if (seats.some((item) => (item.seatId || item.id) === seatId)) {
+    throw new Error(`Seat already exists: ${seatId}`);
+  }
+  const displayName = String(options.displayName || options.name || `成员 ${seats.length + 1}`).trim();
+  const role = normalizeSeatRole(options.role);
+  const reviewer = role === "reviewer" || Boolean(options.reviewer);
+  const judge = role === "summarizer" || Boolean(options.judge);
+  const folderName = uniqueSegment(
+    groupPath,
+    "members",
+    options.folderName || displayName || seatId
+  );
+  const privateFolder = path.join(groupPath, "members", folderName);
+  createMemberDirs(privateFolder);
+  writeText(path.join(privateFolder, "handoff.md"), initialHandoff(displayName));
+
+  const seat = {
+    seatId,
+    displayName,
+    currentModel: options.model || displayName,
+    model: options.model || displayName,
+    privateFolder: path.relative(groupPath, privateFolder).replaceAll("\\", "/"),
+    role,
+    team: options.team || "",
+    weight: options.weight ?? 1,
+    enabled: options.enabled ?? true,
+    reviewer,
+    mandatoryRedTeam: Boolean(options.mandatoryRedTeam || reviewer),
+    judge,
+    reviewIntensity: normalizeReviewIntensity(options.reviewIntensity),
+    providerPreset: options.providerPreset || "",
+    apiBaseUrl: options.apiBaseUrl || options.apiUrl || "",
+    apiUrl: options.apiUrl || options.apiBaseUrl || "",
+    apiKey: options.apiKey || ""
+  };
+
+  if (group.seats) group.seats.push(seat);
+  else if (group.agents) group.agents.push(seat);
+  else group.seats = [seat];
+  const permission = options.permission || options.tier;
+  if (permission !== undefined) {
+    group.permissions = group.permissions || { defaultTier: "text", seatTiers: {} };
+    group.permissions.defaultTier = normalizePermissionTier(group.permissions.defaultTier || "text");
+    group.permissions.seatTiers = group.permissions.seatTiers || {};
+    group.permissions.seatTiers[seatId] = normalizePermissionTier(permission);
+  }
+  writeJson(groupFile, group);
+  appendLog(groupPath, `Added ${seatId}: ${displayName}; privateFolder=${seat.privateFolder}`);
+  return { ok: true, group, seat };
+}
+
 function createMemberDirs(privateFolder) {
   createDirs([
     privateFolder,
@@ -142,4 +206,27 @@ function uniqueSegment(root, parent, preferred) {
     index += 1;
   }
   return candidate;
+}
+
+function nextSeatId(seats) {
+  const used = new Set(seats.map((item) => item.seatId || item.id).filter(Boolean));
+  let index = seats.length + 1;
+  while (used.has(`seat_${String(index).padStart(2, "0")}`)) index += 1;
+  return `seat_${String(index).padStart(2, "0")}`;
+}
+
+function normalizeReviewIntensity(value) {
+  const count = Number.parseInt(String(value || 2), 10);
+  if (count === 1 || count === 2 || count === 3) return count;
+  return 2;
+}
+
+function normalizeSeatRole(value) {
+  if (value === "reviewer" || value === "summarizer") return value;
+  return "ordinary";
+}
+
+function normalizePermissionTier(value) {
+  if (["text", "tool", "full"].includes(value)) return value;
+  throw new Error(`Unknown permission tier: ${value}`);
 }

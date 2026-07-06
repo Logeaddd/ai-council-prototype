@@ -34,10 +34,12 @@ Copy-Item -Path (Join-Path $electronDist "*") -Destination $outDir -Recurse -For
 Rename-Item -LiteralPath (Join-Path $outDir "electron.exe") -NewName "AI-Council.exe"
 New-Item -ItemType Directory -Force -Path $appDir | Out-Null
 
-$includeDirs = @("desktop", "public", "src")
+$includeDirs = @("desktop", "src")
 foreach ($dir in $includeDirs) {
   Copy-Item -LiteralPath (Join-Path $projectDir $dir) -Destination $appDir -Recurse -Force
 }
+New-Item -ItemType Directory -Force -Path (Join-Path $appDir "renderer") | Out-Null
+Copy-Item -LiteralPath (Join-Path $projectDir "renderer\out") -Destination (Join-Path $appDir "renderer") -Recurse -Force
 New-Item -ItemType Directory -Force -Path (Join-Path $appDir "config") | Out-Null
 $includeConfigFiles = @("group.example.json", "group.real.example.json")
 foreach ($file in $includeConfigFiles) {

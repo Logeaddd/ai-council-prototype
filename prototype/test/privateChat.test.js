@@ -53,6 +53,26 @@ test("private chat accepts custom member id aliases", () => {
   assert.equal(readPrivateChatMessages(group.groupPath, "builder")[0].text, "Private note.");
 });
 
+test("private chat can persist failed replies as error status", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-private-error-"));
+  const group = initGroupWorkspace({
+    root,
+    groupFolderName: "private-chat-error-group",
+    members: [
+      { seatId: "builder", displayName: "Builder", model: "deepseek-chat" }
+    ]
+  });
+
+  appendPrivateChatMessage(group.groupPath, "builder", "（回复失败：HTTP 400）", {
+    from: "builder",
+    status: "error"
+  });
+
+  const [message] = readPrivateChatMessages(group.groupPath, "builder");
+  assert.equal(message.from, "builder");
+  assert.equal(message.status, "error");
+});
+
 test("private chat can create inbox for browser-only custom seats", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-private-browser-seat-"));
   const group = initGroupWorkspace({

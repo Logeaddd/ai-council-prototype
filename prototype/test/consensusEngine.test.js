@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { markAutoCompletedResponses, scoreConsensus, shouldStop, updateUnresolvedObjections } from "../src/consensusEngine.js";
+import { scoreConsensus, shouldStop, updateUnresolvedObjections } from "../src/consensusEngine.js";
 import { applyObjectionLedger, normalizeObjectionItems } from "../src/objectionLedger.js";
 
 const agents = [
@@ -181,12 +181,11 @@ test("ordinary non-reviewer objections do not become unresolved blockers", () =>
   };
 
   updateUnresolvedObjections(session, agents[0], session.messages[0].response);
-  markAutoCompletedResponses(session, agents);
   const consensus = scoreConsensus(agents, session);
 
   assert.deepEqual(session.unresolvedObjections.builder, []);
-  assert.equal(session.messages[0].response.status, "auto_completed");
-  assert.equal(consensus.score, 1);
+  assert.equal(session.messages[0].response.status, "speak");
+  assert.equal(consensus.score, 0);
 });
 
 test("explicit reviewer objections still become unresolved dissent", () => {
@@ -211,7 +210,7 @@ test("explicit reviewer objections still become unresolved dissent", () => {
   assert.deepEqual(consensus.dissentingAgents, ["Builder", "Critic / Red Team"]);
 });
 
-test("marks repeated non-red-team deliverables as auto-completed support", () => {
+test("repeated non-red-team deliverables stay real speak events until the model returns skip", () => {
   const session = {
     unresolvedObjections: {
       builder: [],
@@ -226,17 +225,16 @@ test("marks repeated non-red-team deliverables as auto-completed support", () =>
     ]
   };
 
-  markAutoCompletedResponses(session, agents);
   updateUnresolvedObjections(session, agents[0], session.messages.at(-1).response);
   const consensus = scoreConsensus(agents, session);
 
-  assert.equal(session.messages.at(-1).response.status, "auto_completed");
-  assert.equal(consensus.score, 1);
-  assert.deepEqual(consensus.supportingAgents, ["Builder"]);
+  assert.equal(session.messages.at(-1).response.status, "speak");
+  assert.equal(consensus.score, 0);
+  assert.deepEqual(consensus.supportingAgents, []);
   assert.equal(session.messages[1].response.status, "speak");
 });
 
-test("marks repeated file operation proposals as auto-completed support", () => {
+test("file operation proposals are not converted into skip support", () => {
   const session = {
     unresolvedObjections: {
       builder: [],
@@ -250,13 +248,38 @@ test("marks repeated file operation proposals as auto-completed support", () => 
     ]
   };
 
-  markAutoCompletedResponses(session, agents);
   updateUnresolvedObjections(session, agents[0], session.messages.at(-1).response);
   const consensus = scoreConsensus(agents, session);
 
-  assert.equal(session.messages.at(-1).response.status, "auto_completed");
-  assert.equal(consensus.score, 1);
-  assert.deepEqual(consensus.supportingAgents, ["Builder"]);
+  assert.equal(session.messages.at(-1).response.status, "speak");
+  assert.equal(consensus.score, 0);
+  assert.deepEqual(consensus.supportingAgents, []);
+});
+
+test("current-round all-skip requires real skip responses in that round", () => {
+  const session = {
+    unresolvedObjections: {
+      builder: [],
+      critic: [],
+      judge: []
+    },
+    messages: [
+      { round: 1, agentId: "builder", response: { status: "speak", suggested_revision: "v1" } },
+      { round: 1, agentId: "critic", response: { status: "skip", reason: "No objection." } },
+      { round: 2, agentId: "critic", response: { status: "skip", reason: "No objection." } }
+    ]
+  };
+
+  const consensus = scoreConsensus(agents, session, { round: 2 });
+
+  assert.equal(consensus.score, 0);
+  assert.equal(shouldStop(consensus, agents, session, { maxRounds: 5, minConsensusWeight: 1, stopWhenAllSkip: true }, 2), false);
+
+  session.messages.push({ round: 2, agentId: "builder", response: { status: "skip", reason: "No new objection." } });
+  const afterRealSkip = scoreConsensus(agents, session, { round: 2 });
+
+  assert.equal(afterRealSkip.score, 1);
+  assert.equal(shouldStop(afterRealSkip, agents, session, { maxRounds: 5, minConsensusWeight: 1, stopWhenAllSkip: true }, 2), true);
 });
 
 test("ledger blocker survives plain skip until reviewer resolves it by id", () => {

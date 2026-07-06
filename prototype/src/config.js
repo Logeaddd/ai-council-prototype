@@ -56,7 +56,7 @@ export function validateGroupConfig(group) {
 export function validateRuntimeEnv(group) {
   const missing = new Set();
   for (const agent of group.agents.filter((item) => item.enabled)) {
-    if (agent.provider !== "openai-compatible") continue;
+    if (!["openai-compatible", "anthropic-messages"].includes(agent.provider)) continue;
     if (!agent.apiKey && agent.apiKeyEnv && !process.env[agent.apiKeyEnv]) missing.add(agent.apiKeyEnv);
     if (!agent.apiKey && !agent.apiKeyEnv) missing.add(`${agent.id}.apiKey`);
     collectEnvReference(agent.apiBaseUrl, missing);

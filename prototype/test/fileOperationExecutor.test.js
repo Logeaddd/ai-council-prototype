@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { approveExecutionStandards, prepareExecutionStandards } from "../src/executionStandards.js";
-import { approvePendingFileOperation, autoApprovePendingFileOperation, executeApprovedFileOperation } from "../src/fileOperationExecutor.js";
+import { approvePendingFileOperation, autoApprovePendingFileOperation, executeApprovedFileOperation, rejectPendingFileOperation } from "../src/fileOperationExecutor.js";
 import { parseFileOperationProposals } from "../src/fileOperations.js";
 import { enqueueFileOperationProposals, listPendingFileOperationProposals, readFileOperationAuditLog } from "../src/fileOperationQueue.js";
 import { initGroupWorkspace } from "../src/workspaceManager.js";
@@ -49,6 +49,32 @@ test("execution refuses pending proposals that are not explicitly approved", () 
     proposalId: pending.id
   }), /not approved/);
   assert.equal(fs.existsSync(path.join(group.groupPath, "src", "output.js")), false);
+});
+
+test("pending proposals can be rejected without touching files", () => {
+  const group = createReadyGitGroup();
+  const pending = createPendingProposal(group.groupPath, {
+    op: "write",
+    path: "src/rejected.js",
+    content: "export const rejected = true;\n",
+    reason: "Create rejected module.",
+    expected_effect: "Module would exist."
+  });
+
+  const rejected = rejectPendingFileOperation({
+    groupPath: group.groupPath,
+    proposalId: pending.id,
+    rejectedBy: "user"
+  });
+
+  assert.equal(rejected.status, "rejected");
+  assert.equal(fs.existsSync(path.join(group.groupPath, "src", "rejected.js")), false);
+  assert.equal(readFileOperationAuditLog(group.groupPath).some((item) => item.action === "rejected" && item.id === pending.id), true);
+  assert.throws(() => approvePendingFileOperation({
+    groupPath: group.groupPath,
+    proposalId: pending.id,
+    approvedBy: "user"
+  }), /not pending user approval/);
 });
 
 test("execution refuses overwrite without dangerous confirmation", () => {

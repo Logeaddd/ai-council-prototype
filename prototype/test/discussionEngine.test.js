@@ -53,6 +53,158 @@ test("onModelCall records round and final model payloads", async () => {
   assert.match(calls[1].rawText, /answer/);
 });
 
+test("group model call trace records prompt and output summaries without api keys", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-model-trace-"));
+  const server = http.createServer(async (req, res) => {
+    for await (const _ of req) {}
+    writeOpenAiStream(res, JSON.stringify({
+      status: "speak",
+      argument: "Traceable answer.",
+      objections: [],
+      confidence: 0.8,
+      memory_candidates: []
+    }));
+  });
+  await listen(server);
+  const address = server.address();
+  const apiBaseUrl = `http://127.0.0.1:${address.port}/v1`;
+
+  try {
+    const group = validateGroupConfig({
+      id: "trace-group",
+      name: "Trace Group",
+      settings: {
+        maxRounds: 1,
+        minConsensusWeight: 1,
+        stopWhenAllSkip: true,
+        agentTimeoutMs: 3000,
+        allowSoloCouncil: true
+      },
+      agents: [
+        {
+          id: "writer",
+          name: "Writer",
+          role: "Writer",
+          provider: "openai-compatible",
+          apiBaseUrl,
+          allowUnsafePrivateNetwork: true,
+          apiKey: "secret-runtime-key",
+          model: "trace-model",
+          weight: 1,
+          enabled: true
+        }
+      ]
+    });
+
+    await runCouncil("Trace this call.", group, tmp, { groupPath: tmp });
+
+    const traceFile = path.join(tmp, "shared", "logs", "model-calls.jsonl");
+    const lines = fs.readFileSync(traceFile, "utf8").trim().split(/\r?\n/).map((line) => JSON.parse(line));
+    assert.ok(lines.some((line) => line.event === "start" && `${line.input.head}${line.input.tail}`.includes("Trace this call.")));
+    assert.ok(lines.some((line) => line.event === "complete" && `${line.output.head}${line.output.tail}`.includes("Traceable answer.")));
+    assert.doesNotMatch(fs.readFileSync(traceFile, "utf8"), /secret-runtime-key/);
+  } finally {
+    await close(server);
+  }
+});
+
+test("independent work mode isolates ordinary member prompts at the provider boundary", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-independent-"));
+  const requests = [];
+  const server = http.createServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    requests.push({
+      model: body.model,
+      prompt: body.messages.map((message) => {
+        if (typeof message.content === "string") return message.content;
+        return JSON.stringify(message.content);
+      }).join("\n")
+    });
+    const payloads = {
+      "alpha-model": {
+        status: "speak",
+        argument: "ALPHA_PROVIDER_SECRET",
+        objections: [],
+        confidence: 0.8,
+        memory_candidates: []
+      },
+      "beta-model": {
+        status: "speak",
+        argument: "BETA_PROVIDER_SECRET",
+        objections: [],
+        confidence: 0.8,
+        memory_candidates: []
+      },
+      "monitor-model": {
+        status: "speak",
+        argument: "Monitor can inspect independent answers.",
+        objections: [],
+        confidence: 0.8,
+        memory_candidates: []
+      },
+      "judge-model": {
+        answer: "Independent answers were collected and summarized.",
+        consensus_score: 1,
+        supporting_agents: ["Alpha", "Beta"],
+        dissenting_agents: [],
+        minority_report: "",
+        risks: [],
+        next_actions: [],
+        selected_file_operation_ids: [],
+        memory_candidates: []
+      }
+    };
+    writeOpenAiStream(res, JSON.stringify(payloads[body.model]));
+  });
+  await listen(server);
+  const address = server.address();
+  const apiBaseUrl = `http://127.0.0.1:${address.port}/v1`;
+
+  try {
+    const baseAgent = {
+      provider: "openai-compatible",
+      apiBaseUrl,
+      allowUnsafePrivateNetwork: true,
+      apiKey: "secret-runtime-key",
+      weight: 1,
+      enabled: true,
+      providerLimits: { contextWindow: 12000, maxOutputTokens: 1000 }
+    };
+    const group = validateGroupConfig({
+      id: "independent-mode",
+      name: "Independent Mode",
+      settings: {
+        workMode: "independent",
+        maxRounds: 1,
+        minConsensusWeight: 0.5,
+        stopWhenAllSkip: true,
+        agentTimeoutMs: 3000
+      },
+      agents: [
+        { ...baseAgent, id: "alpha", name: "Alpha", role: "Answer A", model: "alpha-model" },
+        { ...baseAgent, id: "beta", name: "Beta", role: "Answer B", model: "beta-model" },
+        { ...baseAgent, id: "monitor", name: "Monitor", role: "Supervisor", model: "monitor-model", mandatoryRedTeam: true },
+        { ...baseAgent, id: "judge", name: "Judge", role: "Judge", model: "judge-model", judge: true }
+      ]
+    });
+
+    await runCouncil("Answer without seeing other members.", group, tmp);
+
+    const byModel = new Map(requests.map((request) => [request.model, request.prompt]));
+    assert.equal(requests.map((request) => request.model).join(","), "alpha-model,beta-model,monitor-model,judge-model");
+    assert.doesNotMatch(byModel.get("beta-model"), /ALPHA_PROVIDER_SECRET/);
+    assert.match(byModel.get("beta-model"), /Independent answer mode/);
+    assert.match(byModel.get("monitor-model"), /ALPHA_PROVIDER_SECRET/);
+    assert.match(byModel.get("monitor-model"), /BETA_PROVIDER_SECRET/);
+    assert.match(byModel.get("judge-model"), /ALPHA_PROVIDER_SECRET/);
+    assert.match(byModel.get("judge-model"), /BETA_PROVIDER_SECRET/);
+  } finally {
+    await close(server);
+  }
+});
+
 test("final consensus_score is engine-controlled, not judge-controlled", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-"));
   const group = validateGroupConfig({
@@ -162,6 +314,7 @@ test("final_state is engine-controlled and unresolved blockers override judge pr
     const baseAgent = {
       provider: "openai-compatible",
       apiBaseUrl,
+      allowUnsafePrivateNetwork: true,
       apiKey: "secret-runtime-key",
       model: "runtime-model",
       weight: 1,
@@ -344,6 +497,14 @@ test("finalizer-only judge skips round calls and non-blocking reviewer risk does
         memory_candidates: []
       },
       {
+        status: "skip",
+        reason: "No new change after the implementation was accepted."
+      },
+      {
+        status: "skip",
+        reason: "No blocking objection remains."
+      },
+      {
         answer: "Use the reduce implementation. Keep the non-number note as a non-blocking risk.",
         consensus_score: 0,
         supporting_agents: ["Builder"],
@@ -363,6 +524,7 @@ test("finalizer-only judge skips round calls and non-blocking reviewer risk does
     const baseAgent = {
       provider: "openai-compatible",
       apiBaseUrl,
+      allowUnsafePrivateNetwork: true,
       apiKey: "secret-runtime-key",
       model: "runtime-model",
       weight: 1,
@@ -382,19 +544,22 @@ test("finalizer-only judge skips round calls and non-blocking reviewer risk does
 
     const { session } = await runCouncil("请写 sumNumbers(numbers)。", group, tmp);
 
-    assert.equal(requests.length, 3);
+    assert.equal(requests.length, 5);
     assert.deepEqual(session.messages.map((message) => `${message.round}:${message.agentId}`), [
       "1:builder",
-      "1:reviewer"
+      "1:reviewer",
+      "2:builder",
+      "2:reviewer"
     ]);
-    assert.equal(session.consensusByRound.length, 1);
+    assert.deepEqual(session.messages.slice(2).map((message) => message.response.status), ["skip", "skip"]);
+    assert.equal(session.consensusByRound.length, 2);
     assert.equal(session.finalDecision.final_state, "usable_with_risks");
   } finally {
     await close(server);
   }
 });
 
-test("ordinary answer counterarguments do not force extra council rounds", async () => {
+test("ordinary answer counterarguments require a real follow-up skip before convergence", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-counterargument-"));
   const requests = [];
   let callCount = 0;
@@ -425,6 +590,10 @@ test("ordinary answer counterarguments do not force extra council rounds", async
         memory_candidates: []
       },
       {
+        status: "skip",
+        reason: "No new objection after the handled counterargument."
+      },
+      {
         answer: "Final answer with a handled counterargument.",
         consensus_score: 0,
         supporting_agents: ["Builder"],
@@ -444,6 +613,7 @@ test("ordinary answer counterarguments do not force extra council rounds", async
     const baseAgent = {
       provider: "openai-compatible",
       apiBaseUrl,
+      allowUnsafePrivateNetwork: true,
       apiKey: "secret-runtime-key",
       model: "runtime-model",
       weight: 1,
@@ -462,12 +632,13 @@ test("ordinary answer counterarguments do not force extra council rounds", async
 
     const { session } = await runCouncil("Discuss freedom and answer one counterargument.", group, tmp);
 
-    assert.equal(requests.length, 2);
+    assert.equal(requests.length, 3);
     assert.deepEqual(session.messages.map((message) => `${message.round}:${message.agentId}:${message.response.status}`), [
-      "1:builder:auto_completed"
+      "1:builder:speak",
+      "2:builder:skip"
     ]);
     assert.deepEqual(session.unresolvedObjections.builder, []);
-    assert.equal(session.consensusByRound.length, 1);
+    assert.equal(session.consensusByRound.length, 2);
     assert.equal(session.finalDecision.final_state, "ready_to_execute");
   } finally {
     await close(server);
@@ -884,6 +1055,7 @@ test("runtime OpenAI-compatible agents use direct API keys without storing secre
           role: "Judge",
           provider: "openai-compatible",
           apiBaseUrl,
+          allowUnsafePrivateNetwork: true,
           apiKey: "secret-runtime-key",
           model: "runtime-model",
           weight: 1,
@@ -954,6 +1126,7 @@ test("failed runtime calls become unavailable and do not count as support", asyn
           role: "Judge",
           provider: "openai-compatible",
           apiBaseUrl,
+          allowUnsafePrivateNetwork: true,
           apiKey: "secret-runtime-key",
           model: "runtime-model",
           weight: 1,
@@ -1016,6 +1189,7 @@ test("non-compressible core overflow marks an agent unavailable before API call"
           role: "Judge",
           provider: "openai-compatible",
           apiBaseUrl,
+          allowUnsafePrivateNetwork: true,
           apiKey: "secret-runtime-key",
           model: "runtime-model",
           weight: 1,
@@ -1087,6 +1261,7 @@ test("member token session budget blocks provider call without skip support", as
           role: "Judge",
           provider: "openai-compatible",
           apiBaseUrl,
+          allowUnsafePrivateNetwork: true,
           apiKey: "secret-runtime-key",
           model: "runtime-model",
           weight: 1,
@@ -1184,6 +1359,7 @@ test("member cost session budget blocks provider call without skip support", asy
           role: "Judge",
           provider: "openai-compatible",
           apiBaseUrl,
+          allowUnsafePrivateNetwork: true,
           apiKey: "secret-runtime-key",
           model: "runtime-model",
           weight: 1,
@@ -1285,6 +1461,7 @@ test("member budget warning is surfaced without blocking provider call", async (
           role: "Judge",
           provider: "openai-compatible",
           apiBaseUrl,
+          allowUnsafePrivateNetwork: true,
           apiKey: "secret-runtime-key",
           model: "runtime-model",
           weight: 1,
@@ -1331,6 +1508,7 @@ test("final judge core overflow falls back without provider call", async () => {
     const baseAgent = {
       provider: "openai-compatible",
       apiBaseUrl,
+      allowUnsafePrivateNetwork: true,
       apiKey: "secret-runtime-key",
       model: "runtime-model",
       weight: 1,
@@ -1417,6 +1595,7 @@ test("final judge token budget falls back without final provider call", async ()
     const baseAgent = {
       provider: "openai-compatible",
       apiBaseUrl,
+      allowUnsafePrivateNetwork: true,
       apiKey: "secret-runtime-key",
       model: "runtime-model",
       weight: 1,
@@ -1525,6 +1704,7 @@ test("final judge cost budget falls back without final provider call", async () 
     const baseAgent = {
       provider: "openai-compatible",
       apiBaseUrl,
+      allowUnsafePrivateNetwork: true,
       apiKey: "secret-runtime-key",
       model: "runtime-model",
       weight: 1,
@@ -1646,6 +1826,7 @@ test("sessions preserve structured artifacts for final synthesis and saved outpu
           role: "Judge",
           provider: "openai-compatible",
           apiBaseUrl,
+          allowUnsafePrivateNetwork: true,
           apiKey: "secret-artifact-key",
           model: "runtime-model",
           weight: 1,
@@ -1740,6 +1921,7 @@ test("group sessions preserve sandboxed file operation proposals without executi
           role: "Executor",
           provider: "openai-compatible",
           apiBaseUrl,
+          allowUnsafePrivateNetwork: true,
           apiKey: "secret-runtime-key",
           model: "runtime-model",
           providerLimits: { contextWindow: 12000, maxOutputTokens: 1000 },
@@ -1833,9 +2015,9 @@ test("workspace round prompts gate file_operations by seat permission tier", asy
         agentTimeoutMs: 1000
       },
       agents: [
-        { id: "architect", name: "Architect", role: "Architect", provider: "openai-compatible", apiBaseUrl, apiKey: "secret-runtime-key", model: "runtime-model", weight: 1, enabled: true },
-        { id: "executor", name: "Executor", role: "Executor", provider: "openai-compatible", apiBaseUrl, apiKey: "secret-runtime-key", model: "runtime-model", weight: 1, enabled: true },
-        { id: "reviewer", name: "Reviewer", role: "Reviewer", provider: "openai-compatible", apiBaseUrl, apiKey: "secret-runtime-key", model: "runtime-model", weight: 1, enabled: true, mandatoryRedTeam: true, judge: true }
+        { id: "architect", name: "Architect", role: "Architect", provider: "openai-compatible", apiBaseUrl, allowUnsafePrivateNetwork: true, apiKey: "secret-runtime-key", model: "runtime-model", weight: 1, enabled: true },
+        { id: "executor", name: "Executor", role: "Executor", provider: "openai-compatible", apiBaseUrl, allowUnsafePrivateNetwork: true, apiKey: "secret-runtime-key", model: "runtime-model", weight: 1, enabled: true },
+        { id: "reviewer", name: "Reviewer", role: "Reviewer", provider: "openai-compatible", apiBaseUrl, allowUnsafePrivateNetwork: true, apiKey: "secret-runtime-key", model: "runtime-model", weight: 1, enabled: true, mandatoryRedTeam: true, judge: true }
       ]
     });
 
@@ -1949,6 +2131,7 @@ test("ready final state auto-executes safe file proposals for full tier", async 
           role: "Executor",
           provider: "openai-compatible",
           apiBaseUrl,
+          allowUnsafePrivateNetwork: true,
           apiKey: "secret-runtime-key",
           model: "runtime-model",
           providerLimits: { contextWindow: 12000, maxOutputTokens: 1000 },
@@ -2095,6 +2278,7 @@ test("final judge selection executes only selected file proposals", async () => 
           role: "Executor",
           provider: "openai-compatible",
           apiBaseUrl,
+          allowUnsafePrivateNetwork: true,
           apiKey: "secret-runtime-key",
           model: "runtime-model",
           providerLimits: { contextWindow: 12000, maxOutputTokens: 1000 },
@@ -2190,6 +2374,7 @@ test("round prompts use member context sections instead of full transcript repla
     const baseAgent = {
       provider: "openai-compatible",
       apiBaseUrl,
+      allowUnsafePrivateNetwork: true,
       apiKey: "secret-runtime-key",
       model: "runtime-model",
       weight: 1,
@@ -2304,6 +2489,7 @@ test("round prompts include persisted member and group summaries", async () => {
           role: "Builder",
           provider: "openai-compatible",
           apiBaseUrl,
+          allowUnsafePrivateNetwork: true,
           apiKey: "secret-runtime-key",
           model: "runtime-model",
           weight: 1,
@@ -2533,6 +2719,7 @@ test("private boss messages are visible only to the addressed agent", async () =
     const baseAgent = {
       provider: "openai-compatible",
       apiBaseUrl,
+      allowUnsafePrivateNetwork: true,
       apiKey: "secret-runtime-key",
       model: "runtime-model",
       weight: 1,
@@ -2599,6 +2786,7 @@ test("private chat memory reaches the same agent in council for browser-only sea
     const baseAgent = {
       provider: "openai-compatible",
       apiBaseUrl,
+      allowUnsafePrivateNetwork: true,
       apiKey: "secret-runtime-key",
       model: "runtime-model",
       weight: 1,
@@ -2688,6 +2876,7 @@ test("explicit reviewer skip is forced in round one but ordinary critic may skip
     const baseAgent = {
       provider: "openai-compatible",
       apiBaseUrl,
+      allowUnsafePrivateNetwork: true,
       apiKey: "secret-runtime-key",
       model: "runtime-model",
       weight: 1,
@@ -2733,6 +2922,7 @@ test("cycle continuation context is injected into the next council prompt", asyn
     const baseAgent = {
       provider: "openai-compatible",
       apiBaseUrl,
+      allowUnsafePrivateNetwork: true,
       apiKey: "secret-runtime-key",
       model: "runtime-model",
       weight: 1,

@@ -1,15 +1,19 @@
 import { scheduleProviderCall } from "./rateLimiter.js";
+import { assertSafeApiBaseUrl } from "./apiBaseUrlGuard.js";
 
 export async function callAgent(agent, messages, options = {}) {
   if (agent.provider === "mock") return callMockAgent(agent, messages, options);
   if (agent.provider === "openai-compatible") return callOpenAiCompatible(agent, messages, options);
+  if (agent.provider === "anthropic-messages") return callAnthropicMessages(agent, messages, options);
   throw new Error(`Unsupported provider: ${agent.provider}`);
 }
 
 async function callOpenAiCompatible(agent, messages, options) {
   const apiKey = agent.apiKey || (agent.apiKeyEnv ? process.env[agent.apiKeyEnv] : "");
   if (!apiKey) throw new Error(`Missing API key for agent: ${agent.id}`);
-  const apiBaseUrl = resolveMaybeEnv(agent.apiBaseUrl);
+  const apiBaseUrl = await assertSafeApiBaseUrl(resolveMaybeEnv(agent.apiBaseUrl), {
+    allowUnsafePrivateNetwork: Boolean(options.allowUnsafePrivateNetwork || agent.allowUnsafePrivateNetwork)
+  });
   const model = resolveMaybeEnv(agent.model);
   const maxRetries = normalizeRetryCount(agent.retry?.maxRetries ?? agent.rateLimit?.maxRetries ?? options.maxRetries ?? 1);
   const backoffMs = normalizeBackoffMs(agent.retry?.backoffMs ?? agent.rateLimit?.backoffMs ?? options.backoffMs ?? 250);
@@ -33,6 +37,69 @@ async function callOpenAiCompatible(agent, messages, options) {
       }
     }
   }, options);
+}
+
+async function callAnthropicMessages(agent, messages, options) {
+  const apiKey = agent.apiKey || (agent.apiKeyEnv ? process.env[agent.apiKeyEnv] : "");
+  if (!apiKey) throw new Error(`Missing API key for agent: ${agent.id}`);
+  const apiBaseUrl = await assertSafeApiBaseUrl(resolveMaybeEnv(agent.apiBaseUrl), {
+    allowUnsafePrivateNetwork: Boolean(options.allowUnsafePrivateNetwork || agent.allowUnsafePrivateNetwork)
+  });
+  const model = resolveMaybeEnv(agent.model);
+  if (!model) throw new Error(`Missing model for agent: ${agent.id}`);
+  const maxRetries = normalizeRetryCount(agent.retry?.maxRetries ?? agent.rateLimit?.maxRetries ?? options.maxRetries ?? 1);
+  const backoffMs = normalizeBackoffMs(agent.retry?.backoffMs ?? agent.rateLimit?.backoffMs ?? options.backoffMs ?? 250);
+
+  return await scheduleProviderCall(agent, messages, async () => {
+    for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+      try {
+        return await callAnthropicMessagesOnce({
+          agent,
+          apiBaseUrl,
+          apiKey,
+          model,
+          messages,
+          options
+        });
+      } catch (error) {
+        if (error.name === "AbortError" || attempt >= maxRetries || !isRetryableError(error)) {
+          throw error;
+        }
+        await sleep(backoffMs * (2 ** attempt), options.signal);
+      }
+    }
+  }, options);
+}
+
+async function callAnthropicMessagesOnce({ agent, apiBaseUrl, apiKey, model, messages, options }) {
+  const controller = new AbortController();
+  const abortFromParent = () => controller.abort();
+  options.signal?.addEventListener("abort", abortFromParent, { once: true });
+  const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? 60000);
+  const payload = buildAnthropicMessagesPayload(agent, {
+    model,
+    messages
+  });
+  try {
+    const response = await fetch(`${apiBaseUrl.replace(/\/$/, "")}/messages`, {
+      method: "POST",
+      signal: controller.signal,
+      headers: {
+        "x-api-key": apiKey,
+        "anthropic-version": agent.anthropicVersion || "2023-06-01",
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(payload)
+    });
+    if (!response.ok) throw await httpError(response);
+    const parsed = await response.json();
+    const text = readAnthropicText(parsed);
+    if (text) options.onDelta?.(text);
+    return text;
+  } finally {
+    options.signal?.removeEventListener("abort", abortFromParent);
+    clearTimeout(timeout);
+  }
 }
 
 async function callOpenAiCompatibleOnce({ agent, apiBaseUrl, apiKey, model, messages, options }) {
@@ -66,9 +133,55 @@ export function buildOpenAiCompatiblePayload(agent, { model, messages }) {
   return {
     model,
     messages: applyProviderPromptCache(agent, messages),
+    max_tokens: normalizeMaxTokens(agent.maxTokens ?? agent.max_tokens ?? 4096),
     temperature: 0.2,
     stream: true
   };
+}
+
+export function buildAnthropicMessagesPayload(agent, { model, messages }) {
+  const system = messages
+    .filter((message) => message.role === "system")
+    .map((message) => stringifyMessageContent(message.content))
+    .filter(Boolean)
+    .join("\n\n");
+  const anthropicMessages = messages
+    .filter((message) => message.role !== "system")
+    .map((message) => ({
+      role: message.role === "assistant" ? "assistant" : "user",
+      content: stringifyMessageContent(message.content)
+    }))
+    .filter((message) => message.content);
+
+  return {
+    model,
+    ...(system ? { system } : {}),
+    messages: anthropicMessages.length ? anthropicMessages : [{ role: "user", content: "" }],
+    max_tokens: normalizeMaxTokens(agent.maxTokens ?? agent.max_tokens ?? 4096),
+    temperature: 0.2
+  };
+}
+
+function readAnthropicText(payload) {
+  if (typeof payload?.content === "string") return payload.content;
+  if (!Array.isArray(payload?.content)) return "";
+  return payload.content
+    .map((block) => block?.type === "text" ? block.text || "" : "")
+    .join("");
+}
+
+function stringifyMessageContent(content) {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return String(content || "");
+  return content
+    .map((part) => typeof part === "string" ? part : part?.text || "")
+    .join("");
+}
+
+function normalizeMaxTokens(value) {
+  const count = Number(value);
+  if (!Number.isFinite(count)) return 4096;
+  return Math.max(1, Math.min(64000, Math.floor(count)));
 }
 
 function applyProviderPromptCache(agent = {}, messages = []) {

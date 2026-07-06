@@ -1,5 +1,7 @@
 import http from "node:http";
+import fs from "node:fs";
 import net from "node:net";
+import path from "node:path";
 import { app, BrowserWindow, Menu, shell } from "electron";
 
 const DEFAULT_PORT = Number(process.env.AI_COUNCIL_UI_PORT || 4317);
@@ -39,6 +41,7 @@ async function startDesktop() {
   if (mainWindow) return;
   Menu.setApplicationMenu(null);
   const port = await findOpenPort(DEFAULT_PORT);
+  configureDataDirectory();
   process.env.AI_COUNCIL_UI_HOST = HOST;
   process.env.AI_COUNCIL_UI_PORT = String(port);
   await import("../src/server.js");
@@ -87,6 +90,34 @@ async function startDesktop() {
     mainWindow = null;
   });
   await mainWindow.loadURL(`http://${HOST}:${port}`);
+}
+
+function configureDataDirectory() {
+  if (process.env.AI_COUNCIL_DATA_DIR) return;
+  const configuredPath = readConfiguredDataPath();
+  const dataDir = configuredPath || app.getPath("userData");
+  process.env.AI_COUNCIL_DATA_DIR = path.resolve(dataDir);
+  if (!process.env.AI_COUNCIL_WORKSPACE_ROOT) {
+    process.env.AI_COUNCIL_WORKSPACE_ROOT = process.env.AI_COUNCIL_DATA_DIR;
+  }
+}
+
+function readConfiguredDataPath() {
+  if (!app.isPackaged) return "";
+  const installDir = path.dirname(process.execPath);
+  for (const candidate of [
+    path.join(installDir, "data-path.txt"),
+    path.join(process.resourcesPath, "data-path.txt")
+  ]) {
+    try {
+      if (!fs.existsSync(candidate)) continue;
+      const value = fs.readFileSync(candidate, "utf8").trim();
+      if (value) return value;
+    } catch {
+      continue;
+    }
+  }
+  return "";
 }
 
 function findOpenPort(startPort) {

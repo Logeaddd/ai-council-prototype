@@ -1,6 +1,6 @@
 {
   "name": "ai-council-prototype",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "private": true,
   "main": "./desktop/main.mjs",
@@ -14,13 +14,51 @@
     "workspace:demo": "node ./src/cli.js workspace init-group --root ./workspace-demo --group-folder demo-group --members gpt-5,claude",
     "write-flow:demo": "node ./src/cli.js write-flow create-draft --group-path ./workspace-demo/demo-group --recorder seat_01 --reviewers seat_02 --content \"Demo recorder draft.\"",
     "ui": "node ./src/server.js",
+    "renderer:install": "npm --prefix ./renderer install",
+    "renderer:build": "npm --prefix ./renderer run build",
     "desktop": "electron ./desktop/main.mjs",
     "test": "node --test test/*.test.js",
     "show-memory": "node ./src/cli.js list-memory-pending",
     "desktop:shortcut": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/install-desktop-shortcut.ps1",
-    "desktop:portable": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/build-portable.ps1"
+    "desktop:portable": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/build-portable.ps1",
+    "desktop:installer": "npm run renderer:build && electron-builder --win nsis",
+    "desktop:dist": "npm run renderer:build && npm run desktop:portable && electron-builder --win nsis"
   },
   "devDependencies": {
-    "electron": "^38.0.0"
+    "electron": "^38.0.0",
+    "electron-builder": "^26.15.3"
+  },
+  "build": {
+    "appId": "com.ai-council.app",
+    "productName": "AI Council",
+    "asar": false,
+    "directories": {
+      "output": "dist-installer"
+    },
+    "files": [
+      "desktop/**/*",
+      "src/**/*",
+      "renderer/out/**/*",
+      "config/group.example.json",
+      "config/group.real.example.json",
+      "package.json",
+      ".env.example",
+      "README.md"
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "artifactName": "AI-Council-Setup-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "AI Council",
+      "include": "build/installer.nsh"
+    }
   }
 }

@@ -89,16 +89,13 @@ function parseJsonLike(rawText) {
 }
 
 function invalidJsonResponse(rawText) {
+  const preview = String(rawText ?? "").replace(/\s+/g, " ").trim().slice(0, 180);
   return {
-    status: "speak",
-    position: "unclear",
-    argument: String(rawText ?? "").trim(),
-    objections: ["invalid_json"],
-    suggested_revision: "Return valid JSON with status, argument, objections, confidence, and memory_candidates.",
-    artifacts: [],
-    file_operations: [],
-    confidence: 0,
-    memory_candidates: []
+    status: "unavailable",
+    reason: preview
+      ? `invalid_json_response: ${preview}`
+      : "invalid_json_response",
+    retryable: true
   };
 }
 

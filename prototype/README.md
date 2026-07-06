@@ -1,128 +1,57 @@
-# AI Council Prototype
+# AI Council
 
-Local CLI-first P0 prototype for the AI Council project.
+AI Council 是一个本地 AI 议会工具。
 
-## Run mock smoke test
+你可以建一个小组，把不同模型放进去，让它们围绕同一个问题讨论、互相补充、互相审查。也可以只放一个模型，当普通助手用。
 
-```bash
-node ./src/cli.js run --question "Should we build CLI-first?" --group ./config/group.example.json
-```
+当前版本：`v0.2.0`
 
-The example group uses `provider: "mock"`, so it does not need API keys.
+## Windows 安装包
 
-## Use a real OpenAI-compatible endpoint
-
-Use `config/group.real.json`, then set:
-
-```bash
-AI_COUNCIL_API_BASE_URL=https://api.openai.com/v1
-AI_COUNCIL_API_KEY=replace-me
-AI_COUNCIL_MODEL=gpt-5
-```
-
-Run:
-
-```bash
-node ./src/cli.js run --question "Should this real API test proceed?" --group ./config/group.real.json --show-transcript
-```
-
-Or:
-
-```bash
-npm run smoke:real
-```
-
-## Commands
-
-```bash
-node ./src/cli.js run --question "..." --group ./config/group.example.json
-node ./src/cli.js run --question "..." --group ./config/group.example.json --show-transcript
-node ./src/cli.js run --question-file ./question.md --group ./config/group.example.json
-node ./src/cli.js show-session ./sessions/session_....json
-node ./src/cli.js list-memory-pending
-node ./src/cli.js workspace init-group --root "D:\AI小组工作区" --group-folder "产品决策组" --members "gpt-5,claude"
-node ./src/cli.js workspace replace-member --group-path "D:\AI小组工作区\产品决策组" --seat-id seat_01 --next-name gpt-6
-node ./src/cli.js workspace replace-member --group-path "D:\AI小组工作区\产品决策组" --seat-id seat_01 --next-name gpt-6 --new-private-folder --folder-name gpt-6-fresh
-node ./src/cli.js write-flow create-draft --group-path "D:\AI小组工作区\产品决策组" --recorder seat_01 --reviewers seat_02 --content "..."
-node ./src/cli.js write-flow add-review --group-path "D:\AI小组工作区\产品决策组" --draft-id draft_... --reviewer seat_02 --verdict approve --comment "..."
-node ./src/cli.js write-flow finalize --group-path "D:\AI小组工作区\产品决策组" --draft-id draft_... --approved-by user
-```
-
-## Local UI
-
-```bash
-npm run ui
-```
-
-Open:
+去 GitHub Releases 下载：
 
 ```text
-http://localhost:4317
+AI-Council-Setup-0.2.0.exe
 ```
 
-The UI is intentionally small: workspace, members, conversation, recorder draft, and replacement flow.
+安装时可以选择软件安装位置，也可以选择数据保存位置。
 
-## Desktop app
+## 基本用法
 
-Install dependencies, then start the Electron shell:
+1. 新建议会组。
+2. 添加成员。
+3. 给成员填模型供应商、API 地址、API Key 和模型名。
+4. 在底部输入问题，点开始。
+
+API Key 是模型平台给你的密钥。不要发给别人。
+
+如果你用中转站，供应商选“自定义/中转”，把对方给你的 API 地址填进去。很多地址需要带 `/v1`，这里容易填错。
+
+## 主要功能
+
+- 多个 AI 一起讨论一个问题。
+- 每个成员可以单独设置模型、角色和权限。
+- 可以设置审查者，让它专门挑问题。
+- 支持私聊单个成员。
+- 支持模型检测；检测失败时也可以手动填模型名。
+- 支持会议决议、待处理问题、文件操作提案。
+- 文件写入走本地审批和权限，不会把电脑文件权限直接交给模型。
+
+## 现在还没重点做的
+
+- 上下文压缩和长期记忆还比较早期。
+- 成本统计只在有真实用量或用户配置价格时才可靠。
+- 这是早期版本，重要项目请先用测试文件夹试。
+
+## 开发者运行
 
 ```bash
 npm install
 npm run desktop
 ```
 
-The desktop shell opens the local UI in an app window, starts the local server automatically, and suppresses the default browser context menu. Right-clicking an occupied agent seat still opens the AI Council seat menu.
-
-On this machine, the desktop shortcut `AI小组启动.bat` calls `start-desktop.ps1` and starts the same desktop shell.
-
-If Electron download fails with a local certificate error, run npm with the system certificate store enabled, then retry:
+打安装包：
 
 ```bash
-set NODE_OPTIONS=--use-system-ca
-npm install
+npm run desktop:installer
 ```
-
-## P0 behavior implemented
-
-- Reads group config.
-- Requires an enabled `mandatoryRedTeam` agent.
-- Requires at least one enabled non-Red-Team agent.
-- Supports `mock` and `openai-compatible` providers.
-- Parses round responses with `speak` / `skip`.
-- Uses a dedicated final Judge call.
-- Excludes Red Team from the consensus denominator.
-- Counts consensus only after explicit non-Red-Team `skip`.
-- Uses the engine-computed final `consensus_score`.
-- Preserves Red Team dissent in final output.
-- Writes session JSON files.
-- Writes memory candidates to `memory/pending.jsonl`.
-- Stores display-ready dialogue as `{agentName}说：{content}`.
-
-## Tests
-
-```bash
-npm test
-```
-
-The tests cover config validation, response/convergence semantics, engine-owned final score, and the default mock council smoke path.
-
-## Workspace folders
-
-The workspace CLI implements the group folder model:
-
-- User-defined root folder.
-- User-defined group folder name.
-- `shared/` team area.
-- `members/{memberFolderName}/` private areas.
-- Member replacement inherits the previous private folder by default.
-- Use `--new-private-folder` to give the replacement a separate private folder.
-
-## Recorder and review flow
-
-The write-flow CLI implements the approval-gated recorder flow:
-
-- User-approved content becomes a recorder draft.
-- The recorder is a selected member seat.
-- Reviewers are optional and selected by seat id.
-- Reviewer comments are stored separately under `approvals/`.
-- Final approval moves the draft to `shared/approved/` or `shared/memory_pending/`.

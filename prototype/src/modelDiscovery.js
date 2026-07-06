@@ -1,16 +1,15 @@
 ﻿import { findProviderPreset, resolveProviderBaseUrl } from "./providerRegistry.js";
 
+import { assertSafeApiBaseUrl } from "./apiBaseUrlGuard.js";
+
 const CACHE_TTL_MS = 5 * 60 * 1000;
 const cache = new Map();
 
 export async function discoverProviderModels(options = {}) {
   const providerId = options.providerId || "custom";
   const preset = findProviderPreset(providerId);
-  const apiBaseUrl = resolveProviderBaseUrl(providerId, options.apiBaseUrl);
+  let apiBaseUrl = resolveProviderBaseUrl(providerId, options.apiBaseUrl);
   const timeoutMs = normalizeTimeout(options.timeoutMs || 8000);
-  const cacheKey = JSON.stringify({ providerId, apiBaseUrl, endpoint: preset.modelsEndpoint || "/models" });
-  const cached = readCache(cacheKey);
-  if (cached && options.useCache !== false) return { ...cached, source: "cache" };
 
   if (!apiBaseUrl) {
     return {
@@ -23,13 +22,32 @@ export async function discoverProviderModels(options = {}) {
     };
   }
 
+  try {
+    apiBaseUrl = await assertSafeApiBaseUrl(apiBaseUrl, {
+      allowUnsafePrivateNetwork: Boolean(options.allowUnsafePrivateNetwork)
+    });
+  } catch (error) {
+    return {
+      ok: false,
+      source: "error",
+      providerId,
+      apiBaseUrl,
+      models: [],
+      error: error.message
+    };
+  }
+
+  const cacheKey = JSON.stringify({ providerId, apiBaseUrl, endpoint: preset.modelsEndpoint || "/models" });
+  const cached = readCache(cacheKey);
+  if (cached && options.useCache !== false) return { ...cached, source: "cache" };
+
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetch(modelsUrl(apiBaseUrl, preset.modelsEndpoint), {
       method: "GET",
       signal: controller.signal,
-      headers: authHeaders(options.apiKey)
+      headers: authHeaders(options.apiKey, preset)
     });
     const text = await response.text();
     if (!response.ok) {
@@ -40,7 +58,18 @@ export async function discoverProviderModels(options = {}) {
         apiBaseUrl,
         models: [],
         status: response.status,
-        error: text.slice(0, 500)
+        error: modelDiscoveryError(response.status, text)
+      };
+    }
+    if (looksLikeHtml(text)) {
+      return {
+        ok: false,
+        source: "real_response",
+        providerId,
+        apiBaseUrl,
+        models: [],
+        status: response.status,
+        error: modelDiscoveryError(response.status, text)
       };
     }
     const parsed = text ? JSON.parse(text) : {};
@@ -81,7 +110,7 @@ export async function discoverProviderModels(options = {}) {
 }
 
 export async function checkProviderHealth(options = {}) {
-  const result = await discoverProviderModels({ ...options, useCache: options.useCache });
+  const result = await discoverProviderModels(options);
   return {
     ok: result.ok,
     source: result.source,
@@ -104,10 +133,15 @@ function modelsUrl(apiBaseUrl, endpoint = "/models") {
   return `${base}${suffix}`;
 }
 
-function authHeaders(apiKey) {
+function authHeaders(apiKey, preset = {}) {
   const headers = { Accept: "application/json" };
   const key = String(apiKey || "").trim();
-  if (key) headers.Authorization = `Bearer ${key}`;
+  if (key && preset.transport === "anthropic-messages") {
+    headers["x-api-key"] = key;
+    headers["anthropic-version"] = preset.anthropicVersion || "2023-06-01";
+  } else if (key) {
+    headers.Authorization = `Bearer ${key}`;
+  }
   return headers;
 }
 
@@ -117,6 +151,22 @@ function parseModelList(payload) {
     .map((item) => typeof item === "string" ? { id: item } : { id: item.id || item.name || "", owned_by: item.owned_by || item.owner || "" })
     .filter((item) => item.id)
     .sort((a, b) => a.id.localeCompare(b.id));
+}
+
+function modelDiscoveryError(status, text = "") {
+  if (status === 401 || status === 403) {
+    return "密钥无效、权限不足，或该接口不允许拉取模型列表。";
+  }
+  const trimmed = String(text || "").trim();
+  if (looksLikeHtml(trimmed)) {
+    return "接口返回了网页，不是模型 API。中转地址通常需要填到 /v1。";
+  }
+  return trimmed.slice(0, 500);
+}
+
+function looksLikeHtml(text = "") {
+  const trimmed = String(text || "").trim();
+  return /^<!doctype html/i.test(trimmed) || /^<html/i.test(trimmed);
 }
 
 function readCache(key) {

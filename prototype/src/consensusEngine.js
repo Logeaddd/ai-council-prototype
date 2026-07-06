@@ -1,10 +1,10 @@
-export function scoreConsensus(enabledAgents, session) {
+export function scoreConsensus(enabledAgents, session, options = {}) {
   const votingAgents = consensusVotingAgents(enabledAgents);
   const nonVotingAgents = new Set(enabledAgents.filter((agent) => !votingAgents.includes(agent)).map((agent) => agent.id));
   const nonRedTeam = votingAgents.filter((agent) => !agent.mandatoryRedTeam);
   const denominator = sumWeights(nonRedTeam) || 1;
   let supportingWeight = 0;
-  const latest = latestResponses(session);
+  const latest = options.round ? responsesForRound(session, options.round) : latestResponses(session);
   const supportingAgents = [];
   const dissentingAgents = [];
 
@@ -47,7 +47,7 @@ export function shouldStop(consensus, enabledAgents, session, settings, round) {
   if (consensus.score >= settings.minConsensusWeight) return true;
   if (!settings.stopWhenAllSkip) return false;
 
-  const latest = latestResponses(session);
+  const latest = responsesForRound(session, round);
   const nonRedTeam = consensusVotingAgents(enabledAgents).filter((agent) => !agent.mandatoryRedTeam);
   return nonRedTeam.every((agent) => isSupportingResponse(latest.get(agent.id)));
 }
@@ -56,6 +56,15 @@ export function latestResponses(session) {
   const latest = new Map();
   for (const message of session.messages) latest.set(message.agentId, message.response);
   return latest;
+}
+
+export function responsesForRound(session, round) {
+  const current = new Map();
+  const hasRoundMetadata = session.messages.some((message) => message.round != null);
+  for (const message of session.messages) {
+    if (message.round === round) current.set(message.agentId, message.response);
+  }
+  return hasRoundMetadata ? current : latestResponses(session);
 }
 
 export function updateUnresolvedObjections(session, agent, response) {
@@ -70,30 +79,8 @@ export function updateUnresolvedObjections(session, agent, response) {
   session.unresolvedObjections[agent.id] = response.objections ?? [];
 }
 
-export function markAutoCompletedResponses(session, enabledAgents) {
-  const autoCompletableIds = new Set(enabledAgents.filter((agent) => !isReviewerLikeAgent(agent)).map((agent) => agent.id));
-  const priorDeliveries = new Set();
-  const hasBlockingObjection = hasUnresolvedBlockingObjection(session);
-
-  for (const message of session.messages) {
-    if (!autoCompletableIds.has(message.agentId)) continue;
-    const response = message.response;
-    if (!response || response.status !== "speak") continue;
-    if (unresolvedForAgent(session, message.agentId).length) continue;
-
-    if (hasDeliverable(response)) {
-      if (priorDeliveries.has(message.agentId) || !hasBlockingObjection) {
-        response.status = "auto_completed";
-        response.reason = response.reason || "Delivered a final artifact or revision with no unresolved blocking objection.";
-      } else {
-        priorDeliveries.add(message.agentId);
-      }
-    }
-  }
-}
-
 export function isSupportingResponse(response) {
-  return response?.status === "skip" || response?.status === "auto_completed";
+  return response?.status === "skip";
 }
 
 export function isUnavailableResponse(response) {
@@ -108,19 +95,6 @@ export function isConsensusParticipant(agent) {
 
 function consensusVotingAgents(enabledAgents) {
   return enabledAgents.filter(isConsensusParticipant);
-}
-
-function hasDeliverable(response) {
-  return Boolean(response.suggested_revision) || Boolean(response.artifacts?.length) || Boolean(response.file_operations?.length);
-}
-
-function hasUnresolvedBlockingObjection(session) {
-  if (session.objectionLedger && Object.keys(session.objectionLedger).length) {
-    return Object.values(session.objectionLedger)
-      .flatMap((byId) => Object.values(byId))
-      .some((item) => item.status !== "resolved" && item.blocks_final);
-  }
-  return Object.values(session.unresolvedObjections || {}).some((items) => Array.isArray(items) && items.length > 0);
 }
 
 function isReviewerLikeAgent(agent = {}) {

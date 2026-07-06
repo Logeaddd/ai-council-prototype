@@ -63,8 +63,45 @@ test("desktop portable build script packages the local Electron runtime", () => 
   assert.match(portable, /Rename-Item/);
   assert.match(portable, /Compress-Archive/);
   assert.match(portable, /desktop\\main\.mjs/);
+  assert.match(portable, /renderer\\out/);
   assert.match(portable, /group\.example\.json/);
   assert.match(portable, /group\.real\.example\.json/);
   assert.doesNotMatch(portable, /includeDirs = @\("config"/);
+  assert.doesNotMatch(portable, /Copy-Item .*public/);
   assert.doesNotMatch(portable, /group\.real\.json/);
+});
+
+test("desktop shell reads packaged data directory selection", () => {
+  const main = fs.readFileSync(path.join(root, "desktop", "main.mjs"), "utf8");
+  assert.match(main, /configureDataDirectory\(\)/);
+  assert.match(main, /AI_COUNCIL_DATA_DIR/);
+  assert.match(main, /AI_COUNCIL_WORKSPACE_ROOT/);
+  assert.match(main, /app\.getPath\("userData"\)/);
+  assert.match(main, /app\.isPackaged/);
+  assert.match(main, /data-path\.txt/);
+  assert.match(main, /process\.resourcesPath/);
+});
+
+test("installer build produces a normal NSIS setup with configurable install and data paths", () => {
+  const pkg = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
+  const installer = fs.readFileSync(path.join(root, "build", "installer.nsh"), "utf8");
+  assert.equal(pkg.scripts["desktop:installer"], "npm run renderer:build && electron-builder --win nsis");
+  assert.equal(pkg.scripts["desktop:dist"], "npm run renderer:build && npm run desktop:portable && electron-builder --win nsis");
+  assert.equal(pkg.build.productName, "AI Council");
+  assert.equal(pkg.build.asar, false);
+  assert.equal(pkg.build.directories.output, "dist-installer");
+  assert.deepEqual(pkg.build.win.target, ["nsis"]);
+  assert.equal(pkg.build.win.artifactName, "AI-Council-Setup-${version}.${ext}");
+  assert.equal(pkg.build.nsis.oneClick, false);
+  assert.equal(pkg.build.nsis.allowToChangeInstallationDirectory, true);
+  assert.equal(pkg.build.nsis.include, "build/installer.nsh");
+  assert.ok(pkg.build.files.includes("renderer/out/**/*"));
+  assert.ok(pkg.build.files.includes("desktop/**/*"));
+  assert.ok(pkg.build.files.includes("src/**/*"));
+  assert.match(installer, /Page custom DataDirPageCreate DataDirPageLeave/);
+  assert.match(installer, /数据保存位置/);
+  assert.match(installer, /SelectFolderDialog/);
+  assert.match(installer, /CreateDirectory "\$AI_COUNCIL_DATA_DIR"/);
+  assert.match(installer, /FileOpen \$0 "\$INSTDIR\\data-path\.txt" w/);
+  assert.doesNotMatch(installer, /Codex|harness|prototype|debug/i);
 });

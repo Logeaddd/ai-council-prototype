@@ -15,6 +15,7 @@ export function appendPrivateChatMessage(groupPath, seatId, text, options = {}) 
     from: options.from || "boss",
     audience: canonicalSeatId(seat),
     text: content,
+    ...(options.status ? { status: String(options.status) } : {}),
     createdAt: nowIso()
   };
   fs.mkdirSync(privateInboxDir(groupPath, seat), { recursive: true });
