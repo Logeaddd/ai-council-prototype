@@ -458,11 +458,16 @@ async function replyToPrivateMessage(groupPath, seatId, body) {
   const agent = (runtimeGroup.agents || []).find((item) => item.id === seatId || item.name === seatId);
   if (!agent || agent.enabled === false) return null;
   const history = readPrivateContextMessages(groupPath, seatId, { seat: body.seat });
-  const role = agent.role || agent.name || "成员";
+  const role = safePrivateRoleIdentity(agent);
+  const assignment = privateRoleAssignment(agent);
   const messages = [
     {
       role: "system",
       content: `你是 ${role}（${agent.name || role}），正在与老板进行一对一私聊。请用中文简洁、直接地回复，只代表你自己，不要假装其他成员，也不要提及其他成员的私聊内容。`
+    },
+    {
+      role: "system",
+      content: assignment
     },
     ...history.map((item) => ({
       role: item.from === "boss" ? "user" : "assistant",
@@ -477,6 +482,32 @@ async function replyToPrivateMessage(groupPath, seatId, body) {
   } catch (error) {
     return appendPrivateChatMessage(groupPath, seatId, `（回复失败：${error.message}）`, { from: seatId, seat: body.seat, status: "error" });
   }
+}
+
+function safePrivateRoleIdentity(agent = {}) {
+  const rawRole = String(agent.role || "").trim();
+  if (!isPrivateReviewerLike(agent) && isStaleReviewerRoleText(rawRole)) {
+    return agent.name || "ordinary member";
+  }
+  return rawRole || agent.name || "ordinary member";
+}
+
+function privateRoleAssignment(agent = {}) {
+  if (isPrivateReviewerLike(agent)) {
+    return "Current assignment: explicitly assigned reviewer. Reviewer duties are active.";
+  }
+  if (agent.judge) {
+    return "Current assignment: final summarizer. Reviewer duties are not active unless the reviewer flag is explicitly enabled.";
+  }
+  return "Current assignment: ordinary member. You are not a reviewer, not a supervisor, and not a red-team member. If earlier private chat or discussion history says you were a reviewer, that content is stale and must be ignored.";
+}
+
+function isPrivateReviewerLike(agent = {}) {
+  return Boolean(agent.reviewer || agent.mandatoryRedTeam);
+}
+
+function isStaleReviewerRoleText(value) {
+  return /reviewer|red\s*team|审查|复查|监督员/i.test(String(value || ""));
 }
 
 function loadCouncilGroupFromRequest(body) {

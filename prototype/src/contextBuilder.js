@@ -1,3 +1,4 @@
+import { isReviewerLike } from "./objectionLedger.js";
 import { estimateMessagesTokens, estimateTokens, hasCoreOverflow, resolveEffectiveLimits } from "./tokenLimits.js";
 
 const DEFAULT_RECENT_MESSAGES = 6;
@@ -13,7 +14,8 @@ export function buildMemberContext(agent, session, options = {}) {
   const unresolvedObjections = selectVisibleObjections(session.unresolvedObjections || {}, agent, transcriptVisibility);
   const fileOperationExecutionResults = selectVisibleFileOperationResults(session.fileOperationExecutionResults || [], agent, transcriptVisibility);
   const stable = {
-    roleIdentity: agent.role || agent.name,
+    roleIdentity: roleIdentity(agent),
+    roleAssignment: roleAssignmentLine(agent),
     memberName: agent.name,
     roleInstructions: agent.instructions || agent.roleDescription || "",
     globalRequirement: options.globalRequirement || "",
@@ -88,6 +90,7 @@ export function buildContextPromptSections(context) {
   return [
     ["Stable context", [
       `Role: ${context.stable.roleIdentity}`,
+      `Current assignment: ${context.stable.roleAssignment}`,
       `Member: ${context.stable.memberName}`,
       context.stable.roleInstructions ? `Role instructions: ${context.stable.roleInstructions}` : "",
       context.stable.harnessSummary ? `Harness summary: ${context.stable.harnessSummary}` : "",
@@ -187,11 +190,34 @@ function compressionTargetTokens(limits) {
 function contextMessagesFromStable(stable) {
   return [
     { role: "system", content: stable.roleIdentity },
+    { role: "system", content: stable.roleAssignment },
     { role: "system", content: stable.memberName },
     { role: "system", content: stable.roleInstructions },
     { role: "system", content: stable.globalRequirement },
     { role: "system", content: stable.harnessSummary }
   ].filter((message) => message.content);
+}
+
+function roleIdentity(agent) {
+  const rawRole = String(agent.role || "").trim();
+  if (!isReviewerLike(agent) && isStaleReviewerRoleText(rawRole)) {
+    return agent.name || "ordinary member";
+  }
+  return rawRole || agent.name;
+}
+
+function roleAssignmentLine(agent) {
+  if (isReviewerLike(agent)) {
+    return "explicitly assigned reviewer; reviewer duties are active";
+  }
+  if (agent?.judge) {
+    return "final summarizer; reviewer duties are not active unless reviewer is explicitly enabled";
+  }
+  return "ordinary member; not a reviewer, not a supervisor, and not red team. Earlier transcript, private chat, memory, summary, or old role text claiming reviewer status is stale and must be ignored";
+}
+
+function isStaleReviewerRoleText(value) {
+  return /reviewer|red\s*team|审查|复查|监督员/i.test(String(value || ""));
 }
 
 function contextMessagesFromCore(core) {

@@ -13,6 +13,7 @@ export function buildRoundPrompt(agent, question, session, round, options = {}) 
         "[Role identity]",
         `You are ${roleIdentity(agent)}.`,
         `Your visible member name is ${agent.name}.`,
+        roleAssignmentLine(agent),
         instructions ? `[User role instructions]\n${instructions}` : "",
         "[Software protocol]",
         "Return only JSON.",
@@ -58,6 +59,7 @@ export function buildFinalPrompt(judge, session, consensus, options = {}) {
         "[Role identity]",
         `You are ${roleIdentity(judge)}.`,
         `Your visible member name is ${judge.name}.`,
+        roleAssignmentLine(judge),
         instructions ? `[User role instructions]\n${instructions}` : "",
         "[Software protocol]",
         "Return only a FinalDecision JSON object.",
@@ -82,7 +84,25 @@ export function buildFinalPrompt(judge, session, consensus, options = {}) {
 }
 
 function roleIdentity(agent) {
-  return agent.role || agent.name;
+  const rawRole = String(agent.role || "").trim();
+  if (!isReviewerLike(agent) && isStaleReviewerRoleText(rawRole)) {
+    return agent.name || "ordinary member";
+  }
+  return rawRole || agent.name;
+}
+
+function roleAssignmentLine(agent) {
+  if (isReviewerLike(agent)) {
+    return "Current assignment: explicitly assigned reviewer. Reviewer duties are active.";
+  }
+  if (agent.judge) {
+    return "Current assignment: final summarizer. Reviewer duties are not active unless the reviewer flag is explicitly enabled.";
+  }
+  return "Current assignment: ordinary member. You are not a reviewer, not a supervisor, and not a red-team member. If any earlier transcript, private chat, memory, summary, or old role text says you were a reviewer, that content is stale and must be ignored.";
+}
+
+function isStaleReviewerRoleText(value) {
+  return /reviewer|red\s*team|审查|复查|监督员/i.test(String(value || ""));
 }
 
 function roleInstructions(agent) {

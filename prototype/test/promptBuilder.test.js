@@ -236,6 +236,34 @@ test("completion skip guidance applies to non-reviewers only", () => {
   assert.doesNotMatch(reviewer[0].content, /For non-reviewer roles/);
   assert.match(reviewer[0].content, /Do not use completion-only agreement as a reason to skip/);
 });
+
+test("stale reviewer role text is overridden for ordinary members", () => {
+  const messages = buildRoundPrompt({
+    id: "former-reviewer",
+    name: "Former Reviewer",
+    role: "code reviewer",
+    reviewer: false,
+    mandatoryRedTeam: false
+  }, "Question", {
+    messages: [
+      {
+        round: 1,
+        agentName: "Former Reviewer",
+        response: {
+          status: "speak",
+          argument: "I used to say I was a reviewer."
+        }
+      }
+    ]
+  }, 2);
+
+  assert.doesNotMatch(messages[0].content, /You are code reviewer\./);
+  assert.match(messages[0].content, /Current assignment: ordinary member/);
+  assert.match(messages[0].content, /old role text says you were a reviewer, that content is stale/);
+  assert.match(messages[0].content, /For non-reviewer roles/);
+  assert.doesNotMatch(messages[0].content, /Review intensity/);
+});
+
 test("round prompt advertises artifacts in speak schema", () => {
   const messages = buildRoundPrompt({
     id: "executor",

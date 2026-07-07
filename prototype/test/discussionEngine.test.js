@@ -2815,6 +2815,75 @@ test("private chat memory reaches the same agent in council for browser-only sea
   }
 });
 
+test("cleared reviewer flags override stale reviewer role text at provider boundary", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-stale-reviewer-role-"));
+  const groupPath = path.join(tmp, "group");
+  fs.mkdirSync(path.join(groupPath, "sessions"), { recursive: true });
+  fs.writeFileSync(path.join(groupPath, "group.json"), JSON.stringify({
+    groupPath,
+    seats: [
+      {
+        seatId: "seat_01",
+        displayName: "Former Reviewer",
+        privateFolder: "members/Former Reviewer",
+        role: "code reviewer",
+        reviewer: false,
+        mandatoryRedTeam: false,
+        judge: false
+      }
+    ]
+  }, null, 2), "utf8");
+
+  const requests = [];
+  const server = http.createServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    requests.push(body);
+    writeOpenAiStream(res, JSON.stringify({ status: "skip", reason: "No new point.", memory_candidates: [] }));
+  });
+  await listen(server);
+  const apiBaseUrl = "http://127.0.0.1:" + server.address().port + "/v1";
+
+  try {
+    const group = validateGroupConfig({
+      id: "stale-reviewer-role",
+      name: "Stale Reviewer Role",
+      settings: { maxRounds: 1, minConsensusWeight: 1, stopWhenAllSkip: true, agentTimeoutMs: 1000, allowSoloCouncil: true },
+      agents: [
+        {
+          id: "seat_01",
+          name: "Former Reviewer",
+          role: "code reviewer",
+          reviewer: false,
+          mandatoryRedTeam: false,
+          judge: false,
+          provider: "openai-compatible",
+          apiBaseUrl,
+          allowUnsafePrivateNetwork: true,
+          apiKey: "secret-runtime-key",
+          model: "runtime-model",
+          weight: 1,
+          enabled: true,
+          providerLimits: { contextWindow: 12000, maxOutputTokens: 1000 }
+        }
+      ]
+    });
+
+    await runCouncil("Are you still a reviewer?", group, tmp, { groupPath });
+
+    const systemPrompt = requests[0].messages[0].content;
+    const userPrompt = requests[0].messages.at(-1).content;
+    assert.doesNotMatch(systemPrompt, /You are code reviewer\./);
+    assert.match(systemPrompt, /Current assignment: ordinary member/);
+    assert.match(systemPrompt, /old role text says you were a reviewer, that content is stale/);
+    assert.match(userPrompt, /Current assignment: ordinary member/);
+    assert.doesNotMatch(userPrompt, /Role: code reviewer/);
+  } finally {
+    await close(server);
+  }
+});
+
 
 test("no explicit judge uses the last effective speaker as fallback finalizer", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-no-judge-"));

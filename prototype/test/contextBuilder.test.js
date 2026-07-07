@@ -92,6 +92,37 @@ test("context prompt sections keep stable and core before transcript", () => {
   assert.match(sections[2].content, /unavailable: 429/);
 });
 
+test("member context marks stale reviewer history as overridden for ordinary members", () => {
+  const context = buildMemberContext({
+    id: "seat_01",
+    name: "Former Reviewer",
+    role: "code reviewer",
+    reviewer: false,
+    mandatoryRedTeam: false
+  }, {
+    question: "Question",
+    unresolvedObjections: {},
+    artifacts: [],
+    messages: [
+      {
+        round: 1,
+        agentId: "seat_01",
+        agentName: "Former Reviewer",
+        response: {
+          status: "speak",
+          argument: "Earlier I claimed I was a reviewer."
+        }
+      }
+    ]
+  });
+  const stable = buildContextPromptSections(context).find((section) => section.title === "Stable context")?.content || "";
+
+  assert.equal(context.stable.roleIdentity, "Former Reviewer");
+  assert.match(stable, /Current assignment: ordinary member/);
+  assert.match(stable, /old role text claiming reviewer status is stale/);
+  assert.doesNotMatch(stable, /Role: code reviewer/);
+});
+
 test("member context trims transcript before protected artifacts and objections", () => {
   const tightAgent = {
     ...agent,
