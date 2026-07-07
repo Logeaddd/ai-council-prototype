@@ -267,7 +267,7 @@ export function workspaceGroupToRuntimeGroup(
       const apiKey = seat.apiKey || ""
       const reviewer = Boolean(seat.reviewer || seat.mandatoryRedTeam)
       const judge = Boolean(seat.judge)
-      const role = seat.role || seat.team || seat.displayName || id
+      const role = runtimeRoleForSeat(seat, reviewer, judge, id)
       return {
         id,
         name: seat.displayName || seat.name || role,
@@ -666,6 +666,17 @@ function inferProviderName(baseUrl = "", preset = "") {
   if (!baseUrl || baseUrl === "mock://local") return "Mock"
   if (preset) return preset
   return inferProviderPreset(baseUrl)
+}
+
+function runtimeRoleForSeat(seat: WorkspaceSeat, reviewer: boolean, judge: boolean, id: string) {
+  if (reviewer) return "reviewer"
+  if (judge) return "summarizer"
+  const rawRole = String(seat.role || "").trim()
+  const lower = rawRole.toLowerCase()
+  if (["reviewer", "summarizer", "judge", "red team"].includes(lower)) {
+    return seat.team || seat.displayName || seat.name || id
+  }
+  return rawRole || seat.team || seat.displayName || seat.name || id
 }
 
 function runtimeProviderForSeat(providerPreset = "", baseUrl = "", apiKey = "") {

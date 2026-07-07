@@ -595,6 +595,7 @@ function updateGroupSeat(groupPath, body = {}) {
 
 function applySeatRole(seat, role) {
   const normalized = String(role || "ordinary");
+  seat.role = normalized === "reviewer" || normalized === "summarizer" ? normalized : "ordinary";
   if (normalized === "reviewer") {
     seat.reviewer = true;
     seat.mandatoryRedTeam = true;
