@@ -114,6 +114,10 @@ test("server exposes guarded group settings and seat config persistence", () => 
   assert.match(workspaceManagerJs, /nextSeatId/);
   assert.match(workspaceManagerJs, /createMemberDirs\(privateFolder\)/);
   assert.match(serverJs, /normalizeMaxRounds\(settings\.maxRounds\)/);
+  assert.match(serverJs, /normalizeContextSearchLimit\(settings\.contextSearchLimit\)/);
+  assert.match(serverJs, /normalizeContextArchiveInjectionLimit\(settings\.contextArchiveInjectionLimit\)/);
+  assert.match(serverJs, /normalizeContextArchiveInjectionTokens\(settings\.contextArchiveInjectionTokens\)/);
+  assert.match(serverJs, /normalizeRecentMessageLimit\(settings\.recentMessageLimit\)/);
   assert.match(serverJs, /seat\.role = normalized === "reviewer" \|\| normalized === "summarizer" \? normalized : "ordinary"/);
   assert.match(serverJs, /group\.permissions\.seatTiers\[seatId\] = normalizePermissionTier\(permission\)/);
   assert.match(serverJs, /Git is required before enabling tool permissions/);

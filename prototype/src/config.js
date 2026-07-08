@@ -45,11 +45,19 @@ export function validateGroupConfig(group) {
     stopWhenAllSkip: true,
     agentTimeoutMs: 900000,
     toolTimeoutMs: 12000,
+    contextSearchLimit: 5,
+    contextArchiveInjectionLimit: 5,
+    contextArchiveInjectionTokens: 900,
+    recentMessageLimit: 6,
     allowSoloCouncil: false,
     ...(group.settings ?? {})
   };
   // Keep minRounds reachable so maxRounds remains the hard stop.
   group.settings.minRounds = Math.max(1, Math.min(Number(group.settings.minRounds) || 1, Number(group.settings.maxRounds) || 1));
+  group.settings.contextSearchLimit = clampInteger(group.settings.contextSearchLimit, 1, 20, 5);
+  group.settings.contextArchiveInjectionLimit = clampInteger(group.settings.contextArchiveInjectionLimit, 1, 12, 5);
+  group.settings.contextArchiveInjectionTokens = clampInteger(group.settings.contextArchiveInjectionTokens, 120, 4000, 900);
+  group.settings.recentMessageLimit = clampInteger(group.settings.recentMessageLimit, 0, 30, 6);
 
   return group;
 }
@@ -73,4 +81,10 @@ function collectEnvReference(value, missing) {
   if (typeof value !== "string" || !value.startsWith("env:")) return;
   const envName = value.slice(4);
   if (!process.env[envName]) missing.add(envName);
+}
+
+function clampInteger(value, min, max, fallback) {
+  const number = Number.parseInt(String(value), 10);
+  if (!Number.isFinite(number)) return fallback;
+  return Math.min(max, Math.max(min, number));
 }

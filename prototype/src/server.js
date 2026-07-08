@@ -644,6 +644,28 @@ function normalizeAgentTimeoutMs(value) {
   return Math.min(60 * 60_000, Math.max(60_000, count));
 }
 
+function normalizeContextSearchLimit(value) {
+  return clampInteger(value, 1, 20, 5);
+}
+
+function normalizeContextArchiveInjectionLimit(value) {
+  return clampInteger(value, 1, 12, 5);
+}
+
+function normalizeContextArchiveInjectionTokens(value) {
+  return clampInteger(value, 120, 4000, 900);
+}
+
+function normalizeRecentMessageLimit(value) {
+  return clampInteger(value, 0, 30, 6);
+}
+
+function clampInteger(value, min, max, fallback) {
+  const count = Number.parseInt(String(value), 10);
+  if (!Number.isFinite(count)) return fallback;
+  return Math.min(max, Math.max(min, count));
+}
+
 function updateGroupGlobalRequirement(groupPath, globalRequirement) {
   const groupFile = path.join(groupPath, "group.json");
   const group = readJson(groupFile);
@@ -670,6 +692,18 @@ function updateGroupSettings(groupPath, settings = {}) {
   }
   if (settings.workMode !== undefined) {
     nextSettings.workMode = normalizeWorkMode(settings.workMode);
+  }
+  if (settings.contextSearchLimit !== undefined) {
+    nextSettings.contextSearchLimit = normalizeContextSearchLimit(settings.contextSearchLimit);
+  }
+  if (settings.contextArchiveInjectionLimit !== undefined) {
+    nextSettings.contextArchiveInjectionLimit = normalizeContextArchiveInjectionLimit(settings.contextArchiveInjectionLimit);
+  }
+  if (settings.contextArchiveInjectionTokens !== undefined) {
+    nextSettings.contextArchiveInjectionTokens = normalizeContextArchiveInjectionTokens(settings.contextArchiveInjectionTokens);
+  }
+  if (settings.recentMessageLimit !== undefined) {
+    nextSettings.recentMessageLimit = normalizeRecentMessageLimit(settings.recentMessageLimit);
   }
   group.settings = nextSettings;
   fs.writeFileSync(groupFile, JSON.stringify(group, null, 2), "utf8");

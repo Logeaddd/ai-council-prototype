@@ -52,7 +52,7 @@ export function buildMemberContext(agent, session, options = {}) {
   const stableMessages = contextMessagesFromStable(stable);
   const coreMessages = contextMessagesFromCore(core);
   const summaryMessages = contextMessagesFromSummaries(summaries);
-  const requestedRecentTranscript = selectRecentTranscript(visibleMessages, options.recentMessageLimit);
+  const requestedRecentTranscript = selectRecentTranscript(visibleMessages, options.recentMessageLimit ?? options.groupSettings?.recentMessageLimit);
   const recentTranscript = fitRecentTranscriptToLimit({
     stableMessages,
     coreMessages,
@@ -185,7 +185,10 @@ function selectVisibleToolResults(results, agent, visibility) {
 }
 
 function selectRecentTranscript(messages, limit = DEFAULT_RECENT_MESSAGES) {
-  return messages.slice(-Math.max(0, limit || DEFAULT_RECENT_MESSAGES));
+  const count = limit === undefined || limit === null ? DEFAULT_RECENT_MESSAGES : Number(limit);
+  const safeCount = Number.isFinite(count) ? Math.max(0, Math.floor(count)) : DEFAULT_RECENT_MESSAGES;
+  if (safeCount === 0) return [];
+  return messages.slice(-safeCount);
 }
 
 function fitRecentTranscriptToLimit({ stableMessages, coreMessages, summaryMessages, recentTranscript, limits }) {

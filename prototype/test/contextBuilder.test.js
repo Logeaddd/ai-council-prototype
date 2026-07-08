@@ -165,6 +165,26 @@ test("member context trims transcript before protected artifacts and objections"
   assert.match(core, /boundary test/);
   assert.doesNotMatch(transcript, /item-1:/);
 });
+
+test("member context uses group recent message limit", () => {
+  const context = buildMemberContext(agent, {
+    question: "No recent transcript by setting.",
+    unresolvedObjections: {},
+    artifacts: [],
+    messages: [
+      { round: 1, agentName: "Builder", response: { status: "speak", argument: "SHOULD_NOT_BE_INCLUDED" } }
+    ]
+  }, {
+    groupSettings: {
+      recentMessageLimit: 0
+    }
+  });
+  const sections = buildContextPromptSections(context);
+
+  assert.equal(context.recentTranscript.length, 0);
+  assert.equal(sections.some((section) => section.title === "Recent transcript"), false);
+});
+
 test("context prompt sections include file operation execution results", () => {
   const context = buildMemberContext(agent, {
     question: "Continue after file execution.",

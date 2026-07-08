@@ -50,6 +50,55 @@ test("allows explicit reviewer-only groups without forcing a separate non-review
   assert.equal(group.agents[0].judge, undefined);
 });
 
+test("normalizes context budget settings with safe defaults and clamps", () => {
+  const group = validateGroupConfig({
+    ...baseGroup([
+      {
+        id: "builder",
+        name: "Builder",
+        role: "Build",
+        provider: "mock",
+        apiBaseUrl: "mock://local",
+        model: "mock",
+        weight: 1,
+        enabled: true
+      }
+    ]),
+    settings: {
+      maxRounds: 3,
+      contextSearchLimit: 200,
+      contextArchiveInjectionLimit: 99,
+      contextArchiveInjectionTokens: 999999,
+      recentMessageLimit: -10
+    }
+  });
+
+  assert.equal(group.settings.contextSearchLimit, 20);
+  assert.equal(group.settings.contextArchiveInjectionLimit, 12);
+  assert.equal(group.settings.contextArchiveInjectionTokens, 4000);
+  assert.equal(group.settings.recentMessageLimit, 0);
+});
+
+test("context budget settings get defaults when absent", () => {
+  const group = validateGroupConfig(baseGroup([
+    {
+      id: "builder",
+      name: "Builder",
+      role: "Build",
+      provider: "mock",
+      apiBaseUrl: "mock://local",
+      model: "mock",
+      weight: 1,
+      enabled: true
+    }
+  ]));
+
+  assert.equal(group.settings.contextSearchLimit, 5);
+  assert.equal(group.settings.contextArchiveInjectionLimit, 5);
+  assert.equal(group.settings.contextArchiveInjectionTokens, 900);
+  assert.equal(group.settings.recentMessageLimit, 6);
+});
+
 test("reports missing env vars before real API runs", () => {
   const group = validateGroupConfig(baseGroup([
     {
