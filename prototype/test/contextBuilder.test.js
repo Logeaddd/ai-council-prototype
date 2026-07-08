@@ -243,6 +243,33 @@ test("context prompt sections include web tool execution results", () => {
   assert.match(core, /https:\/\/example\.com/);
 });
 
+test("context prompt sections include rejected tool request reasons", () => {
+  const context = buildMemberContext(agent, {
+    question: "Use tools only when allowed.",
+    unresolvedObjections: {},
+    artifacts: [],
+    rejectedToolRequests: [
+      {
+        id: "tool_rejected_1",
+        tool: "execute_command",
+        status: "rejected",
+        code: "permission_denied",
+        error: "execute_command requires full permission.",
+        source_agent_id: "critic",
+        source_agent_name: "Critic"
+      }
+    ],
+    messages: []
+  });
+  const sections = buildContextPromptSections(context);
+  const core = sections.find((section) => section.title === "Non-compressible core")?.content || "";
+
+  assert.match(core, /Rejected tool requests/);
+  assert.match(core, /execute_command/);
+  assert.match(core, /permission_denied/);
+  assert.match(core, /requires full permission/);
+});
+
 test("context prompt sections include user attached text files in protected core", () => {
   const context = buildMemberContext(agent, {
     question: "Review attached project notes.",
@@ -297,6 +324,10 @@ test("independent member context hides other ordinary members' answers", () => {
     toolExecutionResults: [
       { source_agent_id: "alpha", tool: "web_search", result: { results: [{ title: "ALPHA_TOOL_SECRET" }] } },
       { source_agent_id: "beta", tool: "web_search", result: { results: [{ title: "BETA_TOOL_SECRET" }] } }
+    ],
+    rejectedToolRequests: [
+      { source_agent_id: "alpha", tool: "execute_command", error: "ALPHA_REJECTED_TOOL_SECRET" },
+      { source_agent_id: "beta", tool: "execute_command", error: "BETA_REJECTED_TOOL_SECRET" }
     ]
   }, {
     transcriptVisibility: "own",
@@ -311,11 +342,13 @@ test("independent member context hides other ordinary members' answers", () => {
   assert.match(combined, /ALPHA_LEDGER_SECRET/);
   assert.match(combined, /alpha\.js/);
   assert.match(combined, /ALPHA_TOOL_SECRET/);
+  assert.match(combined, /ALPHA_REJECTED_TOOL_SECRET/);
   assert.doesNotMatch(combined, /BETA_MESSAGE_SECRET/);
   assert.doesNotMatch(combined, /BETA_ARTIFACT_SECRET/);
   assert.doesNotMatch(combined, /BETA_LEDGER_SECRET/);
   assert.doesNotMatch(combined, /beta\.js/);
   assert.doesNotMatch(combined, /BETA_TOOL_SECRET/);
+  assert.doesNotMatch(combined, /BETA_REJECTED_TOOL_SECRET/);
 });
 
 

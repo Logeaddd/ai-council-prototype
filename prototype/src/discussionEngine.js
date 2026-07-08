@@ -207,7 +207,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
           yield event;
         }
 
-        if (!toolResult.results.length) break;
+        if (!toolResult.results.length && !toolResult.rejected.length) break;
 
         const followupContext = buildMemberContext(agent, session, {
           question,

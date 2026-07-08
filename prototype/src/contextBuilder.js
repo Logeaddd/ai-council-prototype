@@ -18,6 +18,7 @@ export function buildMemberContext(agent, session, options = {}) {
   const unresolvedObjections = selectVisibleObjections(session.unresolvedObjections || {}, agent, transcriptVisibility);
   const fileOperationExecutionResults = selectVisibleFileOperationResults(session.fileOperationExecutionResults || [], agent, transcriptVisibility);
   const toolExecutionResults = selectVisibleToolResults(session.toolExecutionResults || [], agent, transcriptVisibility);
+  const rejectedToolRequests = selectVisibleToolResults(session.rejectedToolRequests || [], agent, transcriptVisibility);
   const attachedFiles = normalizeFileAttachments(options.attachments || []);
   const stable = {
     roleIdentity: roleIdentity(agent),
@@ -36,6 +37,7 @@ export function buildMemberContext(agent, session, options = {}) {
     verificationStandard: options.verificationStandard || "",
     fileOperationExecutionResults,
     toolExecutionResults,
+    rejectedToolRequests,
     taskState: options.taskState || {},
     attachedFiles
   };
@@ -120,6 +122,7 @@ export function buildContextPromptSections(context) {
       context.core.attachedFiles?.length ? `User attached files:\n${formatFileAttachmentsForPrompt(context.core.attachedFiles)}` : "",
       context.core.fileOperationExecutionResults?.length ? `File operation execution results: ${JSON.stringify(context.core.fileOperationExecutionResults)}` : "",
       context.core.toolExecutionResults?.length ? `Tool execution results: ${JSON.stringify(context.core.toolExecutionResults)}` : "",
+      context.core.rejectedToolRequests?.length ? `Rejected tool requests: ${JSON.stringify(context.core.rejectedToolRequests)}` : "",
       formatTaskStateForPrompt(context.core.taskState) ? `Task state ledger:\n${formatTaskStateForPrompt(context.core.taskState)}` : ""
     ]],
     ["Summaries", [
@@ -260,6 +263,7 @@ function contextMessagesFromCore(core) {
     { role: "user", content: formatFileAttachmentsForPrompt(core.attachedFiles || []) },
     { role: "user", content: JSON.stringify(core.fileOperationExecutionResults || []) },
     { role: "user", content: JSON.stringify(core.toolExecutionResults || []) },
+    { role: "user", content: JSON.stringify(core.rejectedToolRequests || []) },
     { role: "user", content: formatTaskStateForPrompt(core.taskState) }
   ].filter((message) => message.content);
 }

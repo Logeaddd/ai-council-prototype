@@ -509,6 +509,103 @@ test("repeated tool requests stop at the configured iteration limit without fake
   }
 });
 
+test("rejected tool requests return reasons to the same member follow-up prompt", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-rejected-tool-followup-"));
+  fs.writeFileSync(path.join(tmp, "group.json"), JSON.stringify({
+    permissions: {
+      defaultTier: "text",
+      seatTiers: { writer: "text" }
+    }
+  }), "utf8");
+  const requestBodies = [];
+  const server = http.createServer(async (req, res) => {
+    const body = JSON.parse(await readRequestBody(req));
+    requestBodies.push(body);
+    const prompt = JSON.stringify(body.messages || []);
+    if (prompt.includes("FinalDecision JSON object")) {
+      writeOpenAiStream(res, JSON.stringify({
+        answer: "The tool rejection was handled.",
+        consensus_score: 1,
+        supporting_agents: ["Writer"],
+        dissenting_agents: [],
+        minority_report: "",
+        risks: [],
+        next_actions: [],
+        selected_file_operation_ids: [],
+        memory_candidates: []
+      }));
+      return;
+    }
+    if (requestBodies.length === 1) {
+      writeOpenAiStream(res, JSON.stringify({
+        status: "speak",
+        argument: "I will try a command even though I am text-only.",
+        tool_requests: [
+          {
+            tool: "execute_command",
+            command: "echo should-not-run",
+            reason: "This should be rejected by permission."
+          }
+        ],
+        objections: [],
+        confidence: 0.3,
+        memory_candidates: []
+      }));
+      return;
+    }
+    assert.match(prompt, /Rejected tool requests/);
+    assert.match(prompt, /permission_denied/);
+    assert.match(prompt, /text-only permission/);
+    writeOpenAiStream(res, JSON.stringify({
+      status: "speak",
+      argument: "The app rejected the command because this seat is text-only, so I will answer without claiming it ran.",
+      objections: [],
+      confidence: 0.8,
+      memory_candidates: []
+    }));
+  });
+  await listen(server);
+  const address = server.address();
+
+  try {
+    const group = validateGroupConfig({
+      id: "rejected-tool-followup",
+      name: "Rejected Tool Followup",
+      settings: {
+        maxRounds: 1,
+        maxToolIterations: 4,
+        minConsensusWeight: 1,
+        stopWhenAllSkip: true,
+        agentTimeoutMs: 3000,
+        allowSoloCouncil: true
+      },
+      agents: [
+        {
+          id: "writer",
+          name: "Writer",
+          role: "Writer",
+          provider: "openai-compatible",
+          apiBaseUrl: `http://127.0.0.1:${address.port}/v1`,
+          allowUnsafePrivateNetwork: true,
+          apiKey: "secret-runtime-key",
+          model: "rejected-tool-model",
+          weight: 1,
+          enabled: true
+        }
+      ]
+    });
+    const result = await runCouncil("Handle rejected tools honestly.", group, tmp, { groupPath: tmp });
+
+    assert.equal(requestBodies.length, 3);
+    assert.equal(result.session.toolExecutionResults.length, 0);
+    assert.equal(result.session.rejectedToolRequests.length, 1);
+    assert.equal(result.session.messages[0].rejectedToolRequests.length, 1);
+    assert.match(result.session.messages[0].response.argument, /text-only/);
+  } finally {
+    await close(server);
+  }
+});
+
 test("context search tool requests return archived public snippets to follow-up prompt", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-context-tool-followup-"));
   fs.writeFileSync(path.join(tmp, "group.json"), JSON.stringify({
