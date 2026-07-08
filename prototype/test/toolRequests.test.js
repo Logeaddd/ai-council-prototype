@@ -606,6 +606,70 @@ test("git_operation rejects unsupported destructive actions", async () => {
   assert.equal(result.results[0].code, "unsupported_git_operation");
 });
 
+test("browser_control drives a real browser page for full permission only", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-browser-tool-"));
+  const server = http.createServer((req, res) => {
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+    res.end(`<!doctype html>
+      <html>
+        <head><title>Browser Tool Fact</title></head>
+        <body>
+          <input id="name" />
+          <button id="go" onclick="document.querySelector('#out').textContent = 'Hello ' + document.querySelector('#name').value">Go</button>
+          <div id="out"></div>
+        </body>
+      </html>`);
+  });
+  await listen(server);
+  const address = server.address();
+  const url = `http://127.0.0.1:${address.port}/`;
+  try {
+    const denied = await executeToolRequests({
+      permissionTier: "tool",
+      groupPath: tmp,
+      agent: { id: "tool", name: "Tool" },
+      round: 1,
+      requests: [
+        { tool: "browser_control", url, reason: "Open page." }
+      ]
+    });
+    const allowed = await executeToolRequests({
+      permissionTier: "full",
+      groupPath: tmp,
+      agent: { id: "full", name: "Full" },
+      round: 1,
+      requests: [
+        {
+          tool: "browser_control",
+          url,
+          reason: "Drive local page.",
+          steps: [
+            { action: "wait_for_selector", selector: "#name" },
+            { action: "type", selector: "#name", text: "Alice" },
+            { action: "click", selector: "#go" },
+            { action: "wait", waitMs: 200 },
+            { action: "evaluate", expression: "document.querySelector('#out').textContent" },
+            { action: "screenshot" }
+          ]
+        }
+      ]
+    });
+
+    assert.equal(denied.accepted.length, 0);
+    assert.equal(denied.rejected[0].code, "permission_denied");
+    assert.equal(allowed.accepted.length, 1);
+    assert.equal(allowed.results[0].status, "completed");
+    assert.equal(allowed.results[0].result.title, "Browser Tool Fact");
+    assert.match(allowed.results[0].result.text, /Hello Alice/);
+    assert.equal(allowed.results[0].result.steps[4].value, "Hello Alice");
+    assert.equal(allowed.results[0].result.screenshots.length, 1);
+    assert.equal(fs.existsSync(path.join(tmp, allowed.results[0].result.screenshots[0].path)), true);
+    assert.equal(fs.existsSync(path.join(tmp, "shared", "logs", "browser.jsonl")), true);
+  } finally {
+    await close(server);
+  }
+});
+
 test("controlled file tools reject path escape and secret files", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-tools-guard-"));
   fs.writeFileSync(path.join(tmp, "safe.md"), "safe", "utf8");

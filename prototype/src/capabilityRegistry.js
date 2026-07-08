@@ -105,6 +105,16 @@ export function listCapabilities(options = {}) {
       requirement: "完全允许"
     },
     {
+      id: "browser-control",
+      label: "浏览器检查",
+      kind: "tool",
+      status: "ready",
+      enabled: true,
+      provider: "built-in",
+      source: "local_server",
+      requirement: "完全允许"
+    },
+    {
       id: "public-memory",
       label: "公共记忆",
       kind: "memory",

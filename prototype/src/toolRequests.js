@@ -8,6 +8,7 @@ import { installPackageTool } from "./packageTools.js";
 import { runTestsTool } from "./testRunTools.js";
 import { apiRequestTool } from "./apiTools.js";
 import { gitOperationTool } from "./gitTools.js";
+import { browserControlTool } from "./browserTools.js";
 import { loadSessionContextArchiveItem, searchSessionContextArchive } from "./storage.js";
 import fs from "node:fs";
 import path from "node:path";
@@ -27,7 +28,8 @@ const ALLOWED_TOOLS = new Set([
   "install_package",
   "run_tests",
   "api_request",
-  "git_operation"
+  "git_operation",
+  "browser_control"
 ]);
 const FILE_TOOLS = new Set(["list_directory", "read_file", "search_files", "grep_content"]);
 const CONTEXT_TOOLS = new Set(["search_context", "load_context"]);
@@ -38,7 +40,8 @@ const PACKAGE_TOOLS = new Set(["install_package"]);
 const TEST_TOOLS = new Set(["run_tests"]);
 const API_TOOLS = new Set(["api_request"]);
 const GIT_TOOLS = new Set(["git_operation"]);
-const FULL_PERMISSION_TOOLS = new Set(["extract_archive", "execute_command", "run_code", "install_package", "run_tests", "git_operation"]);
+const BROWSER_TOOLS = new Set(["browser_control"]);
+const FULL_PERMISSION_TOOLS = new Set(["extract_archive", "execute_command", "run_code", "install_package", "run_tests", "git_operation", "browser_control"]);
 
 export function normalizeToolRequests(value) {
   if (!Array.isArray(value)) return [];
@@ -68,7 +71,7 @@ export async function executeToolRequests(options = {}) {
     };
 
     if (!ALLOWED_TOOLS.has(normalized.tool)) {
-      const rejection = reject(base, "invalid_tool", "Tool must be one of web_search, fetch_url, list_directory, read_file, search_files, grep_content, search_context, load_context, extract_archive, execute_command, run_code, install_package, run_tests, api_request, git_operation.");
+      const rejection = reject(base, "invalid_tool", "Tool must be one of web_search, fetch_url, list_directory, read_file, search_files, grep_content, search_context, load_context, extract_archive, execute_command, run_code, install_package, run_tests, api_request, git_operation, browser_control.");
       rejected.push(rejection);
       events.push(toolEvent("tool_failure", base, { status: "rejected", code: rejection.code, error: rejection.error }));
       appendToolAuditLog(options.groupPath, "rejected", rejection);
@@ -78,6 +81,7 @@ export async function executeToolRequests(options = {}) {
       appendTestAuditLog(options.groupPath, "rejected", rejection);
       appendApiAuditLog(options.groupPath, "rejected", rejection);
       appendGitAuditLog(options.groupPath, "rejected", rejection);
+      appendBrowserAuditLog(options.groupPath, "rejected", rejection);
       continue;
     }
     if (permissionTier === "text") {
@@ -91,6 +95,7 @@ export async function executeToolRequests(options = {}) {
       appendTestAuditLog(options.groupPath, "rejected", rejection);
       appendApiAuditLog(options.groupPath, "rejected", rejection);
       appendGitAuditLog(options.groupPath, "rejected", rejection);
+      appendBrowserAuditLog(options.groupPath, "rejected", rejection);
       continue;
     }
     if (FULL_PERMISSION_TOOLS.has(normalized.tool) && permissionTier !== "full") {
@@ -104,6 +109,7 @@ export async function executeToolRequests(options = {}) {
       appendTestAuditLog(options.groupPath, "rejected", rejection);
       appendApiAuditLog(options.groupPath, "rejected", rejection);
       appendGitAuditLog(options.groupPath, "rejected", rejection);
+      appendBrowserAuditLog(options.groupPath, "rejected", rejection);
       continue;
     }
 
@@ -127,6 +133,7 @@ export async function executeToolRequests(options = {}) {
     appendTestAuditLog(options.groupPath, "completed", result);
     appendApiAuditLog(options.groupPath, "completed", result);
     appendGitAuditLog(options.groupPath, "completed", result);
+    appendBrowserAuditLog(options.groupPath, "completed", result);
   }
 
   return { accepted, rejected, results, events };
@@ -299,6 +306,21 @@ async function executeOne(request, options) {
         result
       });
     }
+    if (request.tool === "browser_control") {
+      const result = await browserControlTool(request, {
+        groupPath: options.groupPath,
+        timeoutMs: options.timeoutMs,
+        browserTimeoutMs: options.browserTimeoutMs,
+        maxBrowserOutputBytes: options.maxBrowserOutputBytes,
+        signal: options.signal
+      });
+      return resultRecord(request, {
+        status: result.ok ? "completed" : "failed",
+        code: result.code,
+        error: result.error,
+        result
+      });
+    }
     const result = await searchWeb(request.query, {
       timeoutMs: options.timeoutMs,
       count: request.count,
@@ -346,6 +368,12 @@ function normalizeToolRequest(item, index) {
     remote: stringField(item.remote),
     message: stringField(item.message || item.commitMessage || item.commit_message),
     paths: arrayOfStrings(item.paths || item.files),
+    selector: stringField(item.selector),
+    inputText: stringField(item.inputText || item.input_text || item.text || item.value),
+    expression: stringField(item.expression || item.script || item.js),
+    steps: arrayOfObjects(item.steps),
+    viewport: objectField(item.viewport),
+    waitMs: normalizeOptionalNumber(item.waitMs || item.wait_ms),
     headers: objectField(item.headers),
     body: item.body,
     json: item.json,
@@ -353,6 +381,7 @@ function normalizeToolRequest(item, index) {
     overwrite: Boolean(item.overwrite),
     background: Boolean(item.background),
     force: Boolean(item.force),
+    screenshot: Boolean(item.screenshot),
     reason: stringField(item.reason),
     count: normalizeCount(item.count, tool),
     maxBytes: normalizeMaxBytes(item.maxBytes || item.max_bytes),
@@ -387,11 +416,18 @@ function reject(request, code, reason) {
     remote: request.remote,
     message: request.message,
     paths: request.paths,
+    selector: request.selector,
+    inputText: request.inputText,
+    expression: request.expression,
+    steps: request.steps,
+    viewport: request.viewport,
+    waitMs: request.waitMs,
     headers: safeHeadersForStorage(request.headers),
     archiveRound: request.archiveRound,
     overwrite: request.overwrite,
     background: request.background,
     force: request.force,
+    screenshot: request.screenshot,
     timeoutMs: request.timeoutMs,
     reason: request.reason,
     round: request.round,
@@ -429,11 +465,18 @@ function resultRecord(request, extra) {
     remote: request.remote,
     message: request.message,
     paths: request.paths,
+    selector: request.selector,
+    inputText: request.inputText,
+    expression: request.expression,
+    steps: request.steps,
+    viewport: request.viewport,
+    waitMs: request.waitMs,
     headers: safeHeadersForStorage(request.headers),
     archiveRound: request.archiveRound,
     overwrite: request.overwrite,
     background: request.background,
     force: request.force,
+    screenshot: request.screenshot,
     timeoutMs: request.timeoutMs,
     reason: request.reason,
     round: request.round,
@@ -451,7 +494,7 @@ function stringField(value) {
 
 function normalizeCount(value, tool) {
   const count = Number(value);
-  if (!Number.isFinite(count)) return FILE_TOOLS.has(tool) || ARCHIVE_TOOLS.has(tool) || CODE_TOOLS.has(tool) || PACKAGE_TOOLS.has(tool) || TEST_TOOLS.has(tool) || API_TOOLS.has(tool) || GIT_TOOLS.has(tool) ? undefined : 5;
+  if (!Number.isFinite(count)) return FILE_TOOLS.has(tool) || ARCHIVE_TOOLS.has(tool) || CODE_TOOLS.has(tool) || PACKAGE_TOOLS.has(tool) || TEST_TOOLS.has(tool) || API_TOOLS.has(tool) || GIT_TOOLS.has(tool) || BROWSER_TOOLS.has(tool) ? undefined : 5;
   if (ARCHIVE_TOOLS.has(tool)) return Math.max(1, Math.min(1000, Math.floor(count)));
   const max = FILE_TOOLS.has(tool) ? 300 : CONTEXT_TOOLS.has(tool) ? 20 : 8;
   return Math.max(1, Math.min(max, Math.floor(count)));
@@ -498,11 +541,18 @@ function toolEvent(type, request, extra = {}) {
     remote: request.remote,
     message: request.message,
     paths: request.paths,
+    selector: request.selector,
+    inputText: request.inputText,
+    expression: request.expression,
+    steps: request.steps,
+    viewport: request.viewport,
+    waitMs: request.waitMs,
     headers: safeHeadersForStorage(request.headers),
     archiveRound: request.archiveRound,
     overwrite: request.overwrite,
     background: request.background,
     force: request.force,
+    screenshot: request.screenshot,
     timeoutMs: request.timeoutMs,
     createdAt: nowIso(),
     ...extra
@@ -613,6 +663,16 @@ function summarizeToolResult(record = {}) {
       stderrBytes: result.stderr?.length || 0
     };
   }
+  if (record.tool === "browser_control") {
+    return {
+      url: result.url,
+      title: result.title,
+      steps: result.steps?.length || 0,
+      screenshots: result.screenshots?.length || 0,
+      textBytes: result.text?.length || 0,
+      timedOut: Boolean(result.timedOut)
+    };
+  }
   if (record.tool === "fetch_url") {
     return { url: safeUrlForEvent(record.url), title: result.title || "", bytes: result.bytes };
   }
@@ -652,6 +712,11 @@ function appendToolAuditLog(groupPath, action, item) {
       message: item.message,
       paths: item.paths,
       force: item.force,
+      selector: item.selector,
+      inputTextBytes: item.inputText ? Buffer.byteLength(item.inputText, "utf8") : 0,
+      expressionBytes: item.expression ? Buffer.byteLength(item.expression, "utf8") : 0,
+      steps: item.steps?.length || 0,
+      screenshot: item.screenshot,
       sessionId: item.sessionId,
       method: item.method,
       headers: safeHeadersForStorage(item.headers),
@@ -850,6 +915,41 @@ function appendGitAuditLog(groupPath, action, item) {
   }
 }
 
+function appendBrowserAuditLog(groupPath, action, item) {
+  if (!groupPath || item.tool !== "browser_control") return;
+  try {
+    const filePath = path.join(groupPath, "shared", "logs", "browser.jsonl");
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    const record = {
+      action,
+      id: item.id,
+      tool: item.tool,
+      status: item.status,
+      code: item.code,
+      error: item.error,
+      round: item.round,
+      source_agent_id: item.source_agent_id,
+      source_agent_name: item.source_agent_name,
+      url: item.result?.url || safeUrlForEvent(item.url),
+      title: item.result?.title,
+      steps: item.result?.steps?.map((step) => ({
+        action: step.action,
+        selector: step.selector,
+        screenshotPath: step.screenshotPath,
+        durationMs: step.durationMs
+      })) || [],
+      screenshots: item.result?.screenshots || [],
+      timedOut: Boolean(item.result?.timedOut),
+      durationMs: item.result?.durationMs,
+      resultSummary: summarizeToolResult(item),
+      createdAt: nowIso()
+    };
+    fs.appendFileSync(filePath, `${JSON.stringify(record)}\n`, "utf8");
+  } catch {
+    // Browser audit is best-effort; never hide the actual browser result because logging failed.
+  }
+}
+
 function safeRequestForStorage(request) {
   return {
     ...request,
@@ -862,11 +962,30 @@ function safeRequestForStorage(request) {
     remote: request.remote,
     message: request.message,
     paths: request.paths,
+    selector: request.selector,
+    inputText: request.inputText ? {
+      bytes: Buffer.byteLength(request.inputText, "utf8"),
+      preview: request.inputText.slice(0, 80)
+    } : "",
+    expression: request.expression ? {
+      bytes: Buffer.byteLength(request.expression, "utf8"),
+      preview: request.expression.slice(0, 80)
+    } : "",
+    steps: request.steps?.map((step) => ({
+      action: step.action || step.type || step.name,
+      selector: step.selector,
+      textBytes: step.text || step.value || step.inputText ? Buffer.byteLength(String(step.text || step.value || step.inputText || ""), "utf8") : 0,
+      expressionBytes: step.expression || step.script || step.js ? Buffer.byteLength(String(step.expression || step.script || step.js || ""), "utf8") : 0,
+      screenshot: step.action === "screenshot"
+    })) || [],
+    viewport: request.viewport,
+    waitMs: request.waitMs,
     headers: safeHeadersForStorage(request.headers),
     body: request.body ? summarizeBodyForStorage(request.body) : undefined,
     json: request.json ? summarizeBodyForStorage(request.json) : undefined,
     url: request.url,
-    force: request.force
+    force: request.force,
+    screenshot: request.screenshot
   };
 }
 
@@ -913,6 +1032,16 @@ function objectField(value) {
 function arrayOfStrings(value) {
   if (!Array.isArray(value)) return [];
   return value.map((item) => String(item || "").trim()).filter(Boolean);
+}
+
+function arrayOfObjects(value) {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item) => item && typeof item === "object" && !Array.isArray(item));
+}
+
+function normalizeOptionalNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : undefined;
 }
 
 function safeHeadersForStorage(value) {
