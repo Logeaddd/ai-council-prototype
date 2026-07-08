@@ -6,6 +6,7 @@ import { executeCommandTool } from "./commandTools.js";
 import { runCodeTool } from "./codeRunTools.js";
 import { installPackageTool } from "./packageTools.js";
 import { runTestsTool } from "./testRunTools.js";
+import { apiRequestTool } from "./apiTools.js";
 import { loadSessionContextArchiveItem, searchSessionContextArchive } from "./storage.js";
 import fs from "node:fs";
 import path from "node:path";
@@ -23,7 +24,8 @@ const ALLOWED_TOOLS = new Set([
   "execute_command",
   "run_code",
   "install_package",
-  "run_tests"
+  "run_tests",
+  "api_request"
 ]);
 const FILE_TOOLS = new Set(["list_directory", "read_file", "search_files", "grep_content"]);
 const CONTEXT_TOOLS = new Set(["search_context", "load_context"]);
@@ -32,6 +34,7 @@ const COMMAND_TOOLS = new Set(["execute_command"]);
 const CODE_TOOLS = new Set(["run_code"]);
 const PACKAGE_TOOLS = new Set(["install_package"]);
 const TEST_TOOLS = new Set(["run_tests"]);
+const API_TOOLS = new Set(["api_request"]);
 const FULL_PERMISSION_TOOLS = new Set(["extract_archive", "execute_command", "run_code", "install_package", "run_tests"]);
 
 export function normalizeToolRequests(value) {
@@ -62,7 +65,7 @@ export async function executeToolRequests(options = {}) {
     };
 
     if (!ALLOWED_TOOLS.has(normalized.tool)) {
-      const rejection = reject(base, "invalid_tool", "Tool must be one of web_search, fetch_url, list_directory, read_file, search_files, grep_content, search_context, load_context, extract_archive, execute_command, run_code, install_package, run_tests.");
+      const rejection = reject(base, "invalid_tool", "Tool must be one of web_search, fetch_url, list_directory, read_file, search_files, grep_content, search_context, load_context, extract_archive, execute_command, run_code, install_package, run_tests, api_request.");
       rejected.push(rejection);
       events.push(toolEvent("tool_failure", base, { status: "rejected", code: rejection.code, error: rejection.error }));
       appendToolAuditLog(options.groupPath, "rejected", rejection);
@@ -70,6 +73,7 @@ export async function executeToolRequests(options = {}) {
       appendCodeRunAuditLog(options.groupPath, "rejected", rejection);
       appendPackageAuditLog(options.groupPath, "rejected", rejection);
       appendTestAuditLog(options.groupPath, "rejected", rejection);
+      appendApiAuditLog(options.groupPath, "rejected", rejection);
       continue;
     }
     if (permissionTier === "text") {
@@ -81,6 +85,7 @@ export async function executeToolRequests(options = {}) {
       appendCodeRunAuditLog(options.groupPath, "rejected", rejection);
       appendPackageAuditLog(options.groupPath, "rejected", rejection);
       appendTestAuditLog(options.groupPath, "rejected", rejection);
+      appendApiAuditLog(options.groupPath, "rejected", rejection);
       continue;
     }
     if (FULL_PERMISSION_TOOLS.has(normalized.tool) && permissionTier !== "full") {
@@ -92,6 +97,7 @@ export async function executeToolRequests(options = {}) {
       appendCodeRunAuditLog(options.groupPath, "rejected", rejection);
       appendPackageAuditLog(options.groupPath, "rejected", rejection);
       appendTestAuditLog(options.groupPath, "rejected", rejection);
+      appendApiAuditLog(options.groupPath, "rejected", rejection);
       continue;
     }
 
@@ -113,6 +119,7 @@ export async function executeToolRequests(options = {}) {
     appendCodeRunAuditLog(options.groupPath, "completed", result);
     appendPackageAuditLog(options.groupPath, "completed", result);
     appendTestAuditLog(options.groupPath, "completed", result);
+    appendApiAuditLog(options.groupPath, "completed", result);
   }
 
   return { accepted, rejected, results, events };
@@ -254,6 +261,22 @@ async function executeOne(request, options) {
         result
       });
     }
+    if (request.tool === "api_request") {
+      const result = await apiRequestTool(request, {
+        timeoutMs: options.timeoutMs,
+        apiRequestTimeoutMs: options.apiRequestTimeoutMs,
+        maxApiResponseBytes: options.maxApiResponseBytes,
+        allowUnsafePrivateNetwork: Boolean(options.allowUnsafePrivateNetwork),
+        allowHttp: Boolean(options.allowHttp),
+        signal: options.signal
+      });
+      return resultRecord(request, {
+        status: result.ok ? "completed" : "failed",
+        code: result.code,
+        error: result.error,
+        result
+      });
+    }
     const result = await searchWeb(request.query, {
       timeoutMs: options.timeoutMs,
       count: request.count,
@@ -295,6 +318,10 @@ function normalizeToolRequest(item, index) {
     pattern: stringField(item.pattern),
     root: stringField(item.root),
     sessionId: stringField(item.sessionId || item.session_id),
+    method: stringField(item.method),
+    headers: objectField(item.headers),
+    body: item.body,
+    json: item.json,
     archiveRound: item.round === undefined ? undefined : Number(item.round),
     overwrite: Boolean(item.overwrite),
     background: Boolean(item.background),
@@ -326,6 +353,8 @@ function reject(request, code, reason) {
     pattern: request.pattern,
     root: request.root,
     sessionId: request.sessionId,
+    method: request.method,
+    headers: safeHeadersForStorage(request.headers),
     archiveRound: request.archiveRound,
     overwrite: request.overwrite,
     background: request.background,
@@ -360,6 +389,8 @@ function resultRecord(request, extra) {
     pattern: request.pattern,
     root: request.root,
     sessionId: request.sessionId,
+    method: request.method,
+    headers: safeHeadersForStorage(request.headers),
     archiveRound: request.archiveRound,
     overwrite: request.overwrite,
     background: request.background,
@@ -380,7 +411,7 @@ function stringField(value) {
 
 function normalizeCount(value, tool) {
   const count = Number(value);
-  if (!Number.isFinite(count)) return FILE_TOOLS.has(tool) || ARCHIVE_TOOLS.has(tool) || CODE_TOOLS.has(tool) || PACKAGE_TOOLS.has(tool) || TEST_TOOLS.has(tool) ? undefined : 5;
+  if (!Number.isFinite(count)) return FILE_TOOLS.has(tool) || ARCHIVE_TOOLS.has(tool) || CODE_TOOLS.has(tool) || PACKAGE_TOOLS.has(tool) || TEST_TOOLS.has(tool) || API_TOOLS.has(tool) ? undefined : 5;
   if (ARCHIVE_TOOLS.has(tool)) return Math.max(1, Math.min(1000, Math.floor(count)));
   const max = FILE_TOOLS.has(tool) ? 300 : CONTEXT_TOOLS.has(tool) ? 20 : 8;
   return Math.max(1, Math.min(max, Math.floor(count)));
@@ -421,6 +452,8 @@ function toolEvent(type, request, extra = {}) {
     pattern: request.pattern,
     root: request.root,
     sessionId: request.sessionId,
+    method: request.method,
+    headers: safeHeadersForStorage(request.headers),
     archiveRound: request.archiveRound,
     overwrite: request.overwrite,
     background: request.background,
@@ -511,6 +544,16 @@ function summarizeToolResult(record = {}) {
       stderrBytes: result.stderr?.length || 0
     };
   }
+  if (record.tool === "api_request") {
+    return {
+      method: result.method,
+      url: result.url,
+      status: result.status,
+      ok: Boolean(result.ok),
+      bytes: result.bytes || 0,
+      truncated: Boolean(result.truncated)
+    };
+  }
   if (record.tool === "fetch_url") {
     return { url: safeUrlForEvent(record.url), title: result.title || "", bytes: result.bytes };
   }
@@ -545,6 +588,8 @@ function appendToolAuditLog(groupPath, action, item) {
       background: item.background,
       timeoutMs: item.timeoutMs,
       sessionId: item.sessionId,
+      method: item.method,
+      headers: safeHeadersForStorage(item.headers),
       archiveRound: item.archiveRound,
       query: item.query,
       url: safeUrlForEvent(item.url),
@@ -678,6 +723,37 @@ function appendTestAuditLog(groupPath, action, item) {
   }
 }
 
+function appendApiAuditLog(groupPath, action, item) {
+  if (!groupPath || item.tool !== "api_request") return;
+  try {
+    const filePath = path.join(groupPath, "shared", "logs", "api-requests.jsonl");
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    const record = {
+      action,
+      id: item.id,
+      tool: item.tool,
+      status: item.status,
+      code: item.code,
+      error: item.error,
+      round: item.round,
+      source_agent_id: item.source_agent_id,
+      source_agent_name: item.source_agent_name,
+      method: item.result?.method || item.method,
+      url: item.result?.url || safeUrlForEvent(item.url),
+      httpStatus: item.result?.status,
+      ok: Boolean(item.result?.ok),
+      bytes: item.result?.bytes,
+      truncated: Boolean(item.result?.truncated),
+      durationMs: item.result?.durationMs,
+      resultSummary: summarizeToolResult(item),
+      createdAt: nowIso()
+    };
+    fs.appendFileSync(filePath, `${JSON.stringify(record)}\n`, "utf8");
+  } catch {
+    // API audit is best-effort; never hide the actual API result because logging failed.
+  }
+}
+
 function safeRequestForStorage(request) {
   return {
     ...request,
@@ -685,6 +761,9 @@ function safeRequestForStorage(request) {
     code: summarizeCodeForStorage(request.code),
     packageName: safePackageForStorage(request.packageName),
     runner: request.runner,
+    headers: safeHeadersForStorage(request.headers),
+    body: request.body ? summarizeBodyForStorage(request.body) : undefined,
+    json: request.json ? summarizeBodyForStorage(request.json) : undefined,
     url: request.url
   };
 }
@@ -722,4 +801,28 @@ function safePackageForStorage(value) {
   return String(value || "")
     .replace(/(\/\/[^/:]+:)[^@/]+(@)/g, "$1[redacted]$2")
     .replace(/(token=)[^&\s]+/gi, "$1[redacted]");
+}
+
+function objectField(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return value;
+}
+
+function safeHeadersForStorage(value) {
+  const headers = objectField(value);
+  const result = {};
+  for (const [key, rawValue] of Object.entries(headers)) {
+    result[key] = /authorization|api[-_]?key|token|secret|cookie/i.test(key)
+      ? "[redacted]"
+      : String(rawValue ?? "").slice(0, 500);
+  }
+  return result;
+}
+
+function summarizeBodyForStorage(value) {
+  const text = typeof value === "string" ? value : JSON.stringify(value);
+  return {
+    bytes: Buffer.byteLength(text || "", "utf8"),
+    preview: String(text || "").slice(0, 120)
+  };
 }

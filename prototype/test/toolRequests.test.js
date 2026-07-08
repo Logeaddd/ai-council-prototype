@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import zlib from "node:zlib";
@@ -454,6 +455,71 @@ test("run_tests reports failing custom commands honestly", async () => {
   assert.match(result.results[0].result.stderr, /TEST_FAIL_FACT/);
 });
 
+test("api_request performs real HTTP calls and redacts sensitive headers", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-api-request-"));
+  let received = {};
+  const server = http.createServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    received = {
+      method: req.method,
+      authorization: req.headers.authorization,
+      body: Buffer.concat(chunks).toString("utf8")
+    };
+    res.writeHead(201, { "Content-Type": "application/json", "X-Test": "ok" });
+    res.end(JSON.stringify({ ok: true, saw: JSON.parse(received.body).name }));
+  });
+  await listen(server);
+  const address = server.address();
+  try {
+    const result = await executeToolRequests({
+      permissionTier: "tool",
+      groupPath: tmp,
+      agent: { id: "tool", name: "Tool" },
+      round: 1,
+      allowUnsafePrivateNetwork: true,
+      allowHttp: true,
+      requests: [
+        {
+          tool: "api_request",
+          method: "POST",
+          url: `http://127.0.0.1:${address.port}/api/check`,
+          headers: { Authorization: "Bearer secret-token", "X-Plain": "visible" },
+          json: { name: "API_FACT" },
+          reason: "Call local test API."
+        }
+      ]
+    });
+
+    assert.equal(result.accepted.length, 1);
+    assert.equal(result.results[0].status, "completed");
+    assert.equal(result.results[0].result.status, 201);
+    assert.match(result.results[0].result.text, /API_FACT/);
+    assert.equal(result.results[0].result.requestHeaders.Authorization, "[redacted]");
+    assert.equal(result.results[0].result.requestHeaders["X-Plain"], "visible");
+    assert.equal(received.method, "POST");
+    assert.equal(received.authorization, "Bearer secret-token");
+    assert.equal(fs.existsSync(path.join(tmp, "shared", "logs", "api-requests.jsonl")), true);
+  } finally {
+    await close(server);
+  }
+});
+
+test("api_request blocks localhost by default", async () => {
+  const result = await executeToolRequests({
+    permissionTier: "tool",
+    agent: { id: "tool", name: "Tool" },
+    round: 1,
+    requests: [
+      { tool: "api_request", method: "GET", url: "http://127.0.0.1:1/", reason: "Blocked local API." }
+    ]
+  });
+
+  assert.equal(result.accepted.length, 1);
+  assert.equal(result.results[0].status, "failed");
+  assert.match(result.results[0].error, /Blocked unsafe URL|only https/i);
+});
+
 test("controlled file tools reject path escape and secret files", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-tools-guard-"));
   fs.writeFileSync(path.join(tmp, "safe.md"), "safe", "utf8");
@@ -540,6 +606,14 @@ function shellForNodeCommand() {
 function nodeCommand(script) {
   const escapedScript = String(script).replace(/"/g, '\\"');
   return `"${process.execPath}" -e "${escapedScript}"`;
+}
+
+function listen(server) {
+  return new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+}
+
+function close(server) {
+  return new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
 }
 
 function makeZip(entries) {

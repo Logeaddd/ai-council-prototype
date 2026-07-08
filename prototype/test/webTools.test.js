@@ -9,6 +9,7 @@ test("capability registry reports web search as unconfigured without a real key"
   const capabilities = listCapabilities({ env: {} });
   const search = capabilities.find((item) => item.id === "web-search");
   const fetchUrl = capabilities.find((item) => item.id === "fetch-url");
+  const apiRequest = capabilities.find((item) => item.id === "api-request");
   const extractArchive = capabilities.find((item) => item.id === "extract-archive");
   const executeCommand = capabilities.find((item) => item.id === "execute-command");
   const runCode = capabilities.find((item) => item.id === "run-code");
@@ -20,6 +21,8 @@ test("capability registry reports web search as unconfigured without a real key"
   assert.match(search.requirement, /BRAVE_SEARCH_API_KEY/);
   assert.equal(fetchUrl.status, "ready");
   assert.equal(fetchUrl.enabled, true);
+  assert.equal(apiRequest.status, "ready");
+  assert.equal(apiRequest.enabled, true);
   assert.equal(extractArchive.status, "ready");
   assert.match(extractArchive.requirement, /full permission/);
   assert.equal(executeCommand.status, "ready");

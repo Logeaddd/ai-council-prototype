@@ -274,6 +274,7 @@ test("round prompt advertises artifacts in speak schema", () => {
   assert.match(messages[0].content, /suggested_revision, artifacts, file_operations, tool_requests, confidence/);
   assert.match(messages[0].content, /only to request file work/);
   assert.match(messages[0].content, /Do not invent tool results/);
+  assert.match(messages[0].content, /api_request/);
   assert.match(messages[0].content, /search saved public group history/);
   assert.match(messages[0].content, /search_context/);
   assert.match(messages[0].content, /load_context/);
@@ -314,7 +315,7 @@ test("text-only workspace round prompt does not ask the member to propose file_o
   });
 
   assert.match(messages[0].content, /text-only file permission/);
-  assert.match(messages[0].content, /Do not request .*search_context.*load_context.*extract_archive.*execute_command.*run_code.*install_package.*run_tests/);
+  assert.match(messages[0].content, /Do not request .*api_request.*search_context.*load_context.*extract_archive.*execute_command.*run_code.*install_package.*run_tests/);
   assert.match(messages[0].content, /do not propose file_operations yourself/);
   assert.doesNotMatch(messages[0].content, /MUST propose the change in file_operations/);
 });
@@ -339,6 +340,7 @@ test("full tool prompt advertises full-only tools while tool tier does not", () 
 
   assert.match(full[0].content, /extract_archive for zip files/);
   assert.match(full[0].content, /execute_command for real shell commands/);
+  assert.match(full[0].content, /api_request for real HTTP API calls/);
   assert.match(full[0].content, /pipes, redirection, curl \| bash/);
   assert.match(full[0].content, /run_code for real JavaScript\/Node, Python, PowerShell, or shell snippets/);
   assert.match(full[0].content, /install_package for real npm or pip installs/);

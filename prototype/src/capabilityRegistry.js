@@ -25,6 +25,16 @@ export function listCapabilities(options = {}) {
       requirement: "Only public https URLs are allowed."
     },
     {
+      id: "api-request",
+      label: "接口请求",
+      kind: "tool",
+      status: "ready",
+      enabled: true,
+      provider: "built-in",
+      source: "local_server",
+      requirement: "公开网址"
+    },
+    {
       id: "workspace-files",
       label: "读取文件",
       kind: "tool",
