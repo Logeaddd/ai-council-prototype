@@ -15,6 +15,7 @@ test("capability registry reports web search as unconfigured without a real key"
   const runCode = capabilities.find((item) => item.id === "run-code");
   const installPackage = capabilities.find((item) => item.id === "install-package");
   const runTests = capabilities.find((item) => item.id === "run-tests");
+  const gitOperation = capabilities.find((item) => item.id === "git-operation");
 
   assert.equal(search.status, "needs_config");
   assert.equal(search.enabled, false);
@@ -36,7 +37,10 @@ test("capability registry reports web search as unconfigured without a real key"
   assert.match(installPackage.requirement, /完全允许/);
   assert.equal(runTests.status, "ready");
   assert.equal(runTests.enabled, true);
+  assert.equal(gitOperation.status, "ready");
+  assert.equal(gitOperation.enabled, true);
   assert.match(runTests.requirement, /完全允许/);
+  assert.match(gitOperation.requirement, /完全允许/);
 });
 
 test("capability registry accepts a locally stored search key", () => {

@@ -3,6 +3,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import zlib from "node:zlib";
+import { execFileSync } from "node:child_process";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { executeFileTool, extractImportedProjectRoots } from "../src/fileTools.js";
@@ -520,6 +521,91 @@ test("api_request blocks localhost by default", async () => {
   assert.match(result.results[0].error, /Blocked unsafe URL|only https/i);
 });
 
+test("git_operation runs real git status for full permission only", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-git-status-"));
+  initGitRepo(tmp);
+  fs.writeFileSync(path.join(tmp, "notes.txt"), "GIT_STATUS_FACT\n", "utf8");
+
+  const denied = await executeToolRequests({
+    permissionTier: "tool",
+    groupPath: tmp,
+    agent: { id: "tool", name: "Tool" },
+    round: 1,
+    requests: [
+      { tool: "git_operation", action: "status", reason: "Check status." }
+    ]
+  });
+  const allowed = await executeToolRequests({
+    permissionTier: "full",
+    groupPath: tmp,
+    agent: { id: "full", name: "Full" },
+    round: 1,
+    requests: [
+      { tool: "git_operation", action: "status", reason: "Check status." }
+    ]
+  });
+
+  assert.equal(denied.accepted.length, 0);
+  assert.equal(denied.rejected[0].code, "permission_denied");
+  assert.equal(allowed.accepted.length, 1);
+  assert.equal(allowed.results[0].status, "completed");
+  assert.equal(allowed.results[0].result.action, "status");
+  assert.equal(allowed.results[0].result.dirty.some((item) => item.path === "notes.txt"), true);
+  assert.equal(allowed.events.some((event) => event.type === "tool_success" && event.tool === "git_operation"), true);
+  assert.equal(fs.existsSync(path.join(tmp, "shared", "logs", "git.jsonl")), true);
+});
+
+test("git_operation commits staged workspace changes and creates branches", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-git-commit-"));
+  initGitRepo(tmp);
+  fs.writeFileSync(path.join(tmp, "notes.txt"), "GIT_COMMIT_FACT\n", "utf8");
+
+  const commit = await executeToolRequests({
+    permissionTier: "full",
+    groupPath: tmp,
+    agent: { id: "full", name: "Full" },
+    round: 1,
+    requests: [
+      { tool: "git_operation", action: "commit", message: "test: add notes", paths: ["notes.txt"], reason: "Commit notes." }
+    ]
+  });
+  const branch = await executeToolRequests({
+    permissionTier: "full",
+    groupPath: tmp,
+    agent: { id: "full", name: "Full" },
+    round: 1,
+    requests: [
+      { tool: "git_operation", action: "create_branch", branch: "feature/git-tool", reason: "Create branch." }
+    ]
+  });
+
+  assert.equal(commit.results[0].status, "completed");
+  assert.match(commit.results[0].result.commitHash, /^[a-f0-9]+$/);
+  assert.match(execFileSync("git", ["show", "--name-only", "--format="], { cwd: tmp, encoding: "utf8" }), /notes\.txt/);
+  assert.equal(fs.existsSync(path.join(tmp, "shared", "logs", "git.jsonl")), true);
+  assert.equal(branch.results[0].status, "completed");
+  assert.equal(execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: tmp, encoding: "utf8" }).trim(), "feature/git-tool");
+});
+
+test("git_operation rejects unsupported destructive actions", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-git-reject-"));
+  initGitRepo(tmp);
+
+  const result = await executeToolRequests({
+    permissionTier: "full",
+    groupPath: tmp,
+    agent: { id: "full", name: "Full" },
+    round: 1,
+    requests: [
+      { tool: "git_operation", action: "reset_hard", reason: "Try destructive git action." }
+    ]
+  });
+
+  assert.equal(result.accepted.length, 1);
+  assert.equal(result.results[0].status, "failed");
+  assert.equal(result.results[0].code, "unsupported_git_operation");
+});
+
 test("controlled file tools reject path escape and secret files", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-tools-guard-"));
   fs.writeFileSync(path.join(tmp, "safe.md"), "safe", "utf8");
@@ -606,6 +692,12 @@ function shellForNodeCommand() {
 function nodeCommand(script) {
   const escapedScript = String(script).replace(/"/g, '\\"');
   return `"${process.execPath}" -e "${escapedScript}"`;
+}
+
+function initGitRepo(dir) {
+  execFileSync("git", ["init"], { cwd: dir, stdio: "pipe" });
+  execFileSync("git", ["config", "user.email", "test@example.invalid"], { cwd: dir, stdio: "pipe" });
+  execFileSync("git", ["config", "user.name", "AI Council Test"], { cwd: dir, stdio: "pipe" });
 }
 
 function listen(server) {

@@ -283,6 +283,7 @@ test("round prompt advertises artifacts in speak schema", () => {
   assert.match(messages[0].content, /run_code/);
   assert.match(messages[0].content, /install_package/);
   assert.match(messages[0].content, /run_tests/);
+  assert.match(messages[0].content, /git_operation/);
   assert.match(messages[0].content, /sessionId and optional round/);
   assert.match(messages[0].content, /read\/list can be executed by the app/);
   assert.match(messages[0].content, /op, path, reason, expected_effect/);
@@ -315,7 +316,7 @@ test("text-only workspace round prompt does not ask the member to propose file_o
   });
 
   assert.match(messages[0].content, /text-only file permission/);
-  assert.match(messages[0].content, /Do not request .*api_request.*search_context.*load_context.*extract_archive.*execute_command.*run_code.*install_package.*run_tests/);
+  assert.match(messages[0].content, /Do not request .*api_request.*search_context.*load_context.*extract_archive.*execute_command.*run_code.*install_package.*run_tests.*git_operation/);
   assert.match(messages[0].content, /do not propose file_operations yourself/);
   assert.doesNotMatch(messages[0].content, /MUST propose the change in file_operations/);
 });
@@ -345,12 +346,14 @@ test("full tool prompt advertises full-only tools while tool tier does not", () 
   assert.match(full[0].content, /run_code for real JavaScript\/Node, Python, PowerShell, or shell snippets/);
   assert.match(full[0].content, /install_package for real npm or pip installs/);
   assert.match(full[0].content, /run_tests for real npm, pytest, cargo, or custom test commands/);
-  assert.match(tool[0].content, /extract_archive, execute_command, run_code, install_package, and run_tests require full permission/);
+  assert.match(full[0].content, /git_operation for real Git status/);
+  assert.match(tool[0].content, /extract_archive, execute_command, run_code, install_package, run_tests, and git_operation require full permission/);
   assert.doesNotMatch(tool[0].content, /extract_archive for zip files/);
   assert.doesNotMatch(tool[0].content, /execute_command for real shell commands/);
   assert.doesNotMatch(tool[0].content, /run_code for real/);
   assert.doesNotMatch(tool[0].content, /install_package for real/);
   assert.doesNotMatch(tool[0].content, /run_tests for real/);
+  assert.doesNotMatch(tool[0].content, /git_operation for real Git/);
 });
 
 test("reviewer prompt includes intensity, scope gate, duplicate gate, and open ledger", () => {

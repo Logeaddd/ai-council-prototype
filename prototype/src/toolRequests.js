@@ -7,6 +7,7 @@ import { runCodeTool } from "./codeRunTools.js";
 import { installPackageTool } from "./packageTools.js";
 import { runTestsTool } from "./testRunTools.js";
 import { apiRequestTool } from "./apiTools.js";
+import { gitOperationTool } from "./gitTools.js";
 import { loadSessionContextArchiveItem, searchSessionContextArchive } from "./storage.js";
 import fs from "node:fs";
 import path from "node:path";
@@ -25,7 +26,8 @@ const ALLOWED_TOOLS = new Set([
   "run_code",
   "install_package",
   "run_tests",
-  "api_request"
+  "api_request",
+  "git_operation"
 ]);
 const FILE_TOOLS = new Set(["list_directory", "read_file", "search_files", "grep_content"]);
 const CONTEXT_TOOLS = new Set(["search_context", "load_context"]);
@@ -35,7 +37,8 @@ const CODE_TOOLS = new Set(["run_code"]);
 const PACKAGE_TOOLS = new Set(["install_package"]);
 const TEST_TOOLS = new Set(["run_tests"]);
 const API_TOOLS = new Set(["api_request"]);
-const FULL_PERMISSION_TOOLS = new Set(["extract_archive", "execute_command", "run_code", "install_package", "run_tests"]);
+const GIT_TOOLS = new Set(["git_operation"]);
+const FULL_PERMISSION_TOOLS = new Set(["extract_archive", "execute_command", "run_code", "install_package", "run_tests", "git_operation"]);
 
 export function normalizeToolRequests(value) {
   if (!Array.isArray(value)) return [];
@@ -65,7 +68,7 @@ export async function executeToolRequests(options = {}) {
     };
 
     if (!ALLOWED_TOOLS.has(normalized.tool)) {
-      const rejection = reject(base, "invalid_tool", "Tool must be one of web_search, fetch_url, list_directory, read_file, search_files, grep_content, search_context, load_context, extract_archive, execute_command, run_code, install_package, run_tests, api_request.");
+      const rejection = reject(base, "invalid_tool", "Tool must be one of web_search, fetch_url, list_directory, read_file, search_files, grep_content, search_context, load_context, extract_archive, execute_command, run_code, install_package, run_tests, api_request, git_operation.");
       rejected.push(rejection);
       events.push(toolEvent("tool_failure", base, { status: "rejected", code: rejection.code, error: rejection.error }));
       appendToolAuditLog(options.groupPath, "rejected", rejection);
@@ -74,6 +77,7 @@ export async function executeToolRequests(options = {}) {
       appendPackageAuditLog(options.groupPath, "rejected", rejection);
       appendTestAuditLog(options.groupPath, "rejected", rejection);
       appendApiAuditLog(options.groupPath, "rejected", rejection);
+      appendGitAuditLog(options.groupPath, "rejected", rejection);
       continue;
     }
     if (permissionTier === "text") {
@@ -86,6 +90,7 @@ export async function executeToolRequests(options = {}) {
       appendPackageAuditLog(options.groupPath, "rejected", rejection);
       appendTestAuditLog(options.groupPath, "rejected", rejection);
       appendApiAuditLog(options.groupPath, "rejected", rejection);
+      appendGitAuditLog(options.groupPath, "rejected", rejection);
       continue;
     }
     if (FULL_PERMISSION_TOOLS.has(normalized.tool) && permissionTier !== "full") {
@@ -98,6 +103,7 @@ export async function executeToolRequests(options = {}) {
       appendPackageAuditLog(options.groupPath, "rejected", rejection);
       appendTestAuditLog(options.groupPath, "rejected", rejection);
       appendApiAuditLog(options.groupPath, "rejected", rejection);
+      appendGitAuditLog(options.groupPath, "rejected", rejection);
       continue;
     }
 
@@ -120,6 +126,7 @@ export async function executeToolRequests(options = {}) {
     appendPackageAuditLog(options.groupPath, "completed", result);
     appendTestAuditLog(options.groupPath, "completed", result);
     appendApiAuditLog(options.groupPath, "completed", result);
+    appendGitAuditLog(options.groupPath, "completed", result);
   }
 
   return { accepted, rejected, results, events };
@@ -277,6 +284,21 @@ async function executeOne(request, options) {
         result
       });
     }
+    if (request.tool === "git_operation") {
+      const result = await gitOperationTool(request, {
+        groupPath: options.groupPath,
+        timeoutMs: options.timeoutMs,
+        gitTimeoutMs: options.gitTimeoutMs,
+        maxGitOutputBytes: options.maxGitOutputBytes,
+        signal: options.signal
+      });
+      return resultRecord(request, {
+        status: result.ok ? "completed" : "failed",
+        code: result.code,
+        error: result.error,
+        result
+      });
+    }
     const result = await searchWeb(request.query, {
       timeoutMs: options.timeoutMs,
       count: request.count,
@@ -319,12 +341,18 @@ function normalizeToolRequest(item, index) {
     root: stringField(item.root),
     sessionId: stringField(item.sessionId || item.session_id),
     method: stringField(item.method),
+    action: stringField(item.action || item.operation),
+    branch: stringField(item.branch),
+    remote: stringField(item.remote),
+    message: stringField(item.message || item.commitMessage || item.commit_message),
+    paths: arrayOfStrings(item.paths || item.files),
     headers: objectField(item.headers),
     body: item.body,
     json: item.json,
     archiveRound: item.round === undefined ? undefined : Number(item.round),
     overwrite: Boolean(item.overwrite),
     background: Boolean(item.background),
+    force: Boolean(item.force),
     reason: stringField(item.reason),
     count: normalizeCount(item.count, tool),
     maxBytes: normalizeMaxBytes(item.maxBytes || item.max_bytes),
@@ -354,10 +382,16 @@ function reject(request, code, reason) {
     root: request.root,
     sessionId: request.sessionId,
     method: request.method,
+    action: request.action,
+    branch: request.branch,
+    remote: request.remote,
+    message: request.message,
+    paths: request.paths,
     headers: safeHeadersForStorage(request.headers),
     archiveRound: request.archiveRound,
     overwrite: request.overwrite,
     background: request.background,
+    force: request.force,
     timeoutMs: request.timeoutMs,
     reason: request.reason,
     round: request.round,
@@ -390,10 +424,16 @@ function resultRecord(request, extra) {
     root: request.root,
     sessionId: request.sessionId,
     method: request.method,
+    action: request.action,
+    branch: request.branch,
+    remote: request.remote,
+    message: request.message,
+    paths: request.paths,
     headers: safeHeadersForStorage(request.headers),
     archiveRound: request.archiveRound,
     overwrite: request.overwrite,
     background: request.background,
+    force: request.force,
     timeoutMs: request.timeoutMs,
     reason: request.reason,
     round: request.round,
@@ -411,7 +451,7 @@ function stringField(value) {
 
 function normalizeCount(value, tool) {
   const count = Number(value);
-  if (!Number.isFinite(count)) return FILE_TOOLS.has(tool) || ARCHIVE_TOOLS.has(tool) || CODE_TOOLS.has(tool) || PACKAGE_TOOLS.has(tool) || TEST_TOOLS.has(tool) || API_TOOLS.has(tool) ? undefined : 5;
+  if (!Number.isFinite(count)) return FILE_TOOLS.has(tool) || ARCHIVE_TOOLS.has(tool) || CODE_TOOLS.has(tool) || PACKAGE_TOOLS.has(tool) || TEST_TOOLS.has(tool) || API_TOOLS.has(tool) || GIT_TOOLS.has(tool) ? undefined : 5;
   if (ARCHIVE_TOOLS.has(tool)) return Math.max(1, Math.min(1000, Math.floor(count)));
   const max = FILE_TOOLS.has(tool) ? 300 : CONTEXT_TOOLS.has(tool) ? 20 : 8;
   return Math.max(1, Math.min(max, Math.floor(count)));
@@ -453,10 +493,16 @@ function toolEvent(type, request, extra = {}) {
     root: request.root,
     sessionId: request.sessionId,
     method: request.method,
+    action: request.action,
+    branch: request.branch,
+    remote: request.remote,
+    message: request.message,
+    paths: request.paths,
     headers: safeHeadersForStorage(request.headers),
     archiveRound: request.archiveRound,
     overwrite: request.overwrite,
     background: request.background,
+    force: request.force,
     timeoutMs: request.timeoutMs,
     createdAt: nowIso(),
     ...extra
@@ -554,6 +600,19 @@ function summarizeToolResult(record = {}) {
       truncated: Boolean(result.truncated)
     };
   }
+  if (record.tool === "git_operation") {
+    return {
+      action: result.action,
+      cwd: result.cwd,
+      branch: result.branch,
+      remote: result.remote,
+      commitHash: result.commitHash,
+      dirty: result.dirty?.length || 0,
+      steps: result.steps?.length || 0,
+      stdoutBytes: result.stdout?.length || 0,
+      stderrBytes: result.stderr?.length || 0
+    };
+  }
   if (record.tool === "fetch_url") {
     return { url: safeUrlForEvent(record.url), title: result.title || "", bytes: result.bytes };
   }
@@ -587,6 +646,12 @@ function appendToolAuditLog(groupPath, action, item) {
       shell: item.shell,
       background: item.background,
       timeoutMs: item.timeoutMs,
+      action: item.action,
+      branch: item.branch,
+      remote: item.remote,
+      message: item.message,
+      paths: item.paths,
+      force: item.force,
       sessionId: item.sessionId,
       method: item.method,
       headers: safeHeadersForStorage(item.headers),
@@ -754,6 +819,37 @@ function appendApiAuditLog(groupPath, action, item) {
   }
 }
 
+function appendGitAuditLog(groupPath, action, item) {
+  if (!groupPath || item.tool !== "git_operation") return;
+  try {
+    const filePath = path.join(groupPath, "shared", "logs", "git.jsonl");
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    const record = {
+      action,
+      id: item.id,
+      tool: item.tool,
+      status: item.status,
+      code: item.code,
+      error: item.error,
+      round: item.round,
+      source_agent_id: item.source_agent_id,
+      source_agent_name: item.source_agent_name,
+      gitAction: item.result?.action || item.action,
+      cwd: item.result?.cwd || item.cwd || ".",
+      branch: item.result?.branch || item.branch,
+      remote: item.result?.remote || item.remote,
+      commitHash: item.result?.commitHash,
+      paths: item.result?.paths || item.paths || [],
+      durationMs: item.result?.durationMs,
+      resultSummary: summarizeToolResult(item),
+      createdAt: nowIso()
+    };
+    fs.appendFileSync(filePath, `${JSON.stringify(record)}\n`, "utf8");
+  } catch {
+    // Git audit is best-effort; never hide the actual git result because logging failed.
+  }
+}
+
 function safeRequestForStorage(request) {
   return {
     ...request,
@@ -761,10 +857,16 @@ function safeRequestForStorage(request) {
     code: summarizeCodeForStorage(request.code),
     packageName: safePackageForStorage(request.packageName),
     runner: request.runner,
+    action: request.action,
+    branch: request.branch,
+    remote: request.remote,
+    message: request.message,
+    paths: request.paths,
     headers: safeHeadersForStorage(request.headers),
     body: request.body ? summarizeBodyForStorage(request.body) : undefined,
     json: request.json ? summarizeBodyForStorage(request.json) : undefined,
-    url: request.url
+    url: request.url,
+    force: request.force
   };
 }
 
@@ -806,6 +908,11 @@ function safePackageForStorage(value) {
 function objectField(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   return value;
+}
+
+function arrayOfStrings(value) {
+  if (!Array.isArray(value)) return [];
+  return value.map((item) => String(item || "").trim()).filter(Boolean);
 }
 
 function safeHeadersForStorage(value) {
