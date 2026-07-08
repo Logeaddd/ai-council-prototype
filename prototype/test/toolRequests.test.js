@@ -389,6 +389,42 @@ test("install_package installs a real local npm package into managed workspace e
   assert.equal(fs.existsSync(path.join(tmp, "shared", "logs", "packages.jsonl")), true);
 });
 
+test("install_package supports cargo go and gem managers in managed workspace environments", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-install-package-managers-"));
+  const bin = path.join(tmp, "fake-bin");
+  makeFakeExecutable(bin, "cargo");
+  makeFakeExecutable(bin, "go");
+  makeFakeExecutable(bin, "gem");
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${bin}${path.delimiter}${oldPath || ""}`;
+
+  try {
+    const result = await executeToolRequests({
+      permissionTier: "full",
+      groupPath: tmp,
+      agent: { id: "full", name: "Full" },
+      round: 1,
+      requests: [
+        { tool: "install_package", manager: "cargo", packageName: "serde", reason: "Install Rust crate." },
+        { tool: "install_package", manager: "go", packageName: "example.com/mod", reason: "Install Go module." },
+        { tool: "install_package", manager: "gem", packageName: "rake", reason: "Install Ruby gem." }
+      ]
+    });
+
+    assert.equal(result.results.length, 3);
+    assert.deepEqual(result.results.map((item) => item.status), ["completed", "completed", "completed"]);
+    assert.deepEqual(result.results.map((item) => item.result.manager), ["cargo", "go", "gem"]);
+    assert.equal(fs.existsSync(path.join(tmp, "shared", "environments", "cargo", "Cargo.toml")), true);
+    assert.equal(fs.existsSync(path.join(tmp, "shared", "environments", "cargo", "cargo-ran.txt")), true);
+    assert.equal(fs.existsSync(path.join(tmp, "shared", "environments", "go", "go.mod")), true);
+    assert.equal(fs.existsSync(path.join(tmp, "shared", "environments", "go", "go-ran.txt")), true);
+    assert.equal(fs.existsSync(path.join(tmp, "shared", "environments", "gem", "gems")), true);
+    assert.equal(fs.existsSync(path.join(tmp, "shared", "environments", "gem", "gem-ran.txt")), true);
+  } finally {
+    process.env.PATH = oldPath;
+  }
+});
+
 test("install_package reports unsupported package managers honestly", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-install-package-fail-"));
   const result = await executeToolRequests({
@@ -829,6 +865,27 @@ function listen(server) {
 
 function close(server) {
   return new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+}
+
+function makeFakeExecutable(binDir, name) {
+  fs.mkdirSync(binDir, { recursive: true });
+  if (process.platform === "win32") {
+    fs.writeFileSync(path.join(binDir, `${name}.cmd`), [
+      "@echo off",
+      `echo %* > ${name}-args.txt`,
+      `echo ${name} ran > ${name}-ran.txt`,
+      ""
+    ].join("\r\n"), "utf8");
+    return;
+  }
+  const filePath = path.join(binDir, name);
+  fs.writeFileSync(filePath, [
+    "#!/bin/sh",
+    `printf '%s\\n' "$*" > "${name}-args.txt"`,
+    `printf '${name} ran\\n' > "${name}-ran.txt"`,
+    ""
+  ].join("\n"), "utf8");
+  fs.chmodSync(filePath, 0o755);
 }
 
 function makeZip(entries) {

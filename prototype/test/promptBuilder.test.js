@@ -346,7 +346,7 @@ test("full tool prompt advertises full-only tools while tool tier does not", () 
   assert.match(full[0].content, /api_request for real HTTP API calls/);
   assert.match(full[0].content, /pipes, redirection, curl \| bash/);
   assert.match(full[0].content, /run_code for real JavaScript\/Node, Python, PowerShell, or shell snippets/);
-  assert.match(full[0].content, /install_package for real npm or pip installs/);
+  assert.match(full[0].content, /install_package for real npm, pip, cargo, go, or gem installs/);
   assert.match(full[0].content, /run_tests for real npm, pytest, cargo, or custom test commands/);
   assert.match(full[0].content, /git_operation for real Git status/);
   assert.match(full[0].content, /browser_control for opening a real browser page/);

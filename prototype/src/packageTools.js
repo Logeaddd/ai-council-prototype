@@ -57,6 +57,33 @@ function prepareEnvironment(groupRoot, manager) {
       }, null, 2), "utf8");
     }
   }
+  if (manager === "cargo") {
+    const cargoToml = path.join(base, "Cargo.toml");
+    if (!fs.existsSync(cargoToml)) {
+      fs.writeFileSync(cargoToml, [
+        "[package]",
+        "name = \"ai_council_managed_rust_env\"",
+        "version = \"0.0.0\"",
+        "edition = \"2021\"",
+        "",
+        "[dependencies]",
+        ""
+      ].join("\n"), "utf8");
+    }
+    fs.mkdirSync(path.join(base, "src"), { recursive: true });
+    const mainRs = path.join(base, "src", "main.rs");
+    if (!fs.existsSync(mainRs)) fs.writeFileSync(mainRs, "fn main() {}\n", "utf8");
+  }
+  if (manager === "go") {
+    const goMod = path.join(base, "go.mod");
+    if (!fs.existsSync(goMod)) {
+      fs.writeFileSync(goMod, "module ai-council-managed-go-env\n\ngo 1.22\n", "utf8");
+    }
+  }
+  if (manager === "gem") {
+    fs.mkdirSync(path.join(base, "gems"), { recursive: true });
+    fs.mkdirSync(path.join(base, "bin"), { recursive: true });
+  }
   return base;
 }
 
@@ -70,6 +97,9 @@ function installCommand(manager, packageName) {
     const install = `${quoteShell(venv)} -m pip install ${quoted}`;
     return process.platform === "win32" ? `if not exist .venv ${create} && ${install}` : `test -d .venv || ${create}; ${install}`;
   }
+  if (manager === "cargo") return `cargo add ${quoted}`;
+  if (manager === "go") return `go get ${quoted}`;
+  if (manager === "gem") return `gem install ${quoted} --install-dir gems --bindir bin --no-document`;
   throw toolError("unsupported_package_manager", `Unsupported package manager: ${manager}`);
 }
 
@@ -77,6 +107,9 @@ function normalizeManager(value) {
   const raw = String(value || "npm").trim().toLowerCase();
   if (["npm", "node", "nodejs", "javascript"].includes(raw)) return "npm";
   if (["pip", "python", "python3", "py"].includes(raw)) return "pip";
+  if (["cargo", "rust", "rustlang"].includes(raw)) return "cargo";
+  if (["go", "golang"].includes(raw)) return "go";
+  if (["gem", "ruby", "rubygems"].includes(raw)) return "gem";
   throw toolError("unsupported_package_manager", `Unsupported package manager: ${raw || "(empty)"}.`);
 }
 
