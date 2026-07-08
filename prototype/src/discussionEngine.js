@@ -4,7 +4,7 @@ import { buildContextPromptSections, buildMemberContext } from "./contextBuilder
 import { parseFinalDecision, parseRoundResponse } from "./responseParser.js";
 import { makeId, nowIso } from "./types.js";
 import { isConsensusParticipant, scoreConsensus, shouldStop, updateUnresolvedObjections } from "./consensusEngine.js";
-import { appendMemoryCandidates, writeGroupSession, writeSession } from "./storage.js";
+import { appendMemoryCandidates, writeContextArchive, writeGroupSession, writeSession } from "./storage.js";
 import { assessBudgetUsage, assessSizeUsage } from "./tokenLimits.js";
 import { appendSessionTranscriptChunk, readSummaryCache, updateDeterministicSummaries } from "./summaryCache.js";
 import { appendSessionUsage, estimateCost, estimateMemberAccruedCost } from "./usageStats.js";
@@ -425,6 +425,9 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
   const sessionPath = options.groupPath
     ? writeGroupSession(session, options.groupPath)
     : writeSession(session, baseDir);
+  const contextArchive = options.groupPath
+    ? writeContextArchive(session, options.groupPath, { attachments })
+    : undefined;
   const transcriptChunk = options.groupPath
     ? appendSessionTranscriptChunk(options.groupPath, session)
     : undefined;
@@ -436,7 +439,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
     : undefined;
   const memoryRecords = appendMemoryCandidates(session.finalDecision, session, baseDir);
 
-  const result = { session, sessionPath, memoryRecords, transcriptChunk, summaryUpdate, usageRecord };
+  const result = { session, sessionPath, contextArchive, memoryRecords, transcriptChunk, summaryUpdate, usageRecord };
   yield {
     type: "final_decision",
     agentId: judge.id,

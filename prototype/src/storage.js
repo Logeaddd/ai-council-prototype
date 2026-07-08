@@ -18,6 +18,38 @@ export function writeGroupSession(session, groupPath) {
   return filePath;
 }
 
+export function writeContextArchive(session, groupPath, options = {}) {
+  const id = requireSafeSessionId(session?.id);
+  const root = path.resolve(groupPath);
+  const sessionsDir = path.join(root, "sessions");
+  const archiveDir = path.join(sessionsDir, id);
+  fs.mkdirSync(archiveDir, { recursive: true });
+
+  const policy = buildContextPolicy(options.contextPolicy);
+  const contextPolicyPath = writeJson(path.join(archiveDir, "context_policy.json"), policy);
+  const fileArchive = writeArchivedAttachments(archiveDir, options.attachments || []);
+  const rounds = writeRoundArchives(archiveDir, session);
+  const indexRecord = buildSessionIndexRecord(session, {
+    contextPolicyPath: relative(root, contextPolicyPath),
+    archiveDir: relative(root, archiveDir),
+    fullSessionPath: relative(root, path.join(sessionsDir, `${id}.json`)),
+    fileManifestPath: relative(root, fileArchive.manifestPath),
+    rounds
+  });
+
+  fs.mkdirSync(sessionsDir, { recursive: true });
+  upsertJsonlRecord(path.join(sessionsDir, "session_index.jsonl"), indexRecord, "sessionId");
+
+  return {
+    archiveDir,
+    contextPolicyPath,
+    indexRecord,
+    rounds,
+    fileManifestPath: fileArchive.manifestPath,
+    archivedFiles: fileArchive.files
+  };
+}
+
 export function listGroupSessions(groupPath, options = {}) {
   const dir = path.resolve(groupPath, "sessions");
   const limit = Math.max(1, Math.min(200, Number(options.limit || 50)));
@@ -49,6 +81,191 @@ export function readGroupSession(groupPath, sessionId) {
   }
   if (!fs.existsSync(filePath)) throw new Error(`Unknown session id: ${id}`);
   return JSON.parse(fs.readFileSync(filePath, "utf8"));
+}
+
+export function readSessionContextArchive(groupPath, sessionId) {
+  const id = requireSafeSessionId(sessionId);
+  const root = path.resolve(groupPath, "sessions");
+  const archiveDir = path.resolve(root, id);
+  if (archiveDir !== root && !archiveDir.startsWith(`${root}${path.sep}`)) {
+    throw new Error("Session archive path escapes group workspace");
+  }
+  if (!fs.existsSync(archiveDir) || !fs.statSync(archiveDir).isDirectory()) {
+    throw new Error(`Unknown session archive: ${id}`);
+  }
+  return {
+    sessionId: id,
+    contextPolicy: readJsonIfExists(path.join(archiveDir, "context_policy.json")),
+    fileManifest: readJsonIfExists(path.join(archiveDir, "files", "file_manifest.json")),
+    rounds: fs.readdirSync(archiveDir)
+      .filter((name) => /^round_\d+_summary\.json$/.test(name))
+      .sort(naturalCompare)
+      .map((name) => readJsonIfExists(path.join(archiveDir, name)))
+      .filter(Boolean)
+  };
+}
+
+function writeRoundArchives(archiveDir, session) {
+  const messages = Array.isArray(session?.messages) ? session.messages : [];
+  const roundNumbers = [...new Set(messages.map((message) => Number(message.round || 0)).filter((round) => round > 0))]
+    .sort((a, b) => a - b);
+  const rounds = [];
+  for (const round of roundNumbers) {
+    const roundMessages = messages.filter((message) => Number(message.round || 0) === round);
+    const full = {
+      schema: "ai-council.round-full.v1",
+      sessionId: session.id || "",
+      round,
+      messages: roundMessages,
+      toolExecutionResults: filterByRound(session.toolExecutionResults, round),
+      fileOperationExecutionResults: filterByRound(session.fileOperationExecutionResults, round),
+      fileOperationProposals: filterByRound(session.fileOperationProposals, round)
+    };
+    const summary = {
+      schema: "ai-council.round-summary.v1",
+      sessionId: session.id || "",
+      round,
+      source: "deterministic_summary",
+      sourceFullPath: `round_${round}_full.json`,
+      messageCount: roundMessages.length,
+      speakers: roundMessages.map((message) => ({
+        agentId: message.agentId || "",
+        agentName: message.agentName || "",
+        status: message.response?.status || "unknown",
+        textPreview: truncate(message.response?.argument || message.response?.reason || message.displayText || "", 260)
+      })),
+      toolResultCount: full.toolExecutionResults.length,
+      fileResultCount: full.fileOperationExecutionResults.length
+    };
+    const fullPath = writeJson(path.join(archiveDir, `round_${round}_full.json`), full);
+    const summaryPath = writeJson(path.join(archiveDir, `round_${round}_summary.json`), summary);
+    rounds.push({
+      round,
+      fullPath: path.basename(fullPath),
+      summaryPath: path.basename(summaryPath),
+      messageCount: roundMessages.length
+    });
+  }
+  return rounds;
+}
+
+function writeArchivedAttachments(archiveDir, attachments) {
+  const filesDir = path.join(archiveDir, "files");
+  fs.mkdirSync(filesDir, { recursive: true });
+  const files = (Array.isArray(attachments) ? attachments : []).map((attachment, index) => {
+    const name = safeFileName(`attachment_${String(index + 1).padStart(3, "0")}_${attachment?.name || "file.txt"}`);
+    const filePath = path.join(filesDir, name);
+    const content = typeof attachment?.content === "string" ? attachment.content : "";
+    fs.writeFileSync(filePath, content, "utf8");
+    return {
+      index,
+      originalName: String(attachment?.name || ""),
+      type: String(attachment?.type || ""),
+      sizeBytes: Number(attachment?.sizeBytes || Buffer.byteLength(content, "utf8")),
+      truncated: Boolean(attachment?.truncated),
+      storedPath: `files/${name}`,
+      summary: truncate(content, 240)
+    };
+  });
+  const manifestPath = writeJson(path.join(filesDir, "file_manifest.json"), {
+    schema: "ai-council.file-manifest.v1",
+    source: "user_attachments_or_imported_project_files",
+    files
+  });
+  return { manifestPath, files };
+}
+
+function buildSessionIndexRecord(session, pointers) {
+  const messages = Array.isArray(session?.messages) ? session.messages : [];
+  const createdAt = session.createdAt || session.startedAt || messages[0]?.createdAt || nowIso();
+  const completedAt = session.completedAt || messages.at(-1)?.createdAt || createdAt;
+  return {
+    schema: "ai-council.session-index.v1",
+    sessionId: session.id || "",
+    question: session.question || "",
+    createdAt,
+    completedAt,
+    status: session.status || "",
+    finalState: session.finalDecision?.final_state || "",
+    messageCount: messages.length,
+    roundCount: pointers.rounds.length,
+    contextPolicyPath: pointers.contextPolicyPath,
+    fullSessionPath: pointers.fullSessionPath,
+    archiveDir: pointers.archiveDir,
+    fileManifestPath: pointers.fileManifestPath,
+    rounds: pointers.rounds.map((round) => ({
+      round: round.round,
+      fullPath: `${pointers.archiveDir}/${round.fullPath}`,
+      summaryPath: `${pointers.archiveDir}/${round.summaryPath}`,
+      messageCount: round.messageCount
+    }))
+  };
+}
+
+function buildContextPolicy(value = {}) {
+  return {
+    schema: "ai-council.context-policy.v1",
+    storage: "zero_loss_storage",
+    defaultInjection: "limited_recent_context",
+    loading: "on_demand_by_tool",
+    hiddenChainOfThought: "not_stored_or_shared",
+    privateChat: "target_member_only_unless_user_makes_public_memory",
+    summaries: "summaries_are_not_source_facts",
+    compression: "compressed_content_must_keep_source_pointer",
+    createdAt: nowIso(),
+    ...value
+  };
+}
+
+function filterByRound(items = [], round) {
+  return (Array.isArray(items) ? items : []).filter((item) => Number(item.round || 0) === round);
+}
+
+function upsertJsonlRecord(filePath, record, key) {
+  const existing = fs.existsSync(filePath)
+    ? fs.readFileSync(filePath, "utf8").split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line))
+    : [];
+  const next = [
+    ...existing.filter((item) => item?.[key] !== record[key]),
+    record
+  ];
+  fs.writeFileSync(filePath, next.map((item) => JSON.stringify(item)).join("\n") + "\n", "utf8");
+}
+
+function writeJson(filePath, data) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf8");
+  return filePath;
+}
+
+function readJsonIfExists(filePath) {
+  if (!fs.existsSync(filePath)) return undefined;
+  return JSON.parse(fs.readFileSync(filePath, "utf8"));
+}
+
+function requireSafeSessionId(value) {
+  const id = String(value || "").trim();
+  if (!/^[A-Za-z0-9_-]+$/.test(id)) throw new Error("Invalid session id");
+  return id;
+}
+
+function safeFileName(value) {
+  return String(value || "file.txt")
+    .replace(/[<>:"/\\|?*\u0000-\u001F]/g, "_")
+    .slice(0, 180);
+}
+
+function relative(root, target) {
+  return path.relative(root, target).replaceAll("\\", "/");
+}
+
+function naturalCompare(a, b) {
+  return a.localeCompare(b, undefined, { numeric: true });
+}
+
+function truncate(value, max) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  return text.length > max ? `${text.slice(0, max - 3)}...` : text;
 }
 
 function summarizeSession(session, fallbackTime) {
