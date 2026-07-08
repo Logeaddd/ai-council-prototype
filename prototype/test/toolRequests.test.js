@@ -284,6 +284,69 @@ test("execute_command keeps cwd inside workspace and reports timeouts", async ()
   assert.equal(timedOut.results[0].result.timedOut, true);
 });
 
+test("run_code executes real snippets for full permission only", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-run-code-"));
+  const source = "const value = 20 + 22;\nconsole.log('RUN_CODE_FACT:' + value);";
+  const denied = await executeToolRequests({
+    permissionTier: "tool",
+    groupPath: tmp,
+    agent: { id: "tool", name: "Tool" },
+    round: 1,
+    requests: [
+      { tool: "run_code", language: "javascript", code: source, reason: "Run snippet." }
+    ]
+  });
+  const allowed = await executeToolRequests({
+    permissionTier: "full",
+    groupPath: tmp,
+    agent: { id: "full", name: "Full" },
+    round: 1,
+    requests: [
+      { tool: "run_code", language: "javascript", code: source, reason: "Run snippet." }
+    ]
+  });
+
+  assert.equal(denied.accepted.length, 0);
+  assert.equal(denied.rejected[0].code, "permission_denied");
+  assert.equal(allowed.accepted.length, 1);
+  assert.equal(allowed.accepted[0].code.bytes, Buffer.byteLength(source, "utf8"));
+  assert.equal(String(allowed.accepted[0].code.preview).includes("RUN_CODE_FACT"), true);
+  assert.equal(String(allowed.accepted[0].code).includes("const value"), false);
+  assert.equal(allowed.results[0].status, "completed");
+  assert.equal(allowed.results[0].result.language, "javascript");
+  assert.match(allowed.results[0].result.stdout, /RUN_CODE_FACT:42/);
+  assert.equal(fs.existsSync(path.join(tmp, allowed.results[0].result.codePath)), true);
+  assert.equal(fs.existsSync(path.join(tmp, "shared", "logs", "code-runs.jsonl")), true);
+});
+
+test("run_code reports timeout and unsupported languages honestly", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-run-code-fail-"));
+  const timedOut = await executeToolRequests({
+    permissionTier: "full",
+    groupPath: tmp,
+    agent: { id: "full", name: "Full" },
+    round: 1,
+    requests: [
+      { tool: "run_code", language: "javascript", code: "setTimeout(()=>{}, 2000);", timeoutMs: 50, reason: "Timeout snippet." }
+    ]
+  });
+  const unsupported = await executeToolRequests({
+    permissionTier: "full",
+    groupPath: tmp,
+    agent: { id: "full", name: "Full" },
+    round: 1,
+    requests: [
+      { tool: "run_code", language: "brainfuck", code: "++++", reason: "Unsupported language." }
+    ]
+  });
+
+  assert.equal(timedOut.results[0].status, "failed");
+  assert.equal(timedOut.results[0].code, "command_timeout");
+  assert.equal(timedOut.results[0].result.timedOut, true);
+  assert.equal(unsupported.results[0].status, "failed");
+  assert.equal(unsupported.results[0].code, "unsupported_language");
+});
+
 test("controlled file tools reject path escape and secret files", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-tools-guard-"));
   fs.writeFileSync(path.join(tmp, "safe.md"), "safe", "utf8");

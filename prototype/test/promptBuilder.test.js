@@ -279,6 +279,7 @@ test("round prompt advertises artifacts in speak schema", () => {
   assert.match(messages[0].content, /load_context/);
   assert.match(messages[0].content, /extract_archive/);
   assert.match(messages[0].content, /execute_command/);
+  assert.match(messages[0].content, /run_code/);
   assert.match(messages[0].content, /sessionId and optional round/);
   assert.match(messages[0].content, /read\/list can be executed by the app/);
   assert.match(messages[0].content, /op, path, reason, expected_effect/);
@@ -311,7 +312,7 @@ test("text-only workspace round prompt does not ask the member to propose file_o
   });
 
   assert.match(messages[0].content, /text-only file permission/);
-  assert.match(messages[0].content, /Do not request .*search_context.*load_context.*extract_archive.*execute_command/);
+  assert.match(messages[0].content, /Do not request .*search_context.*load_context.*extract_archive.*execute_command.*run_code/);
   assert.match(messages[0].content, /do not propose file_operations yourself/);
   assert.doesNotMatch(messages[0].content, /MUST propose the change in file_operations/);
 });
@@ -337,9 +338,11 @@ test("full tool prompt advertises full-only tools while tool tier does not", () 
   assert.match(full[0].content, /extract_archive for zip files/);
   assert.match(full[0].content, /execute_command for real shell commands/);
   assert.match(full[0].content, /pipes, redirection, curl \| bash/);
-  assert.match(tool[0].content, /extract_archive and execute_command require full permission/);
+  assert.match(full[0].content, /run_code for real JavaScript\/Node, Python, PowerShell, or shell snippets/);
+  assert.match(tool[0].content, /extract_archive, execute_command, and run_code require full permission/);
   assert.doesNotMatch(tool[0].content, /extract_archive for zip files/);
   assert.doesNotMatch(tool[0].content, /execute_command for real shell commands/);
+  assert.doesNotMatch(tool[0].content, /run_code for real/);
 });
 
 test("reviewer prompt includes intensity, scope gate, duplicate gate, and open ledger", () => {

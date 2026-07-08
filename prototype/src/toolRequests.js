@@ -3,6 +3,7 @@ import { fetchPublicUrl, searchWeb } from "./webTools.js";
 import { executeFileTool } from "./fileTools.js";
 import { extractArchiveTool } from "./archiveTools.js";
 import { executeCommandTool } from "./commandTools.js";
+import { runCodeTool } from "./codeRunTools.js";
 import { loadSessionContextArchiveItem, searchSessionContextArchive } from "./storage.js";
 import fs from "node:fs";
 import path from "node:path";
@@ -17,13 +18,15 @@ const ALLOWED_TOOLS = new Set([
   "search_context",
   "load_context",
   "extract_archive",
-  "execute_command"
+  "execute_command",
+  "run_code"
 ]);
 const FILE_TOOLS = new Set(["list_directory", "read_file", "search_files", "grep_content"]);
 const CONTEXT_TOOLS = new Set(["search_context", "load_context"]);
 const ARCHIVE_TOOLS = new Set(["extract_archive"]);
 const COMMAND_TOOLS = new Set(["execute_command"]);
-const FULL_PERMISSION_TOOLS = new Set(["extract_archive", "execute_command"]);
+const CODE_TOOLS = new Set(["run_code"]);
+const FULL_PERMISSION_TOOLS = new Set(["extract_archive", "execute_command", "run_code"]);
 
 export function normalizeToolRequests(value) {
   if (!Array.isArray(value)) return [];
@@ -53,11 +56,12 @@ export async function executeToolRequests(options = {}) {
     };
 
     if (!ALLOWED_TOOLS.has(normalized.tool)) {
-      const rejection = reject(base, "invalid_tool", "Tool must be one of web_search, fetch_url, list_directory, read_file, search_files, grep_content, search_context, load_context, extract_archive, execute_command.");
+      const rejection = reject(base, "invalid_tool", "Tool must be one of web_search, fetch_url, list_directory, read_file, search_files, grep_content, search_context, load_context, extract_archive, execute_command, run_code.");
       rejected.push(rejection);
       events.push(toolEvent("tool_failure", base, { status: "rejected", code: rejection.code, error: rejection.error }));
       appendToolAuditLog(options.groupPath, "rejected", rejection);
       appendCommandAuditLog(options.groupPath, "rejected", rejection);
+      appendCodeRunAuditLog(options.groupPath, "rejected", rejection);
       continue;
     }
     if (permissionTier === "text") {
@@ -66,6 +70,7 @@ export async function executeToolRequests(options = {}) {
       events.push(toolEvent("tool_failure", base, { status: "rejected", code: rejection.code, error: rejection.error }));
       appendToolAuditLog(options.groupPath, "rejected", rejection);
       appendCommandAuditLog(options.groupPath, "rejected", rejection);
+      appendCodeRunAuditLog(options.groupPath, "rejected", rejection);
       continue;
     }
     if (FULL_PERMISSION_TOOLS.has(normalized.tool) && permissionTier !== "full") {
@@ -74,6 +79,7 @@ export async function executeToolRequests(options = {}) {
       events.push(toolEvent("tool_failure", base, { status: "rejected", code: rejection.code, error: rejection.error }));
       appendToolAuditLog(options.groupPath, "rejected", rejection);
       appendCommandAuditLog(options.groupPath, "rejected", rejection);
+      appendCodeRunAuditLog(options.groupPath, "rejected", rejection);
       continue;
     }
 
@@ -92,6 +98,7 @@ export async function executeToolRequests(options = {}) {
     }));
     appendToolAuditLog(options.groupPath, "completed", result);
     appendCommandAuditLog(options.groupPath, "completed", result);
+    appendCodeRunAuditLog(options.groupPath, "completed", result);
   }
 
   return { accepted, rejected, results, events };
@@ -188,6 +195,21 @@ async function executeOne(request, options) {
         result
       });
     }
+    if (request.tool === "run_code") {
+      const result = await runCodeTool(request, {
+        groupPath: options.groupPath,
+        timeoutMs: options.timeoutMs,
+        codeRunTimeoutMs: options.codeRunTimeoutMs,
+        maxCodeOutputBytes: options.maxCodeOutputBytes,
+        signal: options.signal
+      });
+      return resultRecord(request, {
+        status: result.ok ? "completed" : "failed",
+        code: result.code,
+        error: result.error,
+        result
+      });
+    }
     const result = await searchWeb(request.query, {
       timeoutMs: options.timeoutMs,
       count: request.count,
@@ -219,6 +241,8 @@ function normalizeToolRequest(item, index) {
     path: stringField(item.path),
     destination: stringField(item.destination || item.destinationPath || item.outputPath || item.dest),
     command: stringField(item.command || item.cmd || item.shellCommand || item.shell_command),
+    code: stringField(item.code || item.content || item.source),
+    language: stringField(item.language || item.lang),
     cwd: stringField(item.cwd || item.workingDirectory || item.working_directory),
     shell: stringField(item.shell),
     pattern: stringField(item.pattern),
@@ -245,6 +269,8 @@ function reject(request, code, reason) {
     path: request.path,
     destination: request.destination,
     command: safeCommandForStorage(request.command),
+    code: summarizeCodeForStorage(request.code),
+    language: request.language,
     cwd: request.cwd,
     shell: request.shell,
     pattern: request.pattern,
@@ -274,6 +300,8 @@ function resultRecord(request, extra) {
     path: request.path,
     destination: request.destination,
     command: safeCommandForStorage(request.command),
+    code: summarizeCodeForStorage(request.code),
+    language: request.language,
     cwd: request.cwd,
     shell: request.shell,
     pattern: request.pattern,
@@ -299,7 +327,7 @@ function stringField(value) {
 
 function normalizeCount(value, tool) {
   const count = Number(value);
-  if (!Number.isFinite(count)) return FILE_TOOLS.has(tool) || ARCHIVE_TOOLS.has(tool) ? undefined : 5;
+  if (!Number.isFinite(count)) return FILE_TOOLS.has(tool) || ARCHIVE_TOOLS.has(tool) || CODE_TOOLS.has(tool) ? undefined : 5;
   if (ARCHIVE_TOOLS.has(tool)) return Math.max(1, Math.min(1000, Math.floor(count)));
   const max = FILE_TOOLS.has(tool) ? 300 : CONTEXT_TOOLS.has(tool) ? 20 : 8;
   return Math.max(1, Math.min(max, Math.floor(count)));
@@ -330,6 +358,8 @@ function toolEvent(type, request, extra = {}) {
     path: request.path,
     destination: request.destination,
     command: safeCommandForStorage(request.command),
+    code: summarizeCodeForStorage(request.code),
+    language: request.language,
     cwd: request.cwd,
     shell: request.shell,
     pattern: request.pattern,
@@ -391,6 +421,17 @@ function summarizeToolResult(record = {}) {
       stderrBytes: record.result?.stderr?.length || 0
     };
   }
+  if (record.tool === "run_code") {
+    return {
+      language: result.language,
+      codePath: result.codePath,
+      codeBytes: result.codeBytes,
+      exitCode: result.exitCode,
+      timedOut: Boolean(result.timedOut),
+      stdoutBytes: result.stdout?.length || 0,
+      stderrBytes: result.stderr?.length || 0
+    };
+  }
   if (record.tool === "fetch_url") {
     return { url: safeUrlForEvent(record.url), title: result.title || "", bytes: result.bytes };
   }
@@ -415,6 +456,8 @@ function appendToolAuditLog(groupPath, action, item) {
       path: item.path,
       destination: item.destination,
       command: safeCommandForStorage(item.command),
+      code: summarizeCodeForStorage(item.code),
+      language: item.language,
       cwd: item.cwd,
       shell: item.shell,
       background: item.background,
@@ -461,10 +504,42 @@ function appendCommandAuditLog(groupPath, action, item) {
   }
 }
 
+function appendCodeRunAuditLog(groupPath, action, item) {
+  if (!groupPath || item.tool !== "run_code") return;
+  try {
+    const filePath = path.join(groupPath, "shared", "logs", "code-runs.jsonl");
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    const record = {
+      action,
+      id: item.id,
+      tool: item.tool,
+      status: item.status,
+      code: item.code,
+      error: item.error,
+      round: item.round,
+      source_agent_id: item.source_agent_id,
+      source_agent_name: item.source_agent_name,
+      language: item.result?.language || item.language,
+      codePath: item.result?.codePath,
+      codeBytes: item.result?.codeBytes,
+      codeSha256: item.result?.codeSha256,
+      exitCode: item.result?.exitCode,
+      timedOut: Boolean(item.result?.timedOut),
+      durationMs: item.result?.durationMs,
+      resultSummary: summarizeToolResult(item),
+      createdAt: nowIso()
+    };
+    fs.appendFileSync(filePath, `${JSON.stringify(record)}\n`, "utf8");
+  } catch {
+    // Code-run audit is best-effort; never hide the actual code result because logging failed.
+  }
+}
+
 function safeRequestForStorage(request) {
   return {
     ...request,
     command: safeCommandForStorage(request.command),
+    code: summarizeCodeForStorage(request.code),
     url: request.url
   };
 }
@@ -487,4 +562,13 @@ function safeCommandForStorage(value) {
     .replace(/(api[_-]?key\s*[:=]\s*)[^\s'"]+/gi, "$1[redacted]")
     .replace(/(authorization\s*[:=]\s*bearer\s+)[^\s'"]+/gi, "$1[redacted]")
     .replace(/(password\s*[:=]\s*)[^\s'"]+/gi, "$1[redacted]");
+}
+
+function summarizeCodeForStorage(value) {
+  const code = String(value || "");
+  if (!code) return "";
+  return {
+    bytes: Buffer.byteLength(code, "utf8"),
+    preview: code.slice(0, 120)
+  };
 }
