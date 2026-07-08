@@ -256,9 +256,13 @@ test("server exposes local MCP server config APIs without starting fake runtimes
 
   assert.match(serverJs, /\/api\/mcp\/servers/);
   assert.match(serverJs, /\/api\/mcp\/servers\/delete/);
+  assert.match(serverJs, /\/api\/mcp\/tools\/list/);
+  assert.match(serverJs, /\/api\/mcp\/tools\/call/);
   assert.match(serverJs, /listMcpServerConfigs/);
   assert.match(serverJs, /upsertMcpServerConfig/);
   assert.match(serverJs, /deleteMcpServerConfig/);
+  assert.match(serverJs, /listConfiguredMcpTools/);
+  assert.match(serverJs, /callConfiguredMcpTool/);
   assert.match(mcpConfigJs, /mcp-servers\.json/);
   assert.match(mcpConfigJs, /redacted/);
   assert.match(mcpConfigJs, /runtime: "not_started"/);

@@ -1,0 +1,402 @@
+import { spawn } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
+import { readMcpServerConfigs } from "./mcpConfig.js";
+
+const DEFAULT_TIMEOUT_MS = 30_000;
+const MIN_TIMEOUT_MS = 1000;
+const MAX_TIMEOUT_MS = 10 * 60_000;
+const DEFAULT_MAX_OUTPUT_BYTES = 128 * 1024;
+
+export async function listConfiguredMcpTools(baseDir, request = {}, options = {}) {
+  const selection = selectMcpServers(baseDir, request.serverId || request.mcpServerId);
+  if (!selection.ok) return selection;
+
+  const servers = [];
+  for (const server of selection.servers) {
+    servers.push(await listOneServerTools(baseDir, server, options));
+  }
+  const ok = servers.some((item) => item.ok);
+  return {
+    ok,
+    source: "external_mcp_stdio",
+    code: ok ? undefined : "mcp_list_tools_failed",
+    error: ok ? "" : "No configured external MCP server returned a tool list.",
+    servers
+  };
+}
+
+export async function callConfiguredMcpTool(baseDir, request = {}, options = {}) {
+  const toolName = String(request.mcpToolName || request.toolName || request.mcpTool || request.name || "").trim();
+  if (!toolName) {
+    return {
+      ok: false,
+      source: "external_mcp_stdio",
+      code: "missing_mcp_tool_name",
+      error: "mcp_call requires mcpToolName."
+    };
+  }
+  const selection = selectMcpServer(baseDir, request.serverId || request.mcpServerId);
+  if (!selection.ok) return selection;
+  return callOneServerTool(baseDir, selection.server, {
+    toolName,
+    arguments: normalizeArguments(request.toolArguments || request.arguments || request.input)
+  }, options);
+}
+
+async function listOneServerTools(baseDir, server, options) {
+  try {
+    return await runMcpSession(baseDir, server, async (client) => {
+      const listed = await client.request("tools/list", {});
+      return {
+        ok: true,
+        source: "external_mcp_stdio",
+        serverId: server.id,
+        serverName: server.name,
+        tools: Array.isArray(listed?.tools) ? listed.tools : []
+      };
+    }, options);
+  } catch (error) {
+    return mcpFailure(server, error);
+  }
+}
+
+async function callOneServerTool(baseDir, server, request, options) {
+  try {
+    return await runMcpSession(baseDir, server, async (client) => {
+      const toolResult = await client.request("tools/call", {
+        name: request.toolName,
+        arguments: request.arguments
+      });
+      return {
+        ok: !toolResult?.isError,
+        source: "external_mcp_stdio",
+        serverId: server.id,
+        serverName: server.name,
+        toolName: request.toolName,
+        isError: Boolean(toolResult?.isError),
+        content: Array.isArray(toolResult?.content) ? toolResult.content : [],
+        rawResult: toolResult
+      };
+    }, options);
+  } catch (error) {
+    return mcpFailure(server, error, { toolName: request.toolName });
+  }
+}
+
+function mcpFailure(server, error, extra = {}) {
+  return {
+    ok: false,
+    source: "external_mcp_stdio",
+    serverId: server.id,
+    serverName: server.name,
+    code: error.code || "mcp_client_error",
+    error: error.message || "MCP client failed.",
+    ...extra
+  };
+}
+
+function runMcpSession(baseDir, server, operation, options = {}) {
+  const timeoutMs = clampNumber(options.timeoutMs || options.mcpTimeoutMs, DEFAULT_TIMEOUT_MS, MIN_TIMEOUT_MS, MAX_TIMEOUT_MS);
+  const maxOutputBytes = clampNumber(options.maxOutputBytes || options.maxMcpOutputBytes, DEFAULT_MAX_OUTPUT_BYTES, 1024, DEFAULT_MAX_OUTPUT_BYTES);
+  const startedAtMs = Date.now();
+  const cwd = resolveServerCwd(baseDir, server.cwd);
+  const stderr = outputBuffer(maxOutputBytes);
+  const stdout = outputBuffer(maxOutputBytes);
+  const env = { ...process.env, ...(server.env || {}) };
+
+  return new Promise((resolve) => {
+    let nextId = 1;
+    let settled = false;
+    let stdoutText = "";
+    const pending = new Map();
+    const child = spawn(server.command, server.args || [], {
+      cwd,
+      env,
+      windowsHide: true,
+      stdio: ["pipe", "pipe", "pipe"]
+    });
+
+    const timer = setTimeout(() => {
+      fail("mcp_timeout", `MCP server ${server.id} exceeded ${timeoutMs}ms.`);
+    }, timeoutMs);
+
+    const finish = (payload) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      for (const waiter of pending.values()) {
+        waiter.reject(toolError("mcp_session_closed", "MCP session closed before a response arrived."));
+      }
+      pending.clear();
+      cleanupChild(child);
+      resolve(withRuntime(payload));
+    };
+
+    const fail = (code, message, extra = {}) => {
+      finish({
+        ok: false,
+        source: "external_mcp_stdio",
+        serverId: server.id,
+        serverName: server.name,
+        code,
+        error: message,
+        ...extra
+      });
+    };
+
+    const withRuntime = (payload) => ({
+      ...payload,
+      serverId: payload.serverId || server.id,
+      serverName: payload.serverName || server.name,
+      command: redactSecrets(server.command),
+      args: (server.args || []).map(redactSecrets),
+      cwd: path.relative(baseDir, cwd).replaceAll("\\", "/") || ".",
+      durationMs: Date.now() - startedAtMs,
+      stderr: redactSecrets(stderr.text(), server.env),
+      stdout: redactSecrets(stdout.text(), server.env),
+      stderrTruncated: stderr.truncated,
+      stdoutTruncated: stdout.truncated
+    });
+
+    const client = {
+      request(method, params) {
+        const id = nextId++;
+        return new Promise((resolveRequest, rejectRequest) => {
+          pending.set(id, { resolve: resolveRequest, reject: rejectRequest });
+          writeJsonLine(child, { jsonrpc: "2.0", id, method, params });
+        });
+      },
+      notify(method, params) {
+        writeJsonLine(child, { jsonrpc: "2.0", method, params });
+      }
+    };
+
+    child.stdout.on("data", (chunk) => {
+      stdout.add(chunk);
+      stdoutText += chunk.toString("utf8");
+      let parsed;
+      try {
+        parsed = parseJsonRpcMessages(stdoutText);
+      } catch (error) {
+        fail(error.code || "mcp_invalid_response", error.message || "MCP server wrote invalid JSON-RPC output.");
+        return;
+      }
+      stdoutText = parsed.rest;
+      for (const message of parsed.messages) handleMessage(message);
+    });
+    child.stderr.on("data", (chunk) => stderr.add(chunk));
+    child.on("error", (error) => {
+      fail("mcp_spawn_failed", error.message || "Failed to start MCP server.");
+    });
+    child.on("close", (exitCode, signal) => {
+      if (!settled && pending.size) {
+        fail("mcp_process_exit", `MCP server exited before responding. exit=${exitCode ?? "null"} signal=${signal || ""}`, { exitCode, signal: signal || "" });
+      }
+    });
+
+    (async () => {
+      try {
+        await client.request("initialize", {
+          protocolVersion: "2025-06-18",
+          capabilities: {},
+          clientInfo: { name: "ai-council", version: "0.2.0" }
+        });
+        client.notify("notifications/initialized", {});
+        finish(await operation(client));
+      } catch (error) {
+        fail(error.code || "mcp_client_error", error.message || "MCP client failed.", error.extra || {});
+      }
+    })();
+
+    function handleMessage(message) {
+      if (!message || message.id === undefined || !pending.has(message.id)) return;
+      const waiter = pending.get(message.id);
+      pending.delete(message.id);
+      if (message.error) {
+        const error = toolError("mcp_error", message.error.message || "MCP server returned an error.");
+        error.extra = { mcpError: message.error };
+        waiter.reject(error);
+        return;
+      }
+      waiter.resolve(message.result);
+    }
+  });
+}
+
+function selectMcpServer(baseDir, id) {
+  const servers = enabledMcpServers(baseDir);
+  if (!servers.length) {
+    return {
+      ok: false,
+      source: "external_mcp_stdio",
+      code: "mcp_server_not_configured",
+      error: "No enabled external MCP server is configured."
+    };
+  }
+  const target = String(id || "").trim();
+  if (!target && servers.length === 1) return { ok: true, server: servers[0] };
+  if (!target) {
+    return {
+      ok: false,
+      source: "external_mcp_stdio",
+      code: "missing_mcp_server_id",
+      error: "mcp_call requires serverId when more than one external MCP server is enabled."
+    };
+  }
+  const server = servers.find((item) => item.id === target || item.name === target);
+  if (!server) {
+    return {
+      ok: false,
+      source: "external_mcp_stdio",
+      code: "mcp_server_not_found",
+      error: `No enabled external MCP server matches ${target}.`
+    };
+  }
+  return { ok: true, server };
+}
+
+function selectMcpServers(baseDir, id) {
+  const target = String(id || "").trim();
+  const servers = enabledMcpServers(baseDir);
+  if (!servers.length) {
+    return {
+      ok: false,
+      source: "external_mcp_stdio",
+      code: "mcp_server_not_configured",
+      error: "No enabled external MCP server is configured.",
+      servers: []
+    };
+  }
+  if (!target) return { ok: true, servers };
+  const server = servers.find((item) => item.id === target || item.name === target);
+  if (!server) {
+    return {
+      ok: false,
+      source: "external_mcp_stdio",
+      code: "mcp_server_not_found",
+      error: `No enabled external MCP server matches ${target}.`,
+      servers: []
+    };
+  }
+  return { ok: true, servers: [server] };
+}
+
+function enabledMcpServers(baseDir) {
+  return readMcpServerConfigs(baseDir).filter((server) => server.enabled !== false && server.transport === "stdio");
+}
+
+function parseJsonRpcMessages(input) {
+  let rest = input;
+  const messages = [];
+  while (rest.length) {
+    const headerMatch = rest.match(/^Content-Length:\s*(\d+)\r?\n\r?\n/i);
+    if (headerMatch) {
+      const headerBytes = headerMatch[0].length;
+      const length = Number(headerMatch[1]);
+      if (rest.length < headerBytes + length) break;
+      const body = rest.slice(headerBytes, headerBytes + length);
+      messages.push(parseMessage(body));
+      rest = rest.slice(headerBytes + length);
+      continue;
+    }
+    const newline = rest.search(/\r?\n/);
+    if (newline < 0) break;
+    const line = rest.slice(0, newline).trim();
+    rest = rest.slice(rest[newline] === "\r" ? newline + 2 : newline + 1);
+    if (!line) continue;
+    messages.push(parseMessage(line));
+  }
+  return { messages, rest };
+}
+
+function parseMessage(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw toolError("mcp_invalid_response", "MCP server wrote invalid JSON-RPC output.");
+  }
+}
+
+function writeJsonLine(child, message) {
+  if (!child.stdin.writable) throw toolError("mcp_stdin_closed", "MCP server stdin is closed.");
+  child.stdin.write(`${JSON.stringify(message)}\n`);
+}
+
+function cleanupChild(child) {
+  try {
+    child.stdin.end();
+  } catch {}
+  if (!child.pid || child.killed) return;
+  try {
+    if (process.platform === "win32") {
+      spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" });
+      return;
+    }
+    child.kill("SIGTERM");
+  } catch {}
+}
+
+function resolveServerCwd(baseDir, cwd) {
+  const raw = String(cwd || "").trim();
+  const target = raw ? (path.isAbsolute(raw) ? path.resolve(raw) : path.resolve(baseDir, raw)) : path.resolve(baseDir);
+  if (!fs.existsSync(target)) throw toolError("mcp_cwd_not_found", "MCP server cwd does not exist.");
+  if (!fs.statSync(target).isDirectory()) throw toolError("mcp_cwd_not_directory", "MCP server cwd is not a directory.");
+  return target;
+}
+
+function normalizeArguments(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return value;
+}
+
+function clampNumber(value, fallback, min, max) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return fallback;
+  return Math.max(min, Math.min(max, Math.floor(number)));
+}
+
+function outputBuffer(maxBytes) {
+  const chunks = [];
+  let totalBytes = 0;
+  let truncated = false;
+  return {
+    get truncated() {
+      return truncated;
+    },
+    add(chunk) {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
+      totalBytes += buffer.length;
+      const currentBytes = chunks.reduce((sum, item) => sum + item.length, 0);
+      const remaining = maxBytes - currentBytes;
+      if (remaining <= 0) {
+        truncated = true;
+        return;
+      }
+      chunks.push(buffer.length > remaining ? buffer.subarray(0, remaining) : buffer);
+      if (buffer.length > remaining || totalBytes > maxBytes) truncated = true;
+    },
+    text() {
+      return Buffer.concat(chunks).toString("utf8");
+    }
+  };
+}
+
+function redactSecrets(value, env = {}) {
+  let text = String(value || "")
+    .replace(/sk-[A-Za-z0-9_-]{8,}/g, "sk-[redacted]")
+    .replace(/(api[_-]?key\s*[:=]\s*)[^\s'"]+/gi, "$1[redacted]")
+    .replace(/(authorization\s*[:=]\s*bearer\s+)[^\s'"]+/gi, "$1[redacted]")
+    .replace(/(password\s*[:=]\s*)[^\s'"]+/gi, "$1[redacted]");
+  for (const secret of Object.values(env || {})) {
+    const raw = String(secret || "");
+    if (raw.length >= 6) text = text.replaceAll(raw, "[redacted]");
+  }
+  return text;
+}
+
+function toolError(code, message) {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}

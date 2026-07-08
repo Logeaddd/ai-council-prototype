@@ -190,6 +190,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
           permissionTier: fileOperationPermissionTier,
           agent,
           round,
+          baseDir,
           timeoutMs: group.settings.toolTimeoutMs || 12000,
           groupPath: options.groupPath,
           importedProjectRoots,

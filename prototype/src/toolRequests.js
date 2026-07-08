@@ -10,6 +10,7 @@ import { apiRequestTool } from "./apiTools.js";
 import { gitOperationTool } from "./gitTools.js";
 import { browserControlTool } from "./browserTools.js";
 import { databaseQueryTool } from "./databaseTools.js";
+import { callConfiguredMcpTool, listConfiguredMcpTools } from "./mcpClient.js";
 import { loadSessionContextArchiveItem, searchSessionContextArchive } from "./storage.js";
 import fs from "node:fs";
 import path from "node:path";
@@ -31,7 +32,9 @@ const ALLOWED_TOOLS = new Set([
   "api_request",
   "git_operation",
   "browser_control",
-  "database_query"
+  "database_query",
+  "mcp_list_tools",
+  "mcp_call"
 ]);
 const FILE_TOOLS = new Set(["list_directory", "read_file", "search_files", "grep_content"]);
 const CONTEXT_TOOLS = new Set(["search_context", "load_context"]);
@@ -44,7 +47,8 @@ const API_TOOLS = new Set(["api_request"]);
 const GIT_TOOLS = new Set(["git_operation"]);
 const BROWSER_TOOLS = new Set(["browser_control"]);
 const DATABASE_TOOLS = new Set(["database_query"]);
-const FULL_PERMISSION_TOOLS = new Set(["extract_archive", "execute_command", "run_code", "install_package", "run_tests", "git_operation", "browser_control"]);
+const MCP_TOOLS = new Set(["mcp_list_tools", "mcp_call"]);
+const FULL_PERMISSION_TOOLS = new Set(["extract_archive", "execute_command", "run_code", "install_package", "run_tests", "git_operation", "browser_control", "mcp_list_tools", "mcp_call"]);
 
 export function normalizeToolRequests(value) {
   if (!Array.isArray(value)) return [];
@@ -74,7 +78,7 @@ export async function executeToolRequests(options = {}) {
     };
 
     if (!ALLOWED_TOOLS.has(normalized.tool)) {
-      const rejection = reject(base, "invalid_tool", "Tool must be one of web_search, fetch_url, list_directory, read_file, search_files, grep_content, search_context, load_context, extract_archive, execute_command, run_code, install_package, run_tests, api_request, git_operation, browser_control, database_query.");
+      const rejection = reject(base, "invalid_tool", "Tool must be one of web_search, fetch_url, list_directory, read_file, search_files, grep_content, search_context, load_context, extract_archive, execute_command, run_code, install_package, run_tests, api_request, git_operation, browser_control, database_query, mcp_list_tools, mcp_call.");
       rejected.push(rejection);
       events.push(toolEvent("tool_failure", base, { status: "rejected", code: rejection.code, error: rejection.error }));
       appendToolAuditLog(options.groupPath, "rejected", rejection);
@@ -86,6 +90,7 @@ export async function executeToolRequests(options = {}) {
       appendGitAuditLog(options.groupPath, "rejected", rejection);
       appendBrowserAuditLog(options.groupPath, "rejected", rejection);
       appendDatabaseAuditLog(options.groupPath, "rejected", rejection);
+      appendMcpAuditLog(options.groupPath, "rejected", rejection);
       continue;
     }
     if (permissionTier === "text") {
@@ -101,6 +106,7 @@ export async function executeToolRequests(options = {}) {
       appendGitAuditLog(options.groupPath, "rejected", rejection);
       appendBrowserAuditLog(options.groupPath, "rejected", rejection);
       appendDatabaseAuditLog(options.groupPath, "rejected", rejection);
+      appendMcpAuditLog(options.groupPath, "rejected", rejection);
       continue;
     }
     if (FULL_PERMISSION_TOOLS.has(normalized.tool) && permissionTier !== "full") {
@@ -116,6 +122,7 @@ export async function executeToolRequests(options = {}) {
       appendGitAuditLog(options.groupPath, "rejected", rejection);
       appendBrowserAuditLog(options.groupPath, "rejected", rejection);
       appendDatabaseAuditLog(options.groupPath, "rejected", rejection);
+      appendMcpAuditLog(options.groupPath, "rejected", rejection);
       continue;
     }
 
@@ -141,6 +148,7 @@ export async function executeToolRequests(options = {}) {
     appendGitAuditLog(options.groupPath, "completed", result);
     appendBrowserAuditLog(options.groupPath, "completed", result);
     appendDatabaseAuditLog(options.groupPath, "completed", result);
+    appendMcpAuditLog(options.groupPath, "completed", result);
   }
 
   return { accepted, rejected, results, events };
@@ -341,6 +349,32 @@ async function executeOne(request, options) {
         result
       });
     }
+    if (request.tool === "mcp_list_tools") {
+      const result = await listConfiguredMcpTools(options.baseDir || options.appBaseDir || process.cwd(), request, {
+        timeoutMs: request.timeoutMs || options.timeoutMs,
+        mcpTimeoutMs: options.mcpTimeoutMs,
+        maxMcpOutputBytes: options.maxMcpOutputBytes
+      });
+      return resultRecord(request, {
+        status: result.ok ? "completed" : "failed",
+        code: result.code,
+        error: result.error,
+        result
+      });
+    }
+    if (request.tool === "mcp_call") {
+      const result = await callConfiguredMcpTool(options.baseDir || options.appBaseDir || process.cwd(), request, {
+        timeoutMs: request.timeoutMs || options.timeoutMs,
+        mcpTimeoutMs: options.mcpTimeoutMs,
+        maxMcpOutputBytes: options.maxMcpOutputBytes
+      });
+      return resultRecord(request, {
+        status: result.ok ? "completed" : "failed",
+        code: result.code,
+        error: result.error,
+        result
+      });
+    }
     const result = await searchWeb(request.query, {
       timeoutMs: options.timeoutMs,
       count: request.count,
@@ -397,6 +431,9 @@ function normalizeToolRequest(item, index) {
     databasePath: stringField(item.databasePath || item.database_path || item.dbPath || item.db_path),
     sql: stringField(item.sql),
     params: arrayOfPrimitive(item.params),
+    serverId: stringField(item.serverId || item.server_id || item.mcpServerId || item.mcp_server_id),
+    mcpToolName: stringField(item.mcpToolName || item.mcp_tool_name || item.mcpTool || item.mcp_tool || item.toolName || item.tool_name),
+    toolArguments: objectField(item.arguments || item.toolArguments || item.tool_arguments || item.input),
     mode: stringField(item.mode),
     maxRows: normalizeOptionalNumber(item.maxRows || item.max_rows),
     headers: objectField(item.headers),
@@ -451,6 +488,9 @@ function reject(request, code, reason) {
     databasePath: request.databasePath,
     sql: request.sql ? summarizeBodyForStorage(request.sql) : undefined,
     params: request.params,
+    serverId: request.serverId,
+    mcpToolName: request.mcpToolName,
+    toolArguments: request.toolArguments ? summarizeBodyForStorage(request.toolArguments) : undefined,
     mode: request.mode,
     maxRows: request.maxRows,
     headers: safeHeadersForStorage(request.headers),
@@ -506,6 +546,9 @@ function resultRecord(request, extra) {
     databasePath: request.databasePath,
     sql: request.sql ? summarizeBodyForStorage(request.sql) : undefined,
     params: request.params,
+    serverId: request.serverId,
+    mcpToolName: request.mcpToolName,
+    toolArguments: request.toolArguments ? summarizeBodyForStorage(request.toolArguments) : undefined,
     mode: request.mode,
     maxRows: request.maxRows,
     headers: safeHeadersForStorage(request.headers),
@@ -588,6 +631,9 @@ function toolEvent(type, request, extra = {}) {
     databasePath: request.databasePath,
     sql: request.sql ? summarizeBodyForStorage(request.sql) : undefined,
     params: request.params,
+    serverId: request.serverId,
+    mcpToolName: request.mcpToolName,
+    toolArguments: request.toolArguments ? summarizeBodyForStorage(request.toolArguments) : undefined,
     mode: request.mode,
     maxRows: request.maxRows,
     headers: safeHeadersForStorage(request.headers),
@@ -728,6 +774,22 @@ function summarizeToolResult(record = {}) {
       truncated: Boolean(result.truncated)
     };
   }
+  if (record.tool === "mcp_list_tools") {
+    return {
+      serverId: record.serverId || "",
+      servers: result.servers?.length || 0,
+      okServers: result.servers?.filter((item) => item.ok).length || 0
+    };
+  }
+  if (record.tool === "mcp_call") {
+    return {
+      serverId: result.serverId || record.serverId || "",
+      toolName: result.toolName || record.mcpToolName || "",
+      isError: Boolean(result.isError),
+      contentItems: result.content?.length || 0,
+      durationMs: result.durationMs
+    };
+  }
   if (record.tool === "fetch_url") {
     return { url: safeUrlForEvent(record.url), title: result.title || "", bytes: result.bytes };
   }
@@ -775,6 +837,9 @@ function appendToolAuditLog(groupPath, action, item) {
       databasePath: item.databasePath,
       sqlBytes: item.sql ? Buffer.byteLength(item.sql, "utf8") : 0,
       paramsCount: item.params?.length || 0,
+      serverId: item.serverId,
+      mcpToolName: item.mcpToolName,
+      toolArguments: item.toolArguments,
       mode: item.mode,
       maxRows: item.maxRows,
       create: item.create,
@@ -1044,6 +1109,36 @@ function appendDatabaseAuditLog(groupPath, action, item) {
   }
 }
 
+function appendMcpAuditLog(groupPath, action, item) {
+  if (!groupPath || !MCP_TOOLS.has(item.tool)) return;
+  try {
+    const filePath = path.join(groupPath, "shared", "logs", "mcp.jsonl");
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    const record = {
+      action,
+      id: item.id,
+      tool: item.tool,
+      status: item.status,
+      code: item.code,
+      error: item.error,
+      round: item.round,
+      source_agent_id: item.source_agent_id,
+      source_agent_name: item.source_agent_name,
+      serverId: item.result?.serverId || item.serverId,
+      serverName: item.result?.serverName,
+      mcpToolName: item.result?.toolName || item.mcpToolName,
+      toolArguments: item.toolArguments,
+      isError: Boolean(item.result?.isError),
+      durationMs: item.result?.durationMs,
+      resultSummary: summarizeToolResult(item),
+      createdAt: nowIso()
+    };
+    fs.appendFileSync(filePath, `${JSON.stringify(record)}\n`, "utf8");
+  } catch {
+    // MCP audit is best-effort; never hide the actual MCP result because logging failed.
+  }
+}
+
 function safeRequestForStorage(request) {
   return {
     ...request,
@@ -1077,6 +1172,9 @@ function safeRequestForStorage(request) {
     databasePath: request.databasePath,
     sql: request.sql ? summarizeBodyForStorage(request.sql) : undefined,
     params: request.params,
+    serverId: request.serverId,
+    mcpToolName: request.mcpToolName,
+    toolArguments: request.toolArguments ? summarizeBodyForStorage(request.toolArguments) : undefined,
     mode: request.mode,
     maxRows: request.maxRows,
     headers: safeHeadersForStorage(request.headers),
