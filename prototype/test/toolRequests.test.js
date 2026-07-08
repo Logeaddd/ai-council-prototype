@@ -403,6 +403,57 @@ test("install_package reports unsupported package managers honestly", async () =
   assert.equal(result.results[0].code, "unsupported_package_manager");
 });
 
+test("run_tests executes real test commands for full permission only", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-run-tests-"));
+  const command = nodeCommand("console.log('TEST_RUN_FACT'); process.exit(0)");
+  const denied = await executeToolRequests({
+    permissionTier: "tool",
+    groupPath: tmp,
+    agent: { id: "tool", name: "Tool" },
+    round: 1,
+    requests: [
+      { tool: "run_tests", runner: "custom", command, reason: "Run test command." }
+    ]
+  });
+  const allowed = await executeToolRequests({
+    permissionTier: "full",
+    groupPath: tmp,
+    agent: { id: "full", name: "Full" },
+    round: 1,
+    requests: [
+      { tool: "run_tests", runner: "custom", command, reason: "Run test command." }
+    ]
+  });
+
+  assert.equal(denied.accepted.length, 0);
+  assert.equal(denied.rejected[0].code, "permission_denied");
+  assert.equal(allowed.accepted.length, 1);
+  assert.equal(allowed.results[0].status, "completed");
+  assert.equal(allowed.results[0].result.runner, "custom");
+  assert.equal(allowed.results[0].result.passed, true);
+  assert.match(allowed.results[0].result.stdout, /TEST_RUN_FACT/);
+  assert.equal(fs.existsSync(path.join(tmp, "shared", "logs", "tests.jsonl")), true);
+});
+
+test("run_tests reports failing custom commands honestly", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-run-tests-fail-"));
+  const result = await executeToolRequests({
+    permissionTier: "full",
+    groupPath: tmp,
+    agent: { id: "full", name: "Full" },
+    round: 1,
+    requests: [
+      { tool: "run_tests", runner: "custom", command: nodeCommand("console.error('TEST_FAIL_FACT'); process.exit(7)"), reason: "Run failing test." }
+    ]
+  });
+
+  assert.equal(result.results[0].status, "failed");
+  assert.equal(result.results[0].code, "command_exit_nonzero");
+  assert.equal(result.results[0].result.passed, false);
+  assert.equal(result.results[0].result.exitCode, 7);
+  assert.match(result.results[0].result.stderr, /TEST_FAIL_FACT/);
+});
+
 test("controlled file tools reject path escape and secret files", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-tools-guard-"));
   fs.writeFileSync(path.join(tmp, "safe.md"), "safe", "utf8");

@@ -5,6 +5,7 @@ import { extractArchiveTool } from "./archiveTools.js";
 import { executeCommandTool } from "./commandTools.js";
 import { runCodeTool } from "./codeRunTools.js";
 import { installPackageTool } from "./packageTools.js";
+import { runTestsTool } from "./testRunTools.js";
 import { loadSessionContextArchiveItem, searchSessionContextArchive } from "./storage.js";
 import fs from "node:fs";
 import path from "node:path";
@@ -21,7 +22,8 @@ const ALLOWED_TOOLS = new Set([
   "extract_archive",
   "execute_command",
   "run_code",
-  "install_package"
+  "install_package",
+  "run_tests"
 ]);
 const FILE_TOOLS = new Set(["list_directory", "read_file", "search_files", "grep_content"]);
 const CONTEXT_TOOLS = new Set(["search_context", "load_context"]);
@@ -29,7 +31,8 @@ const ARCHIVE_TOOLS = new Set(["extract_archive"]);
 const COMMAND_TOOLS = new Set(["execute_command"]);
 const CODE_TOOLS = new Set(["run_code"]);
 const PACKAGE_TOOLS = new Set(["install_package"]);
-const FULL_PERMISSION_TOOLS = new Set(["extract_archive", "execute_command", "run_code", "install_package"]);
+const TEST_TOOLS = new Set(["run_tests"]);
+const FULL_PERMISSION_TOOLS = new Set(["extract_archive", "execute_command", "run_code", "install_package", "run_tests"]);
 
 export function normalizeToolRequests(value) {
   if (!Array.isArray(value)) return [];
@@ -59,13 +62,14 @@ export async function executeToolRequests(options = {}) {
     };
 
     if (!ALLOWED_TOOLS.has(normalized.tool)) {
-      const rejection = reject(base, "invalid_tool", "Tool must be one of web_search, fetch_url, list_directory, read_file, search_files, grep_content, search_context, load_context, extract_archive, execute_command, run_code, install_package.");
+      const rejection = reject(base, "invalid_tool", "Tool must be one of web_search, fetch_url, list_directory, read_file, search_files, grep_content, search_context, load_context, extract_archive, execute_command, run_code, install_package, run_tests.");
       rejected.push(rejection);
       events.push(toolEvent("tool_failure", base, { status: "rejected", code: rejection.code, error: rejection.error }));
       appendToolAuditLog(options.groupPath, "rejected", rejection);
       appendCommandAuditLog(options.groupPath, "rejected", rejection);
       appendCodeRunAuditLog(options.groupPath, "rejected", rejection);
       appendPackageAuditLog(options.groupPath, "rejected", rejection);
+      appendTestAuditLog(options.groupPath, "rejected", rejection);
       continue;
     }
     if (permissionTier === "text") {
@@ -76,6 +80,7 @@ export async function executeToolRequests(options = {}) {
       appendCommandAuditLog(options.groupPath, "rejected", rejection);
       appendCodeRunAuditLog(options.groupPath, "rejected", rejection);
       appendPackageAuditLog(options.groupPath, "rejected", rejection);
+      appendTestAuditLog(options.groupPath, "rejected", rejection);
       continue;
     }
     if (FULL_PERMISSION_TOOLS.has(normalized.tool) && permissionTier !== "full") {
@@ -86,6 +91,7 @@ export async function executeToolRequests(options = {}) {
       appendCommandAuditLog(options.groupPath, "rejected", rejection);
       appendCodeRunAuditLog(options.groupPath, "rejected", rejection);
       appendPackageAuditLog(options.groupPath, "rejected", rejection);
+      appendTestAuditLog(options.groupPath, "rejected", rejection);
       continue;
     }
 
@@ -106,6 +112,7 @@ export async function executeToolRequests(options = {}) {
     appendCommandAuditLog(options.groupPath, "completed", result);
     appendCodeRunAuditLog(options.groupPath, "completed", result);
     appendPackageAuditLog(options.groupPath, "completed", result);
+    appendTestAuditLog(options.groupPath, "completed", result);
   }
 
   return { accepted, rejected, results, events };
@@ -232,6 +239,21 @@ async function executeOne(request, options) {
         result
       });
     }
+    if (request.tool === "run_tests") {
+      const result = await runTestsTool(request, {
+        groupPath: options.groupPath,
+        timeoutMs: options.timeoutMs,
+        testTimeoutMs: options.testTimeoutMs,
+        maxTestOutputBytes: options.maxTestOutputBytes,
+        signal: options.signal
+      });
+      return resultRecord(request, {
+        status: result.ok ? "completed" : "failed",
+        code: result.code,
+        error: result.error,
+        result
+      });
+    }
     const result = await searchWeb(request.query, {
       timeoutMs: options.timeoutMs,
       count: request.count,
@@ -267,6 +289,7 @@ function normalizeToolRequest(item, index) {
     language: stringField(item.language || item.lang),
     packageName: stringField(item.packageName || item.package || item.package_name || item.name),
     manager: stringField(item.manager || item.packageManager || item.package_manager || item.ecosystem),
+    runner: stringField(item.runner || item.framework || item.testRunner || item.test_runner),
     cwd: stringField(item.cwd || item.workingDirectory || item.working_directory),
     shell: stringField(item.shell),
     pattern: stringField(item.pattern),
@@ -297,6 +320,7 @@ function reject(request, code, reason) {
     language: request.language,
     packageName: safePackageForStorage(request.packageName),
     manager: request.manager,
+    runner: request.runner,
     cwd: request.cwd,
     shell: request.shell,
     pattern: request.pattern,
@@ -330,6 +354,7 @@ function resultRecord(request, extra) {
     language: request.language,
     packageName: safePackageForStorage(request.packageName),
     manager: request.manager,
+    runner: request.runner,
     cwd: request.cwd,
     shell: request.shell,
     pattern: request.pattern,
@@ -355,7 +380,7 @@ function stringField(value) {
 
 function normalizeCount(value, tool) {
   const count = Number(value);
-  if (!Number.isFinite(count)) return FILE_TOOLS.has(tool) || ARCHIVE_TOOLS.has(tool) || CODE_TOOLS.has(tool) || PACKAGE_TOOLS.has(tool) ? undefined : 5;
+  if (!Number.isFinite(count)) return FILE_TOOLS.has(tool) || ARCHIVE_TOOLS.has(tool) || CODE_TOOLS.has(tool) || PACKAGE_TOOLS.has(tool) || TEST_TOOLS.has(tool) ? undefined : 5;
   if (ARCHIVE_TOOLS.has(tool)) return Math.max(1, Math.min(1000, Math.floor(count)));
   const max = FILE_TOOLS.has(tool) ? 300 : CONTEXT_TOOLS.has(tool) ? 20 : 8;
   return Math.max(1, Math.min(max, Math.floor(count)));
@@ -390,6 +415,7 @@ function toolEvent(type, request, extra = {}) {
     language: request.language,
     packageName: safePackageForStorage(request.packageName),
     manager: request.manager,
+    runner: request.runner,
     cwd: request.cwd,
     shell: request.shell,
     pattern: request.pattern,
@@ -473,6 +499,18 @@ function summarizeToolResult(record = {}) {
       stderrBytes: result.stderr?.length || 0
     };
   }
+  if (record.tool === "run_tests") {
+    return {
+      runner: result.runner,
+      command: result.command,
+      cwd: result.cwd,
+      passed: Boolean(result.passed),
+      exitCode: result.exitCode,
+      timedOut: Boolean(result.timedOut),
+      stdoutBytes: result.stdout?.length || 0,
+      stderrBytes: result.stderr?.length || 0
+    };
+  }
   if (record.tool === "fetch_url") {
     return { url: safeUrlForEvent(record.url), title: result.title || "", bytes: result.bytes };
   }
@@ -501,6 +539,7 @@ function appendToolAuditLog(groupPath, action, item) {
       language: item.language,
       packageName: safePackageForStorage(item.packageName),
       manager: item.manager,
+      runner: item.runner,
       cwd: item.cwd,
       shell: item.shell,
       background: item.background,
@@ -608,12 +647,44 @@ function appendPackageAuditLog(groupPath, action, item) {
   }
 }
 
+function appendTestAuditLog(groupPath, action, item) {
+  if (!groupPath || item.tool !== "run_tests") return;
+  try {
+    const filePath = path.join(groupPath, "shared", "logs", "tests.jsonl");
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    const record = {
+      action,
+      id: item.id,
+      tool: item.tool,
+      status: item.status,
+      code: item.code,
+      error: item.error,
+      round: item.round,
+      source_agent_id: item.source_agent_id,
+      source_agent_name: item.source_agent_name,
+      runner: item.result?.runner || item.runner,
+      command: safeCommandForStorage(item.result?.command || item.command),
+      cwd: item.result?.cwd || item.cwd || ".",
+      passed: Boolean(item.result?.passed),
+      exitCode: item.result?.exitCode,
+      timedOut: Boolean(item.result?.timedOut),
+      durationMs: item.result?.durationMs,
+      resultSummary: summarizeToolResult(item),
+      createdAt: nowIso()
+    };
+    fs.appendFileSync(filePath, `${JSON.stringify(record)}\n`, "utf8");
+  } catch {
+    // Test audit is best-effort; never hide the actual test result because logging failed.
+  }
+}
+
 function safeRequestForStorage(request) {
   return {
     ...request,
     command: safeCommandForStorage(request.command),
     code: summarizeCodeForStorage(request.code),
     packageName: safePackageForStorage(request.packageName),
+    runner: request.runner,
     url: request.url
   };
 }
