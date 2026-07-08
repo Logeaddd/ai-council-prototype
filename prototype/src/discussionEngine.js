@@ -19,6 +19,7 @@ import { runAutoFileOperations } from "./fileOperationAutoRunner.js";
 import { enqueueFileOperationProposals } from "./fileOperationQueue.js";
 import { readPrivateContextMessages } from "./privateChat.js";
 import { normalizeFileAttachments } from "./attachments.js";
+import { readTaskState, updateTaskStateFromSession } from "./taskState.js";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -45,6 +46,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
   const globalRequirement = options.globalRequirement || group.settings?.globalRequirement || "";
   const continuationContext = normalizeContinuationContext(options.continuationContext);
   const workspaceGroup = options.groupPath ? readWorkspaceGroup(options.groupPath) : undefined;
+  const taskState = options.groupPath ? readTaskState(options.groupPath) : undefined;
   const session = {
     id: makeId("session"),
     question,
@@ -87,6 +89,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
         transcriptVisibility,
         latestBossInstruction: options.latestBossInstruction || "",
         attachments,
+        taskState,
         ...loadSummaryContext(options.groupPath, agent),
         privateBossMessages: loadPrivateBossMessages(options.groupPath, agent)
       });
@@ -223,6 +226,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
           transcriptVisibility,
           latestBossInstruction: "Tool results from your previous request are now available in context. Use the real tool results to finish this round. Do not repeat a tool request unless new external information is still required.",
           attachments,
+          taskState,
           ...loadSummaryContext(options.groupPath, agent),
           privateBossMessages: loadPrivateBossMessages(options.groupPath, agent)
         });
@@ -349,6 +353,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
     continuationContext,
     latestBossInstruction: options.latestBossInstruction || "",
     attachments,
+    taskState,
     ...loadSummaryContext(options.groupPath, judge),
     privateBossMessages: loadPrivateBossMessages(options.groupPath, judge)
   });
@@ -437,9 +442,12 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
   const usageRecord = options.groupPath
     ? appendSessionUsage(options.groupPath, session, workspaceGroup)
     : undefined;
+  const taskStateUpdate = options.groupPath
+    ? updateTaskStateFromSession(options.groupPath, session)
+    : undefined;
   const memoryRecords = appendMemoryCandidates(session.finalDecision, session, baseDir);
 
-  const result = { session, sessionPath, contextArchive, memoryRecords, transcriptChunk, summaryUpdate, usageRecord };
+  const result = { session, sessionPath, contextArchive, memoryRecords, transcriptChunk, summaryUpdate, usageRecord, taskStateUpdate };
   yield {
     type: "final_decision",
     agentId: judge.id,

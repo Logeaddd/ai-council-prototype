@@ -175,9 +175,11 @@ test("server exposes guarded public memory endpoints", () => {
   const serverJs = fs.readFileSync(path.join(root, "src", "server.js"), "utf8");
   const memoryJs = fs.readFileSync(path.join(root, "src", "publicMemory.js"), "utf8");
   assert.match(serverJs, /\/api\/public-memory/);
+  assert.match(serverJs, /\/api\/task-state/);
   assert.match(serverJs, /listPublicMemories/);
   assert.match(serverJs, /upsertPublicMemory/);
   assert.match(serverJs, /deletePublicMemory/);
+  assert.match(serverJs, /readTaskState/);
   assert.match(serverJs, /resolveWorkspacePath\(requireQuery\(url, "groupPath"\), "groupPath"\)/);
   assert.match(serverJs, /resolveWorkspacePath\(body\.groupPath, "groupPath"\)/);
   assert.match(memoryJs, /public-memory\.json/);

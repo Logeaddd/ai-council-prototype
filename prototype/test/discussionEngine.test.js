@@ -3350,6 +3350,48 @@ test("public memory reaches model prompts as editable shared memory", async () =
   }
 });
 
+test("task state ledger is written after a session and injected into the next run", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-task-state-run-"));
+  const group = validateGroupConfig({
+    id: "task-state-run",
+    name: "Task State Run",
+    settings: {
+      maxRounds: 1,
+      minConsensusWeight: 1,
+      stopWhenAllSkip: true,
+      agentTimeoutMs: 1000,
+      allowSoloCouncil: true
+    },
+    agents: [
+      {
+        id: "builder",
+        name: "Builder",
+        role: "Builder",
+        provider: "mock",
+        apiBaseUrl: "mock://local",
+        model: "mock-builder",
+        weight: 1,
+        enabled: true
+      }
+    ]
+  });
+
+  await runCouncil("First task state question.", group, tmp, { groupPath: tmp });
+  const taskStatePath = path.join(tmp, "shared", "task_state.json");
+  assert.equal(fs.existsSync(taskStatePath), true);
+  assert.match(fs.readFileSync(taskStatePath, "utf8"), /Proceed with a CLI-first prototype/);
+
+  const calls = [];
+  await runCouncil("Second task state question.", group, tmp, {
+    groupPath: tmp,
+    onModelCall: (call) => calls.push(call)
+  });
+  const roundPrompt = calls.find((call) => call.phase === "round").inputMessages.map((message) => message.content).join("\n");
+  assert.match(roundPrompt, /Task state ledger/);
+  assert.match(roundPrompt, /Proceed with a CLI-first prototype/);
+  assert.doesNotMatch(roundPrompt, /private-chat\.jsonl/);
+});
+
 test("read/list file operations are executed and returned in later model context", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-read-list-runtime-"));
   const groupPath = path.join(tmp, "group");

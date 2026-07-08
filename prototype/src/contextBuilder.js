@@ -1,6 +1,7 @@
 import { isReviewerLike } from "./objectionLedger.js";
 import { formatFileAttachmentsForPrompt, normalizeFileAttachments } from "./attachments.js";
 import { estimateMessagesTokens, estimateTokens, hasCoreOverflow, resolveEffectiveLimits } from "./tokenLimits.js";
+import { formatTaskStateForPrompt } from "./taskState.js";
 
 const DEFAULT_RECENT_MESSAGES = 6;
 
@@ -33,6 +34,7 @@ export function buildMemberContext(agent, session, options = {}) {
     verificationStandard: options.verificationStandard || "",
     fileOperationExecutionResults,
     toolExecutionResults,
+    taskState: options.taskState || {},
     attachedFiles
   };
   const summaries = {
@@ -110,7 +112,8 @@ export function buildContextPromptSections(context) {
       context.core.verificationStandard ? `Verification standard: ${context.core.verificationStandard}` : "",
       context.core.attachedFiles?.length ? `User attached files:\n${formatFileAttachmentsForPrompt(context.core.attachedFiles)}` : "",
       context.core.fileOperationExecutionResults?.length ? `File operation execution results: ${JSON.stringify(context.core.fileOperationExecutionResults)}` : "",
-      context.core.toolExecutionResults?.length ? `Tool execution results: ${JSON.stringify(context.core.toolExecutionResults)}` : ""
+      context.core.toolExecutionResults?.length ? `Tool execution results: ${JSON.stringify(context.core.toolExecutionResults)}` : "",
+      formatTaskStateForPrompt(context.core.taskState) ? `Task state ledger:\n${formatTaskStateForPrompt(context.core.taskState)}` : ""
     ]],
     ["Summaries", [
       context.summaries.memberShortSummary ? `Member summary: ${context.summaries.memberShortSummary}` : "",
@@ -245,7 +248,8 @@ function contextMessagesFromCore(core) {
     { role: "user", content: core.verificationStandard },
     { role: "user", content: formatFileAttachmentsForPrompt(core.attachedFiles || []) },
     { role: "user", content: JSON.stringify(core.fileOperationExecutionResults || []) },
-    { role: "user", content: JSON.stringify(core.toolExecutionResults || []) }
+    { role: "user", content: JSON.stringify(core.toolExecutionResults || []) },
+    { role: "user", content: formatTaskStateForPrompt(core.taskState) }
   ].filter((message) => message.content);
 }
 

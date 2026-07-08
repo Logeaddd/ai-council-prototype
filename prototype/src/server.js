@@ -23,6 +23,7 @@ import { addReview, createRecorderDraft, finalizeDraft, listApproved, listDrafts
 import { listGroupSessions, readGroupSession, readSessionContextArchive } from "./storage.js";
 import { importProjectFolder } from "./projectImporter.js";
 import { deletePublicMemory, listPublicMemories, upsertPublicMemory } from "./publicMemory.js";
+import { readTaskState } from "./taskState.js";
 import { listCapabilities } from "./capabilityRegistry.js";
 import { fetchPublicUrl, searchWeb } from "./webTools.js";
 
@@ -233,6 +234,12 @@ async function handleApi(req, res, url) {
   if (req.method === "GET" && url.pathname === "/api/public-memory") {
     const groupPath = resolveWorkspacePath(requireQuery(url, "groupPath"), "groupPath");
     sendJson(res, 200, { memories: listPublicMemories(groupPath) });
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/task-state") {
+    const groupPath = resolveWorkspacePath(requireQuery(url, "groupPath"), "groupPath");
+    sendJson(res, 200, { taskState: readTaskState(groupPath) });
     return;
   }
 
