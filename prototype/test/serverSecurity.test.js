@@ -249,3 +249,17 @@ test("server exposes real capability and guarded web tool endpoints", () => {
   assert.match(webToolsJs, /Blocked unsafe URL/);
   assert.match(webToolsJs, /api\.search\.brave\.com/);
 });
+
+test("server exposes local MCP server config APIs without starting fake runtimes", () => {
+  const serverJs = fs.readFileSync(path.join(root, "src", "server.js"), "utf8");
+  const mcpConfigJs = fs.readFileSync(path.join(root, "src", "mcpConfig.js"), "utf8");
+
+  assert.match(serverJs, /\/api\/mcp\/servers/);
+  assert.match(serverJs, /\/api\/mcp\/servers\/delete/);
+  assert.match(serverJs, /listMcpServerConfigs/);
+  assert.match(serverJs, /upsertMcpServerConfig/);
+  assert.match(serverJs, /deleteMcpServerConfig/);
+  assert.match(mcpConfigJs, /mcp-servers\.json/);
+  assert.match(mcpConfigJs, /redacted/);
+  assert.match(mcpConfigJs, /runtime: "not_started"/);
+});

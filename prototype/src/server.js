@@ -26,6 +26,7 @@ import { deletePublicMemory, listPublicMemories, upsertPublicMemory } from "./pu
 import { readTaskState } from "./taskState.js";
 import { listCapabilities } from "./capabilityRegistry.js";
 import { fetchPublicUrl, searchWeb } from "./webTools.js";
+import { deleteMcpServerConfig, listMcpServerConfigs, upsertMcpServerConfig } from "./mcpConfig.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const baseDir = path.resolve(__dirname, "..");
@@ -171,6 +172,23 @@ async function handleApi(req, res, url) {
     const patch = buildAppSettingsPatch(body);
     const settings = updateAppSettings(baseDir, patch, { groupsRoot: defaultGroupsRoot });
     sendJson(res, 200, redactAppSettingsForClient(settings, { env: process.env }));
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/mcp/servers") {
+    sendJson(res, 200, { servers: listMcpServerConfigs(baseDir) });
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/mcp/servers") {
+    const body = await readBody(req);
+    sendJson(res, 200, { ok: true, server: upsertMcpServerConfig(baseDir, body.server || body) });
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/mcp/servers/delete") {
+    const body = await readBody(req);
+    sendJson(res, 200, deleteMcpServerConfig(baseDir, body.id));
     return;
   }
 
