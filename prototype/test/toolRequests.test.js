@@ -5,6 +5,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { executeFileTool, extractImportedProjectRoots } from "../src/fileTools.js";
 import { executeToolRequests } from "../src/toolRequests.js";
+import { writeContextArchive } from "../src/storage.js";
 
 test("controlled file tool requests list, read, search, and grep real workspace files", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-tools-"));
@@ -51,6 +52,46 @@ test("text-only seats cannot use controlled file tools", async () => {
   assert.equal(result.accepted.length, 0);
   assert.equal(result.rejected[0].code, "permission_denied");
   assert.equal(result.events[0].type, "tool_failure");
+});
+
+test("context search tool reads public archive snippets only", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-context-tool-"));
+  writeContextArchive({
+    id: "session_context_tool_1",
+    question: "Earlier context tool retrieval.",
+    createdAt: "2026-07-08T10:00:00.000Z",
+    completedAt: "2026-07-08T10:01:00.000Z",
+    status: "completed",
+    messages: [
+      {
+        round: 1,
+        agentId: "reader",
+        agentName: "Reader",
+        response: { status: "speak", argument: "CONTEXT_TOOL_PUBLIC_FACT is public archive content." }
+      }
+    ],
+    finalDecision: { final_state: "ready_to_execute", answer: "Stored." }
+  }, tmp);
+  fs.mkdirSync(path.join(tmp, "members", "Reader", "inbox"), { recursive: true });
+  fs.writeFileSync(path.join(tmp, "members", "Reader", "inbox", "private-chat.jsonl"), "CONTEXT_TOOL_PRIVATE_FACT", "utf8");
+
+  const result = await executeToolRequests({
+    permissionTier: "tool",
+    groupPath: tmp,
+    agent: { id: "reader", name: "Reader" },
+    round: 1,
+    requests: [
+      { tool: "search_context", query: "context tool", reason: "Find old public context." }
+    ]
+  });
+  const payload = JSON.stringify(result.results[0].result);
+
+  assert.equal(result.accepted.length, 1);
+  assert.equal(result.results[0].status, "completed");
+  assert.equal(result.results[0].result.source, "local_context_archive");
+  assert.match(payload, /CONTEXT_TOOL_PUBLIC_FACT/);
+  assert.doesNotMatch(payload, /CONTEXT_TOOL_PRIVATE_FACT/);
+  assert.equal(result.events.some((event) => event.type === "tool_success" && event.tool === "search_context"), true);
 });
 
 test("controlled file tools reject path escape and secret files", async () => {

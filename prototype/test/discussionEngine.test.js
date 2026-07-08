@@ -305,6 +305,123 @@ test("file tool requests emit events and return file content to the same member 
   }
 });
 
+test("context search tool requests return archived public snippets to follow-up prompt", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-context-tool-followup-"));
+  fs.writeFileSync(path.join(tmp, "group.json"), JSON.stringify({
+    permissions: {
+      defaultTier: "tool",
+      seatTiers: { researcher: "tool" }
+    }
+  }), "utf8");
+  writeContextArchive({
+    id: "session_context_tool_runtime_1",
+    question: "Earlier archive retrieval task.",
+    createdAt: "2026-07-08T10:00:00.000Z",
+    completedAt: "2026-07-08T10:01:00.000Z",
+    status: "completed",
+    messages: [
+      {
+        round: 1,
+        agentId: "old",
+        agentName: "Old",
+        response: { status: "speak", argument: "CONTEXT_TOOL_RUNTIME_FACT is saved public archive retrieval history." }
+      }
+    ],
+    finalDecision: { final_state: "ready_to_execute", answer: "Archived." }
+  }, tmp);
+  const requestBodies = [];
+  const server = http.createServer(async (req, res) => {
+    const body = JSON.parse(await readRequestBody(req));
+    requestBodies.push(body);
+    const prompt = JSON.stringify(body.messages || []);
+    if (prompt.includes("FinalDecision JSON object")) {
+      writeOpenAiStream(res, JSON.stringify({
+        answer: "Used archived context.",
+        consensus_score: 1,
+        supporting_agents: ["Researcher"],
+        dissenting_agents: [],
+        minority_report: "",
+        risks: [],
+        next_actions: [],
+        selected_file_operation_ids: [],
+        memory_candidates: []
+      }));
+      return;
+    }
+    if (requestBodies.length === 1) {
+      writeOpenAiStream(res, JSON.stringify({
+        status: "speak",
+        argument: "I need to search old group history.",
+        tool_requests: [
+          {
+            tool: "search_context",
+            query: "archive retrieval",
+            reason: "Find saved public context before answering."
+          }
+        ],
+        objections: [],
+        confidence: 0.5,
+        memory_candidates: []
+      }));
+      return;
+    }
+    writeOpenAiStream(res, JSON.stringify({
+      status: "speak",
+      argument: "I found CONTEXT_TOOL_RUNTIME_FACT from the archive search result.",
+      objections: [],
+      confidence: 0.9,
+      memory_candidates: []
+    }));
+  });
+  await listen(server);
+  const address = server.address();
+
+  try {
+    const group = validateGroupConfig({
+      id: "context-tool-followup",
+      name: "Context Tool Followup",
+      settings: {
+        maxRounds: 1,
+        minConsensusWeight: 1,
+        stopWhenAllSkip: true,
+        agentTimeoutMs: 3000,
+        allowSoloCouncil: true
+      },
+      agents: [
+        {
+          id: "researcher",
+          name: "Researcher",
+          role: "Researcher",
+          provider: "openai-compatible",
+          apiBaseUrl: `http://127.0.0.1:${address.port}/v1`,
+          allowUnsafePrivateNetwork: true,
+          apiKey: "secret-runtime-key",
+          model: "context-tool-model",
+          weight: 1,
+          enabled: true
+        }
+      ]
+    });
+    const events = [];
+    let result;
+    for await (const event of runCouncilEvents("Use archive retrieval.", group, tmp, { groupPath: tmp })) {
+      events.push(event);
+      if (event.type === "done") result = event.result;
+    }
+    const followupPrompt = JSON.stringify(requestBodies[1]?.messages || []);
+
+    assert.equal(result.session.toolExecutionResults.length, 1);
+    assert.equal(result.session.toolExecutionResults[0].tool, "search_context");
+    assert.equal(result.session.toolExecutionResults[0].status, "completed");
+    assert.match(followupPrompt, /Tool execution results/);
+    assert.match(followupPrompt, /CONTEXT_TOOL_RUNTIME_FACT/);
+    assert.ok(events.some((event) => event.type === "tool_start" && event.tool === "search_context"));
+    assert.ok(events.some((event) => event.type === "tool_success" && event.tool === "search_context"));
+  } finally {
+    await close(server);
+  }
+});
+
 test("group model call trace records prompt and output summaries without api keys", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-model-trace-"));
   const server = http.createServer(async (req, res) => {

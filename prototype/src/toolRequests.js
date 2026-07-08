@@ -1,6 +1,7 @@
 import { makeId, nowIso } from "./types.js";
 import { fetchPublicUrl, searchWeb } from "./webTools.js";
 import { executeFileTool } from "./fileTools.js";
+import { searchSessionContextArchive } from "./storage.js";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -10,9 +11,11 @@ const ALLOWED_TOOLS = new Set([
   "list_directory",
   "read_file",
   "search_files",
-  "grep_content"
+  "grep_content",
+  "search_context"
 ]);
 const FILE_TOOLS = new Set(["list_directory", "read_file", "search_files", "grep_content"]);
+const CONTEXT_TOOLS = new Set(["search_context"]);
 
 export function normalizeToolRequests(value) {
   if (!Array.isArray(value)) return [];
@@ -42,7 +45,7 @@ export async function executeToolRequests(options = {}) {
     };
 
     if (!ALLOWED_TOOLS.has(normalized.tool)) {
-      const rejection = reject(base, "invalid_tool", "Tool must be one of web_search, fetch_url, list_directory, read_file, search_files, grep_content.");
+      const rejection = reject(base, "invalid_tool", "Tool must be one of web_search, fetch_url, list_directory, read_file, search_files, grep_content, search_context.");
       rejected.push(rejection);
       events.push(toolEvent("tool_failure", base, { status: "rejected", code: rejection.code, error: rejection.error }));
       appendToolAuditLog(options.groupPath, "rejected", rejection);
@@ -96,6 +99,28 @@ async function executeOne(request, options) {
         allowUnsafePrivateNetwork: Boolean(options.allowUnsafePrivateNetwork)
       });
       return resultRecord(request, { status: "completed", result });
+    }
+    if (request.tool === "search_context") {
+      if (!options.groupPath) {
+        return resultRecord(request, {
+          status: "failed",
+          code: "group_context_unavailable",
+          error: "Local context search requires a group workspace."
+        });
+      }
+      const query = request.query || request.reason;
+      const results = searchSessionContextArchive(options.groupPath, query, {
+        limit: request.count || 5
+      });
+      return resultRecord(request, {
+        status: "completed",
+        result: {
+          ok: true,
+          source: "local_context_archive",
+          query,
+          results
+        }
+      });
     }
     const result = await searchWeb(request.query, {
       timeoutMs: options.timeoutMs,
@@ -181,7 +206,7 @@ function stringField(value) {
 function normalizeCount(value, tool) {
   const count = Number(value);
   if (!Number.isFinite(count)) return FILE_TOOLS.has(tool) ? undefined : 5;
-  const max = FILE_TOOLS.has(tool) ? 300 : 8;
+  const max = FILE_TOOLS.has(tool) ? 300 : CONTEXT_TOOLS.has(tool) ? 20 : 8;
   return Math.max(1, Math.min(max, Math.floor(count)));
 }
 
@@ -222,6 +247,9 @@ function summarizeToolResult(record = {}) {
     return { query: record.query || record.pattern, results: result.results?.length || 0, truncated: result.truncated };
   }
   if (record.tool === "web_search") {
+    return { query: record.query, source: result.source, results: result.results?.length || 0 };
+  }
+  if (record.tool === "search_context") {
     return { query: record.query, source: result.source, results: result.results?.length || 0 };
   }
   if (record.tool === "fetch_url") {
