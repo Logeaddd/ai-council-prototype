@@ -65,6 +65,16 @@ export function listCapabilities(options = {}) {
       requirement: "完全允许"
     },
     {
+      id: "install-package",
+      label: "安装依赖",
+      kind: "tool",
+      status: "ready",
+      enabled: true,
+      provider: "built-in",
+      source: "local_server",
+      requirement: "完全允许"
+    },
+    {
       id: "public-memory",
       label: "公共记忆",
       kind: "memory",

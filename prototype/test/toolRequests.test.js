@@ -347,6 +347,62 @@ test("run_code reports timeout and unsupported languages honestly", async () => 
   assert.equal(unsupported.results[0].code, "unsupported_language");
 });
 
+test("install_package installs a real local npm package into managed workspace environment", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-install-package-"));
+  const pkg = path.join(tmp, "local-package");
+  fs.mkdirSync(pkg, { recursive: true });
+  fs.writeFileSync(path.join(pkg, "package.json"), JSON.stringify({
+    name: "local-install-fact",
+    version: "1.0.0",
+    main: "index.js"
+  }), "utf8");
+  fs.writeFileSync(path.join(pkg, "index.js"), "module.exports = 'LOCAL_INSTALL_FACT';\n", "utf8");
+
+  const denied = await executeToolRequests({
+    permissionTier: "tool",
+    groupPath: tmp,
+    agent: { id: "tool", name: "Tool" },
+    round: 1,
+    requests: [
+      { tool: "install_package", manager: "npm", packageName: pkg, reason: "Install local package." }
+    ]
+  });
+  const allowed = await executeToolRequests({
+    permissionTier: "full",
+    groupPath: tmp,
+    agent: { id: "full", name: "Full" },
+    round: 1,
+    requests: [
+      { tool: "install_package", manager: "npm", packageName: pkg, reason: "Install local package." }
+    ]
+  });
+
+  assert.equal(denied.accepted.length, 0);
+  assert.equal(denied.rejected[0].code, "permission_denied");
+  assert.equal(allowed.accepted.length, 1);
+  assert.equal(allowed.results[0].status, "completed");
+  assert.equal(allowed.results[0].result.manager, "npm");
+  assert.equal(allowed.results[0].result.environmentPath, "shared/environments/npm");
+  assert.equal(fs.existsSync(path.join(tmp, "shared", "environments", "npm", "node_modules", "local-install-fact", "index.js")), true);
+  assert.equal(fs.existsSync(path.join(tmp, "shared", "logs", "packages.jsonl")), true);
+});
+
+test("install_package reports unsupported package managers honestly", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-install-package-fail-"));
+  const result = await executeToolRequests({
+    permissionTier: "full",
+    groupPath: tmp,
+    agent: { id: "full", name: "Full" },
+    round: 1,
+    requests: [
+      { tool: "install_package", manager: "brew", packageName: "wget", reason: "Unsupported manager." }
+    ]
+  });
+
+  assert.equal(result.results[0].status, "failed");
+  assert.equal(result.results[0].code, "unsupported_package_manager");
+});
+
 test("controlled file tools reject path escape and secret files", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-tools-guard-"));
   fs.writeFileSync(path.join(tmp, "safe.md"), "safe", "utf8");

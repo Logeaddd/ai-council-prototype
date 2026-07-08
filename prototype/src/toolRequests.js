@@ -4,6 +4,7 @@ import { executeFileTool } from "./fileTools.js";
 import { extractArchiveTool } from "./archiveTools.js";
 import { executeCommandTool } from "./commandTools.js";
 import { runCodeTool } from "./codeRunTools.js";
+import { installPackageTool } from "./packageTools.js";
 import { loadSessionContextArchiveItem, searchSessionContextArchive } from "./storage.js";
 import fs from "node:fs";
 import path from "node:path";
@@ -19,14 +20,16 @@ const ALLOWED_TOOLS = new Set([
   "load_context",
   "extract_archive",
   "execute_command",
-  "run_code"
+  "run_code",
+  "install_package"
 ]);
 const FILE_TOOLS = new Set(["list_directory", "read_file", "search_files", "grep_content"]);
 const CONTEXT_TOOLS = new Set(["search_context", "load_context"]);
 const ARCHIVE_TOOLS = new Set(["extract_archive"]);
 const COMMAND_TOOLS = new Set(["execute_command"]);
 const CODE_TOOLS = new Set(["run_code"]);
-const FULL_PERMISSION_TOOLS = new Set(["extract_archive", "execute_command", "run_code"]);
+const PACKAGE_TOOLS = new Set(["install_package"]);
+const FULL_PERMISSION_TOOLS = new Set(["extract_archive", "execute_command", "run_code", "install_package"]);
 
 export function normalizeToolRequests(value) {
   if (!Array.isArray(value)) return [];
@@ -56,12 +59,13 @@ export async function executeToolRequests(options = {}) {
     };
 
     if (!ALLOWED_TOOLS.has(normalized.tool)) {
-      const rejection = reject(base, "invalid_tool", "Tool must be one of web_search, fetch_url, list_directory, read_file, search_files, grep_content, search_context, load_context, extract_archive, execute_command, run_code.");
+      const rejection = reject(base, "invalid_tool", "Tool must be one of web_search, fetch_url, list_directory, read_file, search_files, grep_content, search_context, load_context, extract_archive, execute_command, run_code, install_package.");
       rejected.push(rejection);
       events.push(toolEvent("tool_failure", base, { status: "rejected", code: rejection.code, error: rejection.error }));
       appendToolAuditLog(options.groupPath, "rejected", rejection);
       appendCommandAuditLog(options.groupPath, "rejected", rejection);
       appendCodeRunAuditLog(options.groupPath, "rejected", rejection);
+      appendPackageAuditLog(options.groupPath, "rejected", rejection);
       continue;
     }
     if (permissionTier === "text") {
@@ -71,6 +75,7 @@ export async function executeToolRequests(options = {}) {
       appendToolAuditLog(options.groupPath, "rejected", rejection);
       appendCommandAuditLog(options.groupPath, "rejected", rejection);
       appendCodeRunAuditLog(options.groupPath, "rejected", rejection);
+      appendPackageAuditLog(options.groupPath, "rejected", rejection);
       continue;
     }
     if (FULL_PERMISSION_TOOLS.has(normalized.tool) && permissionTier !== "full") {
@@ -80,6 +85,7 @@ export async function executeToolRequests(options = {}) {
       appendToolAuditLog(options.groupPath, "rejected", rejection);
       appendCommandAuditLog(options.groupPath, "rejected", rejection);
       appendCodeRunAuditLog(options.groupPath, "rejected", rejection);
+      appendPackageAuditLog(options.groupPath, "rejected", rejection);
       continue;
     }
 
@@ -99,6 +105,7 @@ export async function executeToolRequests(options = {}) {
     appendToolAuditLog(options.groupPath, "completed", result);
     appendCommandAuditLog(options.groupPath, "completed", result);
     appendCodeRunAuditLog(options.groupPath, "completed", result);
+    appendPackageAuditLog(options.groupPath, "completed", result);
   }
 
   return { accepted, rejected, results, events };
@@ -210,6 +217,21 @@ async function executeOne(request, options) {
         result
       });
     }
+    if (request.tool === "install_package") {
+      const result = await installPackageTool(request, {
+        groupPath: options.groupPath,
+        timeoutMs: options.timeoutMs,
+        packageInstallTimeoutMs: options.packageInstallTimeoutMs,
+        maxPackageOutputBytes: options.maxPackageOutputBytes,
+        signal: options.signal
+      });
+      return resultRecord(request, {
+        status: result.ok ? "completed" : "failed",
+        code: result.code,
+        error: result.error,
+        result
+      });
+    }
     const result = await searchWeb(request.query, {
       timeoutMs: options.timeoutMs,
       count: request.count,
@@ -243,6 +265,8 @@ function normalizeToolRequest(item, index) {
     command: stringField(item.command || item.cmd || item.shellCommand || item.shell_command),
     code: stringField(item.code || item.content || item.source),
     language: stringField(item.language || item.lang),
+    packageName: stringField(item.packageName || item.package || item.package_name || item.name),
+    manager: stringField(item.manager || item.packageManager || item.package_manager || item.ecosystem),
     cwd: stringField(item.cwd || item.workingDirectory || item.working_directory),
     shell: stringField(item.shell),
     pattern: stringField(item.pattern),
@@ -271,6 +295,8 @@ function reject(request, code, reason) {
     command: safeCommandForStorage(request.command),
     code: summarizeCodeForStorage(request.code),
     language: request.language,
+    packageName: safePackageForStorage(request.packageName),
+    manager: request.manager,
     cwd: request.cwd,
     shell: request.shell,
     pattern: request.pattern,
@@ -302,6 +328,8 @@ function resultRecord(request, extra) {
     command: safeCommandForStorage(request.command),
     code: summarizeCodeForStorage(request.code),
     language: request.language,
+    packageName: safePackageForStorage(request.packageName),
+    manager: request.manager,
     cwd: request.cwd,
     shell: request.shell,
     pattern: request.pattern,
@@ -327,7 +355,7 @@ function stringField(value) {
 
 function normalizeCount(value, tool) {
   const count = Number(value);
-  if (!Number.isFinite(count)) return FILE_TOOLS.has(tool) || ARCHIVE_TOOLS.has(tool) || CODE_TOOLS.has(tool) ? undefined : 5;
+  if (!Number.isFinite(count)) return FILE_TOOLS.has(tool) || ARCHIVE_TOOLS.has(tool) || CODE_TOOLS.has(tool) || PACKAGE_TOOLS.has(tool) ? undefined : 5;
   if (ARCHIVE_TOOLS.has(tool)) return Math.max(1, Math.min(1000, Math.floor(count)));
   const max = FILE_TOOLS.has(tool) ? 300 : CONTEXT_TOOLS.has(tool) ? 20 : 8;
   return Math.max(1, Math.min(max, Math.floor(count)));
@@ -360,6 +388,8 @@ function toolEvent(type, request, extra = {}) {
     command: safeCommandForStorage(request.command),
     code: summarizeCodeForStorage(request.code),
     language: request.language,
+    packageName: safePackageForStorage(request.packageName),
+    manager: request.manager,
     cwd: request.cwd,
     shell: request.shell,
     pattern: request.pattern,
@@ -432,6 +462,17 @@ function summarizeToolResult(record = {}) {
       stderrBytes: result.stderr?.length || 0
     };
   }
+  if (record.tool === "install_package") {
+    return {
+      manager: result.manager,
+      packageName: result.packageName,
+      environmentPath: result.environmentPath,
+      exitCode: result.exitCode,
+      timedOut: Boolean(result.timedOut),
+      stdoutBytes: result.stdout?.length || 0,
+      stderrBytes: result.stderr?.length || 0
+    };
+  }
   if (record.tool === "fetch_url") {
     return { url: safeUrlForEvent(record.url), title: result.title || "", bytes: result.bytes };
   }
@@ -458,6 +499,8 @@ function appendToolAuditLog(groupPath, action, item) {
       command: safeCommandForStorage(item.command),
       code: summarizeCodeForStorage(item.code),
       language: item.language,
+      packageName: safePackageForStorage(item.packageName),
+      manager: item.manager,
       cwd: item.cwd,
       shell: item.shell,
       background: item.background,
@@ -535,11 +578,42 @@ function appendCodeRunAuditLog(groupPath, action, item) {
   }
 }
 
+function appendPackageAuditLog(groupPath, action, item) {
+  if (!groupPath || item.tool !== "install_package") return;
+  try {
+    const filePath = path.join(groupPath, "shared", "logs", "packages.jsonl");
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    const record = {
+      action,
+      id: item.id,
+      tool: item.tool,
+      status: item.status,
+      code: item.code,
+      error: item.error,
+      round: item.round,
+      source_agent_id: item.source_agent_id,
+      source_agent_name: item.source_agent_name,
+      manager: item.result?.manager || item.manager,
+      packageName: item.result?.packageName || safePackageForStorage(item.packageName),
+      environmentPath: item.result?.environmentPath,
+      exitCode: item.result?.exitCode,
+      timedOut: Boolean(item.result?.timedOut),
+      durationMs: item.result?.durationMs,
+      resultSummary: summarizeToolResult(item),
+      createdAt: nowIso()
+    };
+    fs.appendFileSync(filePath, `${JSON.stringify(record)}\n`, "utf8");
+  } catch {
+    // Package audit is best-effort; never hide the actual install result because logging failed.
+  }
+}
+
 function safeRequestForStorage(request) {
   return {
     ...request,
     command: safeCommandForStorage(request.command),
     code: summarizeCodeForStorage(request.code),
+    packageName: safePackageForStorage(request.packageName),
     url: request.url
   };
 }
@@ -571,4 +645,10 @@ function summarizeCodeForStorage(value) {
     bytes: Buffer.byteLength(code, "utf8"),
     preview: code.slice(0, 120)
   };
+}
+
+function safePackageForStorage(value) {
+  return String(value || "")
+    .replace(/(\/\/[^/:]+:)[^@/]+(@)/g, "$1[redacted]$2")
+    .replace(/(token=)[^&\s]+/gi, "$1[redacted]");
 }
