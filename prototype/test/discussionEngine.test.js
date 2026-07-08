@@ -12,6 +12,7 @@ import { appendSessionUsage, readGroupUsage } from "../src/usageStats.js";
 import { approveExecutionStandards, prepareExecutionStandards } from "../src/executionStandards.js";
 import { appendPrivateChatMessage } from "../src/privateChat.js";
 import { upsertPublicMemory } from "../src/publicMemory.js";
+import { writeContextArchive } from "../src/storage.js";
 
 
 test("onModelCall records round and final model payloads", async () => {
@@ -3389,6 +3390,71 @@ test("task state ledger is written after a session and injected into the next ru
   const roundPrompt = calls.find((call) => call.phase === "round").inputMessages.map((message) => message.content).join("\n");
   assert.match(roundPrompt, /Task state ledger/);
   assert.match(roundPrompt, /Proceed with a CLI-first prototype/);
+  assert.doesNotMatch(roundPrompt, /private-chat\.jsonl/);
+});
+
+test("saved public archive snippets are retrieved and injected into later prompts", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-context-retrieval-run-"));
+  const archivedSession = {
+    id: "session_archive_runtime_1",
+    question: "Earlier retrieval planning.",
+    createdAt: "2026-07-08T10:00:00.000Z",
+    completedAt: "2026-07-08T10:01:00.000Z",
+    status: "completed",
+    messages: [
+      {
+        round: 1,
+        agentId: "builder",
+        agentName: "Builder",
+        response: { status: "speak", argument: "ARCHIVE_RUNTIME_FACT should be reused when retrieval is mentioned." },
+        createdAt: "2026-07-08T10:00:20.000Z"
+      }
+    ],
+    finalDecision: {
+      final_state: "ready_to_execute",
+      answer: "Archive saved."
+    }
+  };
+  writeContextArchive(archivedSession, tmp);
+  fs.mkdirSync(path.join(tmp, "members", "Builder", "inbox"), { recursive: true });
+  fs.writeFileSync(path.join(tmp, "members", "Builder", "inbox", "private-chat.jsonl"), "PRIVATE_ARCHIVE_RUNTIME_FACT", "utf8");
+
+  const group = validateGroupConfig({
+    id: "context-retrieval-run",
+    name: "Context Retrieval Run",
+    settings: {
+      maxRounds: 1,
+      minConsensusWeight: 1,
+      stopWhenAllSkip: true,
+      agentTimeoutMs: 1000,
+      allowSoloCouncil: true
+    },
+    agents: [
+      {
+        id: "builder",
+        name: "Builder",
+        role: "Builder",
+        provider: "mock",
+        apiBaseUrl: "mock://local",
+        model: "mock-builder",
+        weight: 1,
+        enabled: true
+      }
+    ]
+  });
+
+  const calls = [];
+  const result = await runCouncil("Please continue the retrieval work.", group, tmp, {
+    groupPath: tmp,
+    onModelCall: (call) => calls.push(call)
+  });
+  const roundPrompt = calls.find((call) => call.phase === "round").inputMessages.map((message) => message.content).join("\n");
+
+  assert.equal(result.session.contextRetrievalResults.length >= 1, true);
+  assert.match(roundPrompt, /Relevant archived context/);
+  assert.match(roundPrompt, /ARCHIVE_RUNTIME_FACT/);
+  assert.match(roundPrompt, /session_archive_runtime_1/);
+  assert.doesNotMatch(roundPrompt, /PRIVATE_ARCHIVE_RUNTIME_FACT/);
   assert.doesNotMatch(roundPrompt, /private-chat\.jsonl/);
 });
 

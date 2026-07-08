@@ -20,7 +20,7 @@ import { readUsageSnapshot } from "./usageStats.js";
 import { formatFileAttachmentsForPrompt, normalizeFileAttachments } from "./attachments.js";
 import { addMember, initGroupWorkspace, replaceMember } from "./workspaceManager.js";
 import { addReview, createRecorderDraft, finalizeDraft, listApproved, listDrafts } from "./writeFlow.js";
-import { listGroupSessions, readGroupSession, readSessionContextArchive } from "./storage.js";
+import { listGroupSessions, readGroupSession, readSessionContextArchive, searchSessionContextArchive } from "./storage.js";
 import { importProjectFolder } from "./projectImporter.js";
 import { deletePublicMemory, listPublicMemories, upsertPublicMemory } from "./publicMemory.js";
 import { readTaskState } from "./taskState.js";
@@ -274,6 +274,17 @@ async function handleApi(req, res, url) {
     const groupPath = resolveWorkspacePath(requireQuery(url, "groupPath"), "groupPath");
     const sessionId = requireQuery(url, "sessionId");
     sendJson(res, 200, { archive: readSessionContextArchive(groupPath, sessionId) });
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/context-search") {
+    const groupPath = resolveWorkspacePath(requireQuery(url, "groupPath"), "groupPath");
+    const query = requireQuery(url, "query");
+    sendJson(res, 200, {
+      results: searchSessionContextArchive(groupPath, query, {
+        limit: url.searchParams.get("limit") || 10
+      })
+    });
     return;
   }
 

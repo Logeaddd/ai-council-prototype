@@ -162,13 +162,16 @@ test("server exposes guarded chat history endpoints", () => {
   assert.match(serverJs, /\/api\/sessions/);
   assert.match(serverJs, /\/api\/session/);
   assert.match(serverJs, /\/api\/session-context/);
+  assert.match(serverJs, /\/api\/context-search/);
   assert.match(serverJs, /listGroupSessions/);
   assert.match(serverJs, /readGroupSession/);
   assert.match(serverJs, /readSessionContextArchive/);
+  assert.match(serverJs, /searchSessionContextArchive/);
   assert.match(serverJs, /resolveWorkspacePath\(requireQuery\(url, "groupPath"\), "groupPath"\)/);
   assert.match(storageJs, /Invalid session id/);
   assert.match(storageJs, /context_policy\.json/);
   assert.match(storageJs, /session_index\.jsonl/);
+  assert.match(storageJs, /local_context_archive/);
 });
 
 test("server exposes guarded public memory endpoints", () => {

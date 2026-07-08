@@ -4,7 +4,7 @@ import { buildContextPromptSections, buildMemberContext } from "./contextBuilder
 import { parseFinalDecision, parseRoundResponse } from "./responseParser.js";
 import { makeId, nowIso } from "./types.js";
 import { isConsensusParticipant, scoreConsensus, shouldStop, updateUnresolvedObjections } from "./consensusEngine.js";
-import { appendMemoryCandidates, writeContextArchive, writeGroupSession, writeSession } from "./storage.js";
+import { appendMemoryCandidates, searchSessionContextArchive, writeContextArchive, writeGroupSession, writeSession } from "./storage.js";
 import { assessBudgetUsage, assessSizeUsage } from "./tokenLimits.js";
 import { appendSessionTranscriptChunk, readSummaryCache, updateDeterministicSummaries } from "./summaryCache.js";
 import { appendSessionUsage, estimateCost, estimateMemberAccruedCost } from "./usageStats.js";
@@ -47,6 +47,11 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
   const continuationContext = normalizeContinuationContext(options.continuationContext);
   const workspaceGroup = options.groupPath ? readWorkspaceGroup(options.groupPath) : undefined;
   const taskState = options.groupPath ? readTaskState(options.groupPath) : undefined;
+  const retrievedContext = options.groupPath
+    ? searchSessionContextArchive(options.groupPath, [question, options.latestBossInstruction].filter(Boolean).join("\n"), {
+      limit: options.contextSearchLimit || group.settings?.contextSearchLimit || 5
+    })
+    : [];
   const session = {
     id: makeId("session"),
     question,
@@ -65,6 +70,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
     toolExecutionResults: [],
     toolRequests: [],
     rejectedToolRequests: [],
+    contextRetrievalResults: retrievedContext,
     rejectedFileOperationProposals: [],
     pendingFileOperationProposals: [],
     messages: []
@@ -90,6 +96,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
         latestBossInstruction: options.latestBossInstruction || "",
         attachments,
         taskState,
+        retrievedContext,
         ...loadSummaryContext(options.groupPath, agent),
         privateBossMessages: loadPrivateBossMessages(options.groupPath, agent)
       });
@@ -227,6 +234,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
           latestBossInstruction: "Tool results from your previous request are now available in context. Use the real tool results to finish this round. Do not repeat a tool request unless new external information is still required.",
           attachments,
           taskState,
+          retrievedContext,
           ...loadSummaryContext(options.groupPath, agent),
           privateBossMessages: loadPrivateBossMessages(options.groupPath, agent)
         });
@@ -354,6 +362,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
     latestBossInstruction: options.latestBossInstruction || "",
     attachments,
     taskState,
+    retrievedContext,
     ...loadSummaryContext(options.groupPath, judge),
     privateBossMessages: loadPrivateBossMessages(options.groupPath, judge)
   });

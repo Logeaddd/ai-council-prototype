@@ -347,3 +347,33 @@ test("context prompt sections include cycle continuation memory", () => {
   assert.match(continuation, /Timeout policy still ambiguous/);
   assert.match(continuation, /Define timeout defaults/);
 });
+
+test("context prompt sections include retrieved archive snippets with source pointers", () => {
+  const context = buildMemberContext(agent, {
+    question: "Use the saved archive.",
+    unresolvedObjections: {},
+    artifacts: [],
+    messages: []
+  }, {
+    retrievedContext: [
+      {
+        source: "local_context_archive",
+        sourceType: "round_summary",
+        sessionId: "session_archive_1",
+        round: 2,
+        question: "Earlier archive question",
+        finalState: "ready_to_execute",
+        snippet: "ARCHIVE_SNIPPET_FACT",
+        sourcePath: "sessions/session_archive_1/round_2_summary.json",
+        score: 17
+      }
+    ]
+  });
+  const sections = buildContextPromptSections(context);
+  const archived = sections.find((section) => section.title === "Relevant archived context")?.content || "";
+
+  assert.match(archived, /local keyword search/);
+  assert.match(archived, /session=session_archive_1 round=2/);
+  assert.match(archived, /ARCHIVE_SNIPPET_FACT/);
+  assert.match(archived, /round_2_summary\.json/);
+});

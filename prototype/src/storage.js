@@ -105,6 +105,30 @@ export function readSessionContextArchive(groupPath, sessionId) {
   };
 }
 
+export function searchSessionContextArchive(groupPath, query, options = {}) {
+  const terms = tokenizeSearchQuery(query);
+  if (!terms.length) return [];
+  const root = path.resolve(groupPath);
+  const sessionsDir = path.join(root, "sessions");
+  if (!fs.existsSync(sessionsDir)) return [];
+
+  const limit = clampNumber(options.limit || 6, 1, 20);
+  const maxSessions = clampNumber(options.maxSessions || 80, 1, 300);
+  const records = readSessionIndexRecords(sessionsDir)
+    .sort((a, b) => new Date(b.completedAt || b.createdAt || 0).getTime() - new Date(a.completedAt || a.createdAt || 0).getTime())
+    .slice(0, maxSessions);
+
+  const hits = [];
+  for (const record of records) {
+    hits.push(...buildSearchCandidates(root, record, terms));
+  }
+
+  return hits
+    .filter((hit) => hit.score > 0)
+    .sort((a, b) => b.score - a.score || new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime())
+    .slice(0, limit);
+}
+
 function writeRoundArchives(archiveDir, session) {
   const messages = Array.isArray(session?.messages) ? session.messages : [];
   const roundNumbers = [...new Set(messages.map((message) => Number(message.round || 0)).filter((round) => round > 0))]
@@ -241,6 +265,146 @@ function writeJson(filePath, data) {
 function readJsonIfExists(filePath) {
   if (!fs.existsSync(filePath)) return undefined;
   return JSON.parse(fs.readFileSync(filePath, "utf8"));
+}
+
+function readSessionIndexRecords(sessionsDir) {
+  const filePath = path.join(sessionsDir, "session_index.jsonl");
+  if (!fs.existsSync(filePath)) return [];
+  return fs.readFileSync(filePath, "utf8")
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .map((line) => {
+      try {
+        return JSON.parse(line);
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean);
+}
+
+function buildSearchCandidates(root, record, terms) {
+  const candidates = [];
+  const session = readRelativeJson(root, record.fullSessionPath);
+  const finalText = [
+    record.question,
+    session?.finalDecision?.answer,
+    ...(Array.isArray(session?.finalDecision?.risks) ? session.finalDecision.risks : []),
+    ...(Array.isArray(session?.finalDecision?.next_actions) ? session.finalDecision.next_actions : [])
+  ].join("\n");
+  candidates.push(makeSearchHit({
+    record,
+    sourceType: "session_final",
+    sourcePath: record.fullSessionPath,
+    text: finalText,
+    terms
+  }));
+
+  const rounds = Array.isArray(record.rounds) ? record.rounds : [];
+  for (const roundRef of rounds) {
+    const summary = readRelativeJson(root, roundRef.summaryPath);
+    const summaryText = [
+      `Round ${summary?.round || roundRef.round || ""}`,
+      ...(Array.isArray(summary?.speakers) ? summary.speakers.map((speaker) => [
+        speaker.agentName,
+        speaker.status,
+        speaker.textPreview
+      ].filter(Boolean).join(": ")) : [])
+    ].join("\n");
+    candidates.push(makeSearchHit({
+      record,
+      round: Number(summary?.round || roundRef.round || 0),
+      sourceType: "round_summary",
+      sourcePath: roundRef.summaryPath,
+      text: summaryText,
+      terms
+    }));
+  }
+
+  const manifest = readRelativeJson(root, record.fileManifestPath);
+  for (const file of Array.isArray(manifest?.files) ? manifest.files : []) {
+    candidates.push(makeSearchHit({
+      record,
+      sourceType: "attachment_summary",
+      sourcePath: `${record.archiveDir || ""}/${file.storedPath || ""}`.replaceAll("\\", "/"),
+      text: [file.originalName, file.type, file.summary].filter(Boolean).join("\n"),
+      terms
+    }));
+  }
+
+  return candidates.filter(Boolean);
+}
+
+function makeSearchHit({ record, round, sourceType, sourcePath, text, terms }) {
+  const cleanText = redactArchiveSearchText(text);
+  const score = scoreSearchText(cleanText, terms);
+  if (!score) return null;
+  return {
+    source: "local_context_archive",
+    sourceType,
+    sessionId: record.sessionId || "",
+    question: truncate(record.question || "", 220),
+    createdAt: record.createdAt || "",
+    completedAt: record.completedAt || "",
+    finalState: record.finalState || "",
+    round: round || undefined,
+    score,
+    matchedTerms: terms.filter((term) => cleanText.toLowerCase().includes(term)),
+    snippet: truncate(cleanText, 700),
+    sourcePath: String(sourcePath || "")
+  };
+}
+
+function readRelativeJson(root, relativePath) {
+  if (!relativePath) return undefined;
+  const filePath = path.resolve(root, String(relativePath));
+  if (filePath !== root && !filePath.startsWith(`${root}${path.sep}`)) return undefined;
+  if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) return undefined;
+  try {
+    return JSON.parse(fs.readFileSync(filePath, "utf8"));
+  } catch {
+    return undefined;
+  }
+}
+
+function tokenizeSearchQuery(query) {
+  const text = String(query || "").toLowerCase().trim();
+  if (!text) return [];
+  const terms = (text.match(/[\p{L}\p{N}_-]+/gu) || [])
+    .map((term) => term.trim())
+    .filter((term) => term.length >= 2)
+    .slice(0, 16);
+  return [...new Set(terms)];
+}
+
+function scoreSearchText(text, terms) {
+  const lower = String(text || "").toLowerCase();
+  if (!lower || !terms.length) return 0;
+  let score = 0;
+  let matched = 0;
+  for (const term of terms) {
+    const count = lower.split(term).length - 1;
+    if (count > 0) {
+      matched += 1;
+      score += count * Math.min(6, Math.max(1, term.length));
+    }
+  }
+  if (matched > 1) score += matched * 2;
+  return score;
+}
+
+function redactArchiveSearchText(value) {
+  return String(value || "")
+    .replace(/private-chat\.jsonl/gi, "[private-path-redacted]")
+    .replace(/private_memory/gi, "[private-path-redacted]")
+    .replace(/members[\\/][^\\/]+[\\/]inbox/gi, "[private-path-redacted]")
+    .replace(/(api[_-]?key|authorization|bearer)\s*[:=]\s*["']?[^"'\s,}]+/gi, "$1:[redacted]");
+}
+
+function clampNumber(value, min, max) {
+  const count = Number(value);
+  if (!Number.isFinite(count)) return min;
+  return Math.min(max, Math.max(min, Math.floor(count)));
 }
 
 function requireSafeSessionId(value) {

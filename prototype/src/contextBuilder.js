@@ -41,6 +41,7 @@ export function buildMemberContext(agent, session, options = {}) {
     memberShortSummary: options.memberShortSummary || "",
     groupSharedSummary: options.groupSharedSummary || "",
     continuationContext,
+    retrievedContext: normalizeRetrievedContext(options.retrievedContext),
     privateBossMessages: Array.isArray(options.privateBossMessages) ? options.privateBossMessages : []
   };
   const stableMessages = contextMessagesFromStable(stable);
@@ -119,6 +120,7 @@ export function buildContextPromptSections(context) {
       context.summaries.memberShortSummary ? `Member summary: ${context.summaries.memberShortSummary}` : "",
       context.summaries.groupSharedSummary ? `Group summary: ${context.summaries.groupSharedSummary}` : ""
     ]],
+    ["Relevant archived context", formatRetrievedContext(context.summaries.retrievedContext)],
     ["Cycle continuation", formatContinuationContext(context.summaries.continuationContext)],
     ["Private boss messages", context.summaries.privateBossMessages.map(formatPrivateBossMessage)],
     ["Recent transcript", context.recentTranscript.map(formatTranscriptMessage)]
@@ -257,12 +259,42 @@ function contextMessagesFromSummaries(summaries) {
   return [
     { role: "user", content: summaries.memberShortSummary },
     { role: "user", content: summaries.groupSharedSummary },
+    { role: "user", content: formatRetrievedContext(summaries.retrievedContext).join("\n") },
     { role: "user", content: formatContinuationContext(summaries.continuationContext).join("\n") },
     ...summaries.privateBossMessages.map((message) => ({
       role: isFromBoss(message) ? "user" : "assistant",
       content: formatPrivateBossMessage(message)
     }))
   ].filter((message) => message.content);
+}
+
+function normalizeRetrievedContext(items) {
+  return (Array.isArray(items) ? items : []).slice(0, 8).map((item) => ({
+    source: String(item?.source || "local_context_archive"),
+    sourceType: String(item?.sourceType || ""),
+    sessionId: String(item?.sessionId || ""),
+    round: Number(item?.round || 0) || undefined,
+    question: String(item?.question || ""),
+    finalState: String(item?.finalState || ""),
+    snippet: String(item?.snippet || ""),
+    sourcePath: String(item?.sourcePath || ""),
+    score: Number(item?.score || 0)
+  })).filter((item) => item.snippet);
+}
+
+function formatRetrievedContext(items) {
+  const normalized = normalizeRetrievedContext(items);
+  if (!normalized.length) return [];
+  return [
+    "Loaded by local keyword search from saved public session archives. These are snippets with source pointers, not full source facts.",
+    ...normalized.map((item, index) => [
+      `Archive hit ${index + 1}: session=${item.sessionId || "unknown"}${item.round ? ` round=${item.round}` : ""} type=${item.sourceType || "unknown"} score=${item.score}`,
+      item.question ? `Question: ${item.question}` : "",
+      item.finalState ? `Final state: ${item.finalState}` : "",
+      item.sourcePath ? `Source path: ${item.sourcePath}` : "",
+      `Snippet: ${item.snippet}`
+    ].filter(Boolean).join("\n"))
+  ];
 }
 
 function normalizeContinuationContext(value) {
