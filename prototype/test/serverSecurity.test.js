@@ -232,11 +232,19 @@ test("server exposes real capability and guarded web tool endpoints", () => {
   const serverJs = fs.readFileSync(path.join(root, "src", "server.js"), "utf8");
   const capabilityJs = fs.readFileSync(path.join(root, "src", "capabilityRegistry.js"), "utf8");
   const webToolsJs = fs.readFileSync(path.join(root, "src", "webTools.js"), "utf8");
+  const mcpServerJs = fs.readFileSync(path.join(root, "src", "mcpServer.js"), "utf8");
+  const pkg = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
 
   assert.match(serverJs, /\/api\/capabilities/);
   assert.match(serverJs, /\/api\/tools\/fetch-url/);
   assert.match(serverJs, /\/api\/tools\/web-search/);
   assert.match(capabilityJs, /web-search/);
+  assert.match(capabilityJs, /mcp-web-tools/);
+  assert.equal(pkg.scripts["mcp:web"], "node ./src/mcpServer.js");
+  assert.match(mcpServerJs, /tools\/list/);
+  assert.match(mcpServerJs, /tools\/call/);
+  assert.match(mcpServerJs, /fetchPublicUrl/);
+  assert.match(mcpServerJs, /searchWeb/);
   assert.match(capabilityJs, /needs_config/);
   assert.match(webToolsJs, /Blocked unsafe URL/);
   assert.match(webToolsJs, /api\.search\.brave\.com/);

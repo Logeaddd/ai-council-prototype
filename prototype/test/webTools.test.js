@@ -18,6 +18,8 @@ test("capability registry reports web search as unconfigured without a real key"
   const gitOperation = capabilities.find((item) => item.id === "git-operation");
   const browserControl = capabilities.find((item) => item.id === "browser-control");
   const databaseQuery = capabilities.find((item) => item.id === "database-query");
+  const mcpWebTools = capabilities.find((item) => item.id === "mcp-web-tools");
+  const mcpMarketplace = capabilities.find((item) => item.id === "mcp-marketplace");
 
   assert.equal(search.status, "needs_config");
   assert.equal(search.enabled, false);
@@ -48,6 +50,14 @@ test("capability registry reports web search as unconfigured without a real key"
   assert.match(browserControl.requirement, /完全允许/);
   assert.equal(databaseQuery.status, "ready");
   assert.equal(databaseQuery.enabled, true);
+  assert.equal(mcpWebTools.status, "ready");
+  assert.equal(mcpWebTools.enabled, true);
+  assert.equal(mcpWebTools.source, "local_stdio");
+  assert.equal(mcpWebTools.command, "npm run mcp:web");
+  assert.deepEqual(mcpWebTools.tools, ["web_search", "fetch_url"]);
+  assert.match(mcpWebTools.requirement, /Brave Search key/);
+  assert.equal(mcpMarketplace.status, "planned");
+  assert.equal(mcpMarketplace.enabled, false);
   assert.match(databaseQuery.requirement, /工具授权/);
 });
 

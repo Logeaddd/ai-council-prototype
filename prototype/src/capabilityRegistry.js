@@ -135,6 +135,20 @@ export function listCapabilities(options = {}) {
       requirement: ""
     },
     {
+      id: "mcp-web-tools",
+      label: "MCP Web Tools",
+      kind: "mcp_server",
+      status: "ready",
+      enabled: true,
+      provider: "built-in",
+      source: "local_stdio",
+      command: "npm run mcp:web",
+      tools: ["web_search", "fetch_url"],
+      requirement: searchConfigured
+        ? "web_search and fetch_url are available. fetch_url only reads public HTTPS pages."
+        : "fetch_url is available. web_search needs a Brave Search key."
+    },
+    {
       id: "mcp-marketplace",
       label: "能力市场",
       kind: "planned",

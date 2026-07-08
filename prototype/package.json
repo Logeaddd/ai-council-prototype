@@ -22,7 +22,8 @@
     "desktop:shortcut": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/install-desktop-shortcut.ps1",
     "desktop:portable": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/build-portable.ps1",
     "desktop:installer": "npm run renderer:build && electron-builder --win nsis",
-    "desktop:dist": "npm run renderer:build && npm run desktop:portable && electron-builder --win nsis"
+    "desktop:dist": "npm run renderer:build && npm run desktop:portable && electron-builder --win nsis",
+    "mcp:web": "node ./src/mcpServer.js"
   },
   "devDependencies": {
     "electron": "^38.0.0",
