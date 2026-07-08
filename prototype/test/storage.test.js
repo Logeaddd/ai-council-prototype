@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { listGroupSessions, readGroupSession, readSessionContextArchive, searchSessionContextArchive, writeContextArchive, writeGroupSession } from "../src/storage.js";
+import { listGroupSessions, loadSessionContextArchiveItem, readGroupSession, readSessionContextArchive, searchSessionContextArchive, writeContextArchive, writeGroupSession } from "../src/storage.js";
 
 test("group session history lists real saved sessions and reads details", () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-history-"));
@@ -169,4 +169,46 @@ test("context archive keyword search returns public snippets without private inb
   assert.match(combined, /ARCHIVE_PUBLIC_FACT|ARCHIVE_ATTACHMENT_FACT/);
   assert.doesNotMatch(combined, /PRIVATE_ONLY_FACT/);
   assert.equal(privateHits.length, 0);
+});
+
+test("context archive item loader reads public round by session and round only", () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-context-load-"));
+  const session = {
+    id: "session_load_1",
+    question: "Load archived round.",
+    createdAt: "2026-07-08T10:00:00.000Z",
+    completedAt: "2026-07-08T10:02:00.000Z",
+    status: "completed",
+    messages: [
+      {
+        round: 1,
+        agentId: "builder",
+        agentName: "Builder",
+        response: { status: "speak", argument: "LOAD_CONTEXT_PUBLIC_FACT is in the public archived round." },
+        createdAt: "2026-07-08T10:00:30.000Z"
+      }
+    ],
+    finalDecision: {
+      final_state: "ready_to_execute",
+      answer: "Round can be loaded."
+    }
+  };
+
+  writeContextArchive(session, tmp);
+  fs.mkdirSync(path.join(tmp, "members", "Builder", "inbox"), { recursive: true });
+  fs.writeFileSync(path.join(tmp, "members", "Builder", "inbox", "private-chat.jsonl"), "LOAD_CONTEXT_PRIVATE_FACT", "utf8");
+
+  const round = loadSessionContextArchiveItem(tmp, { sessionId: "session_load_1", round: 1 });
+  const summary = loadSessionContextArchiveItem(tmp, { sessionId: "session_load_1" });
+  const roundText = JSON.stringify(round);
+  const summaryText = JSON.stringify(summary);
+
+  assert.equal(round.ok, true);
+  assert.equal(round.sourceType, "round_full");
+  assert.match(roundText, /LOAD_CONTEXT_PUBLIC_FACT/);
+  assert.doesNotMatch(roundText, /LOAD_CONTEXT_PRIVATE_FACT/);
+  assert.equal(summary.sourceType, "session_archive");
+  assert.match(summaryText, /round_1_summary\.json/);
+  assert.throws(() => loadSessionContextArchiveItem(tmp, { sessionId: "../bad", round: 1 }), /Invalid session id/);
+  assert.throws(() => loadSessionContextArchiveItem(tmp, { sessionId: "session_load_1", round: "../1" }), /Invalid archive round/);
 });

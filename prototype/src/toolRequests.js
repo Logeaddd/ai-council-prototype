@@ -1,7 +1,7 @@
 import { makeId, nowIso } from "./types.js";
 import { fetchPublicUrl, searchWeb } from "./webTools.js";
 import { executeFileTool } from "./fileTools.js";
-import { searchSessionContextArchive } from "./storage.js";
+import { loadSessionContextArchiveItem, searchSessionContextArchive } from "./storage.js";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -12,10 +12,11 @@ const ALLOWED_TOOLS = new Set([
   "read_file",
   "search_files",
   "grep_content",
-  "search_context"
+  "search_context",
+  "load_context"
 ]);
 const FILE_TOOLS = new Set(["list_directory", "read_file", "search_files", "grep_content"]);
-const CONTEXT_TOOLS = new Set(["search_context"]);
+const CONTEXT_TOOLS = new Set(["search_context", "load_context"]);
 
 export function normalizeToolRequests(value) {
   if (!Array.isArray(value)) return [];
@@ -45,7 +46,7 @@ export async function executeToolRequests(options = {}) {
     };
 
     if (!ALLOWED_TOOLS.has(normalized.tool)) {
-      const rejection = reject(base, "invalid_tool", "Tool must be one of web_search, fetch_url, list_directory, read_file, search_files, grep_content, search_context.");
+      const rejection = reject(base, "invalid_tool", "Tool must be one of web_search, fetch_url, list_directory, read_file, search_files, grep_content, search_context, load_context.");
       rejected.push(rejection);
       events.push(toolEvent("tool_failure", base, { status: "rejected", code: rejection.code, error: rejection.error }));
       appendToolAuditLog(options.groupPath, "rejected", rejection);
@@ -122,6 +123,29 @@ async function executeOne(request, options) {
         }
       });
     }
+    if (request.tool === "load_context") {
+      if (!options.groupPath) {
+        return resultRecord(request, {
+          status: "failed",
+          code: "group_context_unavailable",
+          error: "Local context load requires a group workspace."
+        });
+      }
+      if (!request.sessionId) {
+        return resultRecord(request, {
+          status: "failed",
+          code: "missing_session_id",
+          error: "load_context requires sessionId."
+        });
+      }
+      const result = loadSessionContextArchiveItem(options.groupPath, {
+        ...request,
+        round: request.archiveRound
+      }, {
+        maxBytes: request.maxBytes || options.maxArchiveLoadBytes
+      });
+      return resultRecord(request, { status: "completed", result });
+    }
     const result = await searchWeb(request.query, {
       timeoutMs: options.timeoutMs,
       count: request.count,
@@ -153,6 +177,8 @@ function normalizeToolRequest(item, index) {
     path: stringField(item.path),
     pattern: stringField(item.pattern),
     root: stringField(item.root),
+    sessionId: stringField(item.sessionId || item.session_id),
+    archiveRound: item.round === undefined ? undefined : Number(item.round),
     reason: stringField(item.reason),
     count: normalizeCount(item.count, tool),
     maxBytes: normalizeMaxBytes(item.maxBytes || item.max_bytes),
@@ -169,6 +195,8 @@ function reject(request, code, reason) {
     path: request.path,
     pattern: request.pattern,
     root: request.root,
+    sessionId: request.sessionId,
+    archiveRound: request.archiveRound,
     reason: request.reason,
     round: request.round,
     source_agent_id: request.source_agent_id,
@@ -189,6 +217,8 @@ function resultRecord(request, extra) {
     path: request.path,
     pattern: request.pattern,
     root: request.root,
+    sessionId: request.sessionId,
+    archiveRound: request.archiveRound,
     reason: request.reason,
     round: request.round,
     source_agent_id: request.source_agent_id,
@@ -229,6 +259,8 @@ function toolEvent(type, request, extra = {}) {
     path: request.path,
     pattern: request.pattern,
     root: request.root,
+    sessionId: request.sessionId,
+    archiveRound: request.archiveRound,
     createdAt: nowIso(),
     ...extra
   };
@@ -252,6 +284,14 @@ function summarizeToolResult(record = {}) {
   if (record.tool === "search_context") {
     return { query: record.query, source: result.source, results: result.results?.length || 0 };
   }
+  if (record.tool === "load_context") {
+    return {
+      sessionId: record.sessionId,
+      round: record.archiveRound,
+      sourceType: result.sourceType,
+      truncated: result.truncated
+    };
+  }
   if (record.tool === "fetch_url") {
     return { url: safeUrlForEvent(record.url), title: result.title || "", bytes: result.bytes };
   }
@@ -274,6 +314,8 @@ function appendToolAuditLog(groupPath, action, item) {
       source_agent_id: item.source_agent_id,
       source_agent_name: item.source_agent_name,
       path: item.path,
+      sessionId: item.sessionId,
+      archiveRound: item.archiveRound,
       query: item.query,
       url: safeUrlForEvent(item.url),
       resultSummary: summarizeToolResult(item),

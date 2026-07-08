@@ -94,6 +94,43 @@ test("context search tool reads public archive snippets only", async () => {
   assert.equal(result.events.some((event) => event.type === "tool_success" && event.tool === "search_context"), true);
 });
 
+test("context load tool reads a public archived round", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-context-load-tool-"));
+  writeContextArchive({
+    id: "session_context_load_tool_1",
+    question: "Earlier load context tool.",
+    createdAt: "2026-07-08T10:00:00.000Z",
+    completedAt: "2026-07-08T10:01:00.000Z",
+    status: "completed",
+    messages: [
+      {
+        round: 2,
+        agentId: "reader",
+        agentName: "Reader",
+        response: { status: "speak", argument: "LOAD_TOOL_PUBLIC_FACT is public archive content." }
+      }
+    ],
+    finalDecision: { final_state: "ready_to_execute", answer: "Stored." }
+  }, tmp);
+
+  const result = await executeToolRequests({
+    permissionTier: "tool",
+    groupPath: tmp,
+    agent: { id: "reader", name: "Reader" },
+    round: 1,
+    requests: [
+      { tool: "load_context", sessionId: "session_context_load_tool_1", round: 2, reason: "Load the matching archived round." }
+    ]
+  });
+  const payload = JSON.stringify(result.results[0].result);
+
+  assert.equal(result.accepted.length, 1);
+  assert.equal(result.results[0].status, "completed");
+  assert.equal(result.results[0].result.sourceType, "round_full");
+  assert.match(payload, /LOAD_TOOL_PUBLIC_FACT/);
+  assert.equal(result.events.some((event) => event.type === "tool_success" && event.tool === "load_context"), true);
+});
+
 test("controlled file tools reject path escape and secret files", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-tools-guard-"));
   fs.writeFileSync(path.join(tmp, "safe.md"), "safe", "utf8");

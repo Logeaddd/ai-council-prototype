@@ -422,6 +422,126 @@ test("context search tool requests return archived public snippets to follow-up 
   }
 });
 
+test("context load tool requests return archived public rounds to follow-up prompt", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-context-load-followup-"));
+  fs.writeFileSync(path.join(tmp, "group.json"), JSON.stringify({
+    permissions: {
+      defaultTier: "tool",
+      seatTiers: { researcher: "tool" }
+    }
+  }), "utf8");
+  writeContextArchive({
+    id: "session_context_load_runtime_1",
+    question: "Earlier context load task.",
+    createdAt: "2026-07-08T10:00:00.000Z",
+    completedAt: "2026-07-08T10:01:00.000Z",
+    status: "completed",
+    messages: [
+      {
+        round: 3,
+        agentId: "old",
+        agentName: "Old",
+        response: { status: "speak", argument: "LOAD_CONTEXT_RUNTIME_FACT is saved in public round three." }
+      }
+    ],
+    finalDecision: { final_state: "ready_to_execute", answer: "Archived." }
+  }, tmp);
+  fs.mkdirSync(path.join(tmp, "members", "Old", "inbox"), { recursive: true });
+  fs.writeFileSync(path.join(tmp, "members", "Old", "inbox", "private-chat.jsonl"), "LOAD_CONTEXT_PRIVATE_RUNTIME_FACT", "utf8");
+  const requestBodies = [];
+  const server = http.createServer(async (req, res) => {
+    const body = JSON.parse(await readRequestBody(req));
+    requestBodies.push(body);
+    const prompt = JSON.stringify(body.messages || []);
+    if (prompt.includes("FinalDecision JSON object")) {
+      writeOpenAiStream(res, JSON.stringify({
+        answer: "Used loaded archived context.",
+        consensus_score: 1,
+        supporting_agents: ["Researcher"],
+        dissenting_agents: [],
+        minority_report: "",
+        risks: [],
+        next_actions: [],
+        selected_file_operation_ids: [],
+        memory_candidates: []
+      }));
+      return;
+    }
+    if (requestBodies.length === 1) {
+      writeOpenAiStream(res, JSON.stringify({
+        status: "speak",
+        argument: "I need the saved public round.",
+        tool_requests: [
+          {
+            tool: "load_context",
+            sessionId: "session_context_load_runtime_1",
+            round: 3,
+            reason: "Load the archived public round before answering."
+          }
+        ],
+        objections: [],
+        confidence: 0.5,
+        memory_candidates: []
+      }));
+      return;
+    }
+    writeOpenAiStream(res, JSON.stringify({
+      status: "speak",
+      argument: "I found LOAD_CONTEXT_RUNTIME_FACT from the loaded archive result.",
+      objections: [],
+      confidence: 0.9,
+      memory_candidates: []
+    }));
+  });
+  await listen(server);
+  const address = server.address();
+
+  try {
+    const group = validateGroupConfig({
+      id: "context-load-followup",
+      name: "Context Load Followup",
+      settings: {
+        maxRounds: 1,
+        minConsensusWeight: 1,
+        stopWhenAllSkip: true,
+        agentTimeoutMs: 3000,
+        allowSoloCouncil: true
+      },
+      agents: [
+        {
+          id: "researcher",
+          name: "Researcher",
+          role: "Researcher",
+          provider: "openai-compatible",
+          apiBaseUrl: `http://127.0.0.1:${address.port}/v1`,
+          allowUnsafePrivateNetwork: true,
+          apiKey: "secret-runtime-key",
+          model: "context-load-model",
+          weight: 1,
+          enabled: true
+        }
+      ]
+    });
+    const events = [];
+    let result;
+    for await (const event of runCouncilEvents("Use loaded archive context.", group, tmp, { groupPath: tmp })) {
+      events.push(event);
+      if (event.type === "done") result = event.result;
+    }
+    const followupPrompt = JSON.stringify(requestBodies[1]?.messages || []);
+
+    assert.equal(result.session.toolExecutionResults.length, 1);
+    assert.equal(result.session.toolExecutionResults[0].tool, "load_context");
+    assert.equal(result.session.toolExecutionResults[0].status, "completed");
+    assert.match(followupPrompt, /LOAD_CONTEXT_RUNTIME_FACT/);
+    assert.doesNotMatch(followupPrompt, /LOAD_CONTEXT_PRIVATE_RUNTIME_FACT/);
+    assert.ok(events.some((event) => event.type === "tool_start" && event.tool === "load_context"));
+    assert.ok(events.some((event) => event.type === "tool_success" && event.tool === "load_context"));
+  } finally {
+    await close(server);
+  }
+});
+
 test("group model call trace records prompt and output summaries without api keys", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-model-trace-"));
   const server = http.createServer(async (req, res) => {

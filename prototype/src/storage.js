@@ -105,6 +105,41 @@ export function readSessionContextArchive(groupPath, sessionId) {
   };
 }
 
+export function loadSessionContextArchiveItem(groupPath, request = {}, options = {}) {
+  const id = requireSafeSessionId(request.sessionId || request.session_id);
+  const root = path.resolve(groupPath);
+  const sessionsDir = path.join(root, "sessions");
+  const archiveDir = path.resolve(sessionsDir, id);
+  if (archiveDir !== sessionsDir && !archiveDir.startsWith(`${sessionsDir}${path.sep}`)) {
+    throw new Error("Session archive path escapes group workspace");
+  }
+  if (!fs.existsSync(archiveDir) || !fs.statSync(archiveDir).isDirectory()) {
+    throw new Error(`Unknown session archive: ${id}`);
+  }
+
+  const round = normalizeRoundNumber(request.round);
+  const maxBytes = clampNumber(options.maxBytes || request.maxBytes || request.max_bytes || 128 * 1024, 4096, 512 * 1024);
+  const indexRecord = readSessionIndexRecords(sessionsDir).find((item) => item.sessionId === id);
+  const payload = round
+    ? {
+      source: "local_context_archive",
+      sourceType: "round_full",
+      sessionId: id,
+      round,
+      sourcePath: `sessions/${id}/round_${round}_full.json`,
+      content: readRequiredJson(path.join(archiveDir, `round_${round}_full.json`))
+    }
+    : {
+      source: "local_context_archive",
+      sourceType: "session_archive",
+      sessionId: id,
+      sourcePath: `sessions/${id}`,
+      indexRecord,
+      content: readSessionContextArchive(groupPath, id)
+    };
+  return limitArchivePayload(payload, maxBytes);
+}
+
 export function searchSessionContextArchive(groupPath, query, options = {}) {
   const terms = tokenizeSearchQuery(query);
   if (!terms.length) return [];
@@ -267,6 +302,13 @@ function readJsonIfExists(filePath) {
   return JSON.parse(fs.readFileSync(filePath, "utf8"));
 }
 
+function readRequiredJson(filePath) {
+  if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
+    throw new Error(`Unknown archive item: ${path.basename(filePath)}`);
+  }
+  return JSON.parse(fs.readFileSync(filePath, "utf8"));
+}
+
 function readSessionIndexRecords(sessionsDir) {
   const filePath = path.join(sessionsDir, "session_index.jsonl");
   if (!fs.existsSync(filePath)) return [];
@@ -399,6 +441,39 @@ function redactArchiveSearchText(value) {
     .replace(/private_memory/gi, "[private-path-redacted]")
     .replace(/members[\\/][^\\/]+[\\/]inbox/gi, "[private-path-redacted]")
     .replace(/(api[_-]?key|authorization|bearer)\s*[:=]\s*["']?[^"'\s,}]+/gi, "$1:[redacted]");
+}
+
+function limitArchivePayload(payload, maxBytes) {
+  const redactedText = redactArchiveSearchText(JSON.stringify(payload));
+  const bytes = Buffer.byteLength(redactedText, "utf8");
+  if (bytes <= maxBytes) {
+    return {
+      ok: true,
+      bytes,
+      maxBytes,
+      truncated: false,
+      ...JSON.parse(redactedText)
+    };
+  }
+  return {
+    ok: true,
+    source: payload.source,
+    sourceType: payload.sourceType,
+    sessionId: payload.sessionId,
+    round: payload.round,
+    sourcePath: payload.sourcePath,
+    bytes,
+    maxBytes,
+    truncated: true,
+    text: truncate(redactedText, maxBytes)
+  };
+}
+
+function normalizeRoundNumber(value) {
+  if (value === undefined || value === null || value === "") return 0;
+  const round = Number(value);
+  if (!Number.isInteger(round) || round < 1 || round > 1000) throw new Error("Invalid archive round");
+  return round;
 }
 
 function clampNumber(value, min, max) {

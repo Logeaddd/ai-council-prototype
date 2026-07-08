@@ -276,6 +276,8 @@ test("round prompt advertises artifacts in speak schema", () => {
   assert.match(messages[0].content, /Do not invent tool results/);
   assert.match(messages[0].content, /search saved public group history/);
   assert.match(messages[0].content, /search_context/);
+  assert.match(messages[0].content, /load_context/);
+  assert.match(messages[0].content, /sessionId and optional round/);
   assert.match(messages[0].content, /read\/list can be executed by the app/);
   assert.match(messages[0].content, /op, path, reason, expected_effect/);
   assert.match(messages[0].content, /write\/append also require content/);
@@ -307,7 +309,7 @@ test("text-only workspace round prompt does not ask the member to propose file_o
   });
 
   assert.match(messages[0].content, /text-only file permission/);
-  assert.match(messages[0].content, /Do not request .*search_context/);
+  assert.match(messages[0].content, /Do not request .*search_context.*load_context/);
   assert.match(messages[0].content, /do not propose file_operations yourself/);
   assert.doesNotMatch(messages[0].content, /MUST propose the change in file_operations/);
 });
