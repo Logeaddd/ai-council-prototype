@@ -768,6 +768,12 @@ function summarizeContextStatus(memberContext, options = {}) {
     nonCompressibleCoreTokens: memberContext.tokenEstimate.nonCompressibleCore,
     compressionApplied: Boolean(memberContext.compression?.applied),
     droppedRecentMessages: memberContext.compression?.droppedRecentMessages || 0,
+    archiveContextCompression: memberContext.archiveContextCompression || {
+      applied: false,
+      keptCount: 0,
+      droppedCount: 0,
+      truncatedSnippets: 0
+    },
     coreOverflow: memberContext.coreOverflow,
     sizeStatus: size.status,
     sizeRatio: size.ratio,

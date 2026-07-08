@@ -4,6 +4,8 @@ import { estimateMessagesTokens, estimateTokens, hasCoreOverflow, resolveEffecti
 import { formatTaskStateForPrompt } from "./taskState.js";
 
 const DEFAULT_RECENT_MESSAGES = 6;
+const DEFAULT_ARCHIVE_CONTEXT_ITEMS = 5;
+const DEFAULT_ARCHIVE_CONTEXT_TOKENS = 900;
 
 export function buildMemberContext(agent, session, options = {}) {
   const limits = resolveEffectiveLimits(agent, options.groupSettings || {});
@@ -41,7 +43,10 @@ export function buildMemberContext(agent, session, options = {}) {
     memberShortSummary: options.memberShortSummary || "",
     groupSharedSummary: options.groupSharedSummary || "",
     continuationContext,
-    retrievedContext: normalizeRetrievedContext(options.retrievedContext),
+    retrievedContext: buildRetrievedContextPack(options.retrievedContext, {
+      maxItems: options.retrievedContextLimit || options.groupSettings?.contextArchiveInjectionLimit || options.groupSettings?.contextSearchLimit,
+      maxTokens: options.retrievedContextMaxTokens || options.groupSettings?.contextArchiveInjectionTokens
+    }),
     privateBossMessages: Array.isArray(options.privateBossMessages) ? options.privateBossMessages : []
   };
   const stableMessages = contextMessagesFromStable(stable);
@@ -84,6 +89,7 @@ export function buildMemberContext(agent, session, options = {}) {
       droppedRecentMessages: requestedRecentTranscript.length - recentTranscript.length,
       targetTokens: compressionTargetTokens(limits)
     },
+    archiveContextCompression: summaries.retrievedContext.compression,
     tokenEstimate: {
       ...tokenEstimate,
       nonCompressibleCore: nonCompressibleCoreTokens,
@@ -268,33 +274,145 @@ function contextMessagesFromSummaries(summaries) {
   ].filter((message) => message.content);
 }
 
+function buildRetrievedContextPack(items, options = {}) {
+  if (items && typeof items === "object" && Array.isArray(items.items) && items.compression) return items;
+  const maxItems = clampInteger(options.maxItems || DEFAULT_ARCHIVE_CONTEXT_ITEMS, 1, 12);
+  const maxTokens = clampInteger(options.maxTokens || DEFAULT_ARCHIVE_CONTEXT_TOKENS, 120, 4000);
+  const normalized = normalizeRetrievedContext(items)
+    .sort(compareRetrievedContextHit);
+  const deduped = dedupeRetrievedContext(normalized);
+  const kept = [];
+  let estimatedTokens = 0;
+  let truncatedSnippets = 0;
+
+  for (const item of deduped) {
+    if (kept.length >= maxItems) break;
+    let candidate = { ...item };
+    let snippetWasTrimmed = false;
+    let formatted = formatRetrievedContextItem(candidate, kept.length + 1);
+    let tokens = estimateTokens(formatted);
+    if (estimatedTokens + tokens > maxTokens) {
+      const remaining = maxTokens - estimatedTokens - estimateTokens(formatRetrievedContextItem({ ...candidate, snippet: "" }, kept.length + 1));
+      if (remaining <= 40) continue;
+      const trimmed = trimTextToEstimatedTokens(candidate.snippet, remaining);
+      if (!trimmed || trimmed === candidate.snippet) continue;
+      candidate = { ...candidate, snippet: trimmed, snippetTruncated: true };
+      snippetWasTrimmed = true;
+      formatted = formatRetrievedContextItem(candidate, kept.length + 1);
+      tokens = estimateTokens(formatted);
+      if (estimatedTokens + tokens > maxTokens && kept.length) continue;
+    }
+    kept.push(candidate);
+    if (snippetWasTrimmed) truncatedSnippets += 1;
+    estimatedTokens += tokens;
+  }
+
+  const droppedCount = Math.max(0, deduped.length - kept.length);
+  return {
+    source: "local_context_archive",
+    items: kept,
+    compression: {
+      maxItems,
+      maxTokens,
+      originalCount: normalized.length,
+      dedupedCount: deduped.length,
+      keptCount: kept.length,
+      droppedCount,
+      truncatedSnippets,
+      estimatedTokens,
+      applied: droppedCount > 0 || truncatedSnippets > 0
+    }
+  };
+}
+
 function normalizeRetrievedContext(items) {
-  return (Array.isArray(items) ? items : []).slice(0, 8).map((item) => ({
+  return (Array.isArray(items) ? items : []).slice(0, 30).map((item) => ({
     source: String(item?.source || "local_context_archive"),
     sourceType: String(item?.sourceType || ""),
     sessionId: String(item?.sessionId || ""),
     round: Number(item?.round || 0) || undefined,
     question: String(item?.question || ""),
     finalState: String(item?.finalState || ""),
-    snippet: String(item?.snippet || ""),
+    snippet: String(item?.snippet || "").trim(),
     sourcePath: String(item?.sourcePath || ""),
-    score: Number(item?.score || 0)
+    score: Number(item?.score || 0),
+    createdAt: String(item?.createdAt || ""),
+    completedAt: String(item?.completedAt || "")
   })).filter((item) => item.snippet);
 }
 
 function formatRetrievedContext(items) {
-  const normalized = normalizeRetrievedContext(items);
+  const pack = buildRetrievedContextPack(items);
+  const normalized = Array.isArray(pack.items) ? pack.items : [];
   if (!normalized.length) return [];
+  const compression = pack.compression || {};
   return [
-    "Loaded by local keyword search from saved public session archives. These are snippets with source pointers, not full source facts.",
-    ...normalized.map((item, index) => [
-      `Archive hit ${index + 1}: session=${item.sessionId || "unknown"}${item.round ? ` round=${item.round}` : ""} type=${item.sourceType || "unknown"} score=${item.score}`,
-      item.question ? `Question: ${item.question}` : "",
-      item.finalState ? `Final state: ${item.finalState}` : "",
-      item.sourcePath ? `Source path: ${item.sourcePath}` : "",
-      `Snippet: ${item.snippet}`
-    ].filter(Boolean).join("\n"))
+    "Compact snippets loaded by local keyword search from saved public session archives. These are source pointers, not full source facts. If more detail is needed, request load_context with sessionId and optional round.",
+    `Archive context budget: kept=${compression.keptCount ?? normalized.length}/${compression.dedupedCount ?? normalized.length} estimatedTokens=${compression.estimatedTokens ?? "unknown"}/${compression.maxTokens ?? "unknown"}${compression.droppedCount ? ` dropped=${compression.droppedCount}` : ""}${compression.truncatedSnippets ? ` truncated=${compression.truncatedSnippets}` : ""}.`,
+    ...normalized.map((item, index) => formatRetrievedContextItem(item, index + 1))
   ];
+}
+
+function formatRetrievedContextItem(item, index) {
+  return [
+    `Archive hit ${index}: session=${item.sessionId || "unknown"}${item.round ? ` round=${item.round}` : ""} type=${item.sourceType || "unknown"} score=${item.score}`,
+    item.question ? `Question: ${item.question}` : "",
+    item.finalState ? `Final state: ${item.finalState}` : "",
+    item.sourcePath ? `Source path: ${item.sourcePath}` : "",
+    `Snippet: ${item.snippet}${item.snippetTruncated ? " [truncated]" : ""}`
+  ].filter(Boolean).join("\n");
+}
+
+function compareRetrievedContextHit(a, b) {
+  if ((b.score || 0) !== (a.score || 0)) return (b.score || 0) - (a.score || 0);
+  return dateValue(b.completedAt || b.createdAt) - dateValue(a.completedAt || a.createdAt);
+}
+
+function dedupeRetrievedContext(items) {
+  const seen = new Set();
+  const kept = [];
+  for (const item of items) {
+    const key = [
+      item.sessionId || "unknown",
+      item.round || 0,
+      item.sourceType || "unknown",
+      item.sourcePath || item.snippet.slice(0, 80)
+    ].join("|");
+    if (seen.has(key)) continue;
+    seen.add(key);
+    kept.push(item);
+  }
+  return kept;
+}
+
+function trimTextToEstimatedTokens(text, maxTokens) {
+  const value = String(text || "").trim();
+  if (!value || estimateTokens(value) <= maxTokens) return value;
+  let low = 0;
+  let high = value.length;
+  let best = "";
+  while (low <= high) {
+    const mid = Math.floor((low + high) / 2);
+    const candidate = value.slice(0, mid).trimEnd();
+    if (estimateTokens(`${candidate}...`) <= maxTokens) {
+      best = candidate;
+      low = mid + 1;
+    } else {
+      high = mid - 1;
+    }
+  }
+  return best ? `${best}...` : "";
+}
+
+function clampInteger(value, min, max) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return min;
+  return Math.max(min, Math.min(max, Math.floor(number)));
+}
+
+function dateValue(value) {
+  const time = new Date(value || 0).getTime();
+  return Number.isFinite(time) ? time : 0;
 }
 
 function normalizeContinuationContext(value) {

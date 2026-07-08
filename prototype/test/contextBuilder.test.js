@@ -377,3 +377,59 @@ test("context prompt sections include retrieved archive snippets with source poi
   assert.match(archived, /ARCHIVE_SNIPPET_FACT/);
   assert.match(archived, /round_2_summary\.json/);
 });
+
+test("retrieved archive context is budgeted and keeps load pointers", () => {
+  const context = buildMemberContext(agent, {
+    question: "Use compact archive context.",
+    unresolvedObjections: {},
+    artifacts: [],
+    messages: []
+  }, {
+    groupSettings: {
+      contextArchiveInjectionLimit: 4,
+      contextArchiveInjectionTokens: 180
+    },
+    retrievedContext: [
+      {
+        sourceType: "round_summary",
+        sessionId: "session_budget_1",
+        round: 2,
+        question: "Budgeted archive question",
+        finalState: "ready_to_execute",
+        snippet: `HIGH_VALUE_ARCHIVE_SNIPPET ${"important detail ".repeat(200)}`,
+        sourcePath: "sessions/session_budget_1/round_2_summary.json",
+        score: 100,
+        completedAt: "2026-07-08T10:00:00.000Z"
+      },
+      {
+        sourceType: "round_summary",
+        sessionId: "session_budget_1",
+        round: 2,
+        question: "Duplicate should be removed",
+        snippet: "DUPLICATE_SHOULD_NOT_APPEAR",
+        sourcePath: "sessions/session_budget_1/round_2_summary.json",
+        score: 100
+      },
+      {
+        sourceType: "session_final",
+        sessionId: "session_budget_2",
+        question: "Lower score archive question",
+        snippet: `LOW_VALUE_ARCHIVE_SNIPPET ${"less useful ".repeat(200)}`,
+        sourcePath: "sessions/session_budget_2.json",
+        score: 1
+      }
+    ]
+  });
+  const archived = buildContextPromptSections(context).find((section) => section.title === "Relevant archived context")?.content || "";
+
+  assert.equal(context.archiveContextCompression.applied, true);
+  assert.equal(context.archiveContextCompression.dedupedCount, 2);
+  assert.equal(context.archiveContextCompression.keptCount, 1);
+  assert.equal(context.archiveContextCompression.droppedCount, 1);
+  assert.match(archived, /request load_context with sessionId and optional round/);
+  assert.match(archived, /session=session_budget_1 round=2/);
+  assert.match(archived, /Source path: sessions\/session_budget_1\/round_2_summary\.json/);
+  assert.match(archived, /HIGH_VALUE_ARCHIVE_SNIPPET/);
+  assert.doesNotMatch(archived, /DUPLICATE_SHOULD_NOT_APPEAR/);
+  assert.doesNotMatch(archived, /LOW_VALUE_ARCHIVE_SNIPPET/);
+});

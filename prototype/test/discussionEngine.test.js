@@ -3695,6 +3695,72 @@ test("saved public archive snippets are retrieved and injected into later prompt
   assert.doesNotMatch(roundPrompt, /private-chat\.jsonl/);
 });
 
+test("archive retrieval injection exposes compression status", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-archive-budget-status-"));
+  for (let index = 1; index <= 3; index += 1) {
+    writeContextArchive({
+      id: `session_archive_budget_${index}`,
+      question: "Please continue budgeted archive work.",
+      createdAt: `2026-07-08T10:0${index}:00.000Z`,
+      completedAt: `2026-07-08T10:0${index}:20.000Z`,
+      status: "completed",
+      messages: [
+        {
+          round: 1,
+          agentId: "builder",
+          agentName: "Builder",
+          response: {
+            status: "speak",
+            argument: `BUDGET_STATUS_ARCHIVE_${index} ${"long archived context ".repeat(160)}`
+          },
+          createdAt: `2026-07-08T10:0${index}:10.000Z`
+        }
+      ],
+      finalDecision: {
+        final_state: "ready_to_execute",
+        answer: `Budget archive ${index}.`
+      }
+    }, tmp);
+  }
+
+  const group = validateGroupConfig({
+    id: "archive-budget-status",
+    name: "Archive Budget Status",
+    settings: {
+      maxRounds: 1,
+      minConsensusWeight: 1,
+      stopWhenAllSkip: true,
+      agentTimeoutMs: 1000,
+      allowSoloCouncil: true,
+      contextSearchLimit: 3,
+      contextArchiveInjectionTokens: 180
+    },
+    agents: [
+      {
+        id: "builder",
+        name: "Builder",
+        role: "Builder",
+        provider: "mock",
+        apiBaseUrl: "mock://local",
+        model: "mock-builder",
+        weight: 1,
+        enabled: true
+      }
+    ]
+  });
+
+  const events = [];
+  for await (const event of runCouncilEvents("Please continue budgeted archive work.", group, tmp, { groupPath: tmp })) {
+    events.push(event);
+  }
+  const start = events.find((event) => event.type === "agent_start");
+
+  assert.equal(start.contextStatus.archiveContextCompression.applied, true);
+  assert.equal(start.contextStatus.archiveContextCompression.maxTokens, 180);
+  assert.ok(start.contextStatus.archiveContextCompression.droppedCount > 0);
+  assert.ok(start.contextStatus.archiveContextCompression.keptCount > 0);
+});
+
 test("read/list file operations are executed and returned in later model context", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-read-list-runtime-"));
   const groupPath = path.join(tmp, "group");
