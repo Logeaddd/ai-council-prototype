@@ -152,86 +152,70 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
       }
 
       const fileOperationPermissionTier = effectiveWorkspacePermissionTier(workspaceGroup, agent);
-      const messages = buildRoundPrompt(agent, question, session, round, {
+      const promptOptions = {
         globalRequirement,
         resumeInstruction: options.startAtAgentId === agent.id ? options.resumeInstruction : "",
-        contextSections: buildContextPromptSections(memberContext),
         fileOperationContext: Boolean(options.groupPath),
         fileOperationPermissionTier,
         groupSettings: group.settings,
         independentAnswerMode: transcriptVisibility === "own",
         hideOpenObjectionLedger: transcriptVisibility === "own"
+      };
+      const messages = buildRoundPrompt(agent, question, session, round, {
+        ...promptOptions,
+        contextSections: buildContextPromptSections(memberContext)
       });
-      const modelCallRecord = notifyModelCall(options, {
-        sessionId: session.id,
+      let callOutcome = yield* callRoundModel({
+        options,
+        session,
         phase: "round",
         round,
-        agentId: agent.id,
-        agentName: agent.name,
-        model: agent.model || "",
-        provider: agent.provider || "",
-        inputMessages: messages
-      });
-      const streamingCall = startAgentCallWithDeltaQueue(agent, messages, group.settings.agentTimeoutMs, options.signal);
-      while (!streamingCall.done() || streamingCall.hasDeltas()) {
-        const delta = await streamingCall.nextDelta();
-        if (!delta) continue;
-        yield {
-          type: "agent_delta",
-          round,
-          agentId: agent.id,
-          agentName: agent.name,
-          delta,
-          createdAt: nowIso()
-        };
-      }
-      const rawText = await streamingCall.result();
-      completeModelCall(modelCallRecord, rawText);
-      let response = rawText.error
-        ? { status: "unavailable", reason: rawText.error, retryable: true }
-        : parseRoundResponse(rawText.text);
-      let rawTextForMessage = rawText.error ? "" : rawText.text;
-      let errorForMessage = rawText.error;
-
-      if (round === 1 && isReviewerLike(agent) && response.status === "skip") {
-        response = {
-          status: "speak",
-          position: "reviewer_required",
-          argument: "An explicitly assigned reviewer cannot skip in round 1.",
-          objections: ["reviewer_required"],
-          suggested_revision: "Provide at least one concrete in-scope risk or explicitly state what was checked.",
-          confidence: 0,
-          memory_candidates: []
-        };
-      }
-
-      const toolResult = await executeToolRequests({
-        requests: response.tool_requests || [],
-        permissionTier: fileOperationPermissionTier,
         agent,
-        round,
-        timeoutMs: group.settings.toolTimeoutMs || 12000,
-        groupPath: options.groupPath,
-        importedProjectRoots,
-        appSettings: options.appSettings,
-        searchApiKey: options.searchApiKey,
-        signal: options.signal
+        messages,
+        timeoutMs: group.settings.agentTimeoutMs
       });
-      session.toolRequests.push(...toolResult.accepted);
-      session.toolExecutionResults.push(...toolResult.results);
-      session.rejectedToolRequests.push(...toolResult.rejected);
-      for (const event of toolResult.events || []) {
-        yield event;
-      }
+      let response = applyRoundResponseRules(callOutcome.response, agent, round);
+      let rawTextForMessage = callOutcome.rawTextForMessage;
+      let errorForMessage = callOutcome.errorForMessage;
+      const accumulatedToolRequests = [];
+      const accumulatedToolResults = [];
+      const accumulatedRejectedToolRequests = [];
+      const maxToolIterations = normalizeMaxToolIterations(group.settings.maxToolIterations);
+      let toolIterations = 0;
 
-      if (toolResult.results.length && response.status === "speak") {
+      while (response.status === "speak" && response.tool_requests?.length && toolIterations < maxToolIterations) {
+        toolIterations += 1;
+        const toolResult = await executeToolRequests({
+          requests: response.tool_requests || [],
+          permissionTier: fileOperationPermissionTier,
+          agent,
+          round,
+          timeoutMs: group.settings.toolTimeoutMs || 12000,
+          groupPath: options.groupPath,
+          importedProjectRoots,
+          appSettings: options.appSettings,
+          searchApiKey: options.searchApiKey,
+          signal: options.signal
+        });
+        accumulatedToolRequests.push(...toolResult.accepted);
+        accumulatedToolResults.push(...toolResult.results);
+        accumulatedRejectedToolRequests.push(...toolResult.rejected);
+        session.toolRequests.push(...toolResult.accepted);
+        session.toolExecutionResults.push(...toolResult.results);
+        session.rejectedToolRequests.push(...toolResult.rejected);
+        for (const event of toolResult.events || []) {
+          yield event;
+        }
+
+        if (!toolResult.results.length) break;
+
         const followupContext = buildMemberContext(agent, session, {
           question,
           groupSettings: group.settings,
           globalRequirement,
           continuationContext,
           transcriptVisibility,
-          latestBossInstruction: "Tool results from your previous request are now available in context. Use the real tool results to finish this round. Do not repeat a tool request unless new external information is still required.",
+          latestBossInstruction: "Tool results from your previous request are now available in context. Use the real tool results to continue this round. Request another tool only when a real next step still requires it; otherwise finish with speak or skip JSON.",
           attachments,
           taskState,
           retrievedContext,
@@ -239,56 +223,32 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
           privateBossMessages: loadPrivateBossMessages(options.groupPath, agent)
         });
         const followupMessages = buildRoundPrompt(agent, question, session, round, {
-          globalRequirement,
-          resumeInstruction: "Tool results have been returned by the app. Finish this round with speak or skip JSON.",
+          ...promptOptions,
+          resumeInstruction: "Tool results have been returned by the app. Continue if another real tool step is needed; otherwise finish this round with speak or skip JSON.",
           contextSections: buildContextPromptSections(followupContext),
-          fileOperationContext: Boolean(options.groupPath),
-          fileOperationPermissionTier,
-          groupSettings: group.settings,
-          independentAnswerMode: transcriptVisibility === "own",
-          hideOpenObjectionLedger: transcriptVisibility === "own"
         });
-        const followupRecord = notifyModelCall(options, {
-          sessionId: session.id,
+        callOutcome = yield* callRoundModel({
+          options,
+          session,
           phase: "tool_followup",
           round,
-          agentId: agent.id,
-          agentName: agent.name,
-          model: agent.model || "",
-          provider: agent.provider || "",
-          inputMessages: followupMessages
+          agent,
+          messages: followupMessages,
+          timeoutMs: group.settings.agentTimeoutMs,
+          toolIteration: toolIterations
         });
-        const followupCall = startAgentCallWithDeltaQueue(agent, followupMessages, group.settings.agentTimeoutMs, options.signal);
-        while (!followupCall.done() || followupCall.hasDeltas()) {
-          const delta = await followupCall.nextDelta();
-          if (!delta) continue;
-          yield {
-            type: "agent_delta",
-            round,
-            agentId: agent.id,
-            agentName: agent.name,
-            delta,
-            createdAt: nowIso()
-          };
-        }
-        const followupRaw = await followupCall.result();
-        completeModelCall(followupRecord, followupRaw);
-        response = followupRaw.error
-          ? { status: "unavailable", reason: followupRaw.error, retryable: true }
-          : parseRoundResponse(followupRaw.text);
-        rawTextForMessage = followupRaw.error ? "" : followupRaw.text;
-        errorForMessage = followupRaw.error;
-        if (round === 1 && isReviewerLike(agent) && response.status === "skip") {
-          response = {
-            status: "speak",
-            position: "reviewer_required",
-            argument: "An explicitly assigned reviewer cannot skip in round 1.",
-            objections: ["reviewer_required"],
-            suggested_revision: "Provide at least one concrete in-scope risk or explicitly state what was checked.",
-            confidence: 0,
-            memory_candidates: []
-          };
-        }
+        response = applyRoundResponseRules(callOutcome.response, agent, round);
+        rawTextForMessage = callOutcome.rawTextForMessage;
+        errorForMessage = callOutcome.errorForMessage;
+      }
+
+      if (response.status === "speak" && response.tool_requests?.length && toolIterations >= maxToolIterations) {
+        response = {
+          status: "unavailable",
+          reason: `tool_iteration_limit_exceeded:${maxToolIterations}`,
+          retryable: true
+        };
+        errorForMessage = response.reason;
       }
 
       const artifacts = collectMessageArtifacts(response, agent, round);
@@ -312,9 +272,9 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
         artifacts,
         fileOperationProposals: fileOperationResult.accepted,
         fileOperationExecutionResults: readListResults,
-        toolRequests: toolResult.accepted,
-        toolExecutionResults: toolResult.results,
-        rejectedToolRequests: toolResult.rejected,
+        toolRequests: accumulatedToolRequests,
+        toolExecutionResults: accumulatedToolResults,
+        rejectedToolRequests: accumulatedRejectedToolRequests,
         pendingFileOperationProposals: queueResult.queued,
         rejectedFileOperationProposals: [...fileOperationResult.rejected, ...queueResult.rejected],
         displayText: formatDisplayText(agent, response),
@@ -472,6 +432,63 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
     result,
     createdAt: nowIso()
   };
+}
+
+async function* callRoundModel({ options, session, phase, round, agent, messages, timeoutMs, toolIteration }) {
+  const modelCallRecord = notifyModelCall(options, {
+    sessionId: session.id,
+    phase,
+    round,
+    toolIteration,
+    agentId: agent.id,
+    agentName: agent.name,
+    model: agent.model || "",
+    provider: agent.provider || "",
+    inputMessages: messages
+  });
+  const streamingCall = startAgentCallWithDeltaQueue(agent, messages, timeoutMs, options.signal);
+  while (!streamingCall.done() || streamingCall.hasDeltas()) {
+    const delta = await streamingCall.nextDelta();
+    if (!delta) continue;
+    yield {
+      type: "agent_delta",
+      round,
+      agentId: agent.id,
+      agentName: agent.name,
+      delta,
+      createdAt: nowIso()
+    };
+  }
+  const raw = await streamingCall.result();
+  completeModelCall(modelCallRecord, raw);
+  return {
+    response: raw.error
+      ? { status: "unavailable", reason: raw.error, retryable: true }
+      : parseRoundResponse(raw.text),
+    rawTextForMessage: raw.error ? "" : raw.text,
+    errorForMessage: raw.error
+  };
+}
+
+function applyRoundResponseRules(response, agent, round) {
+  if (round === 1 && isReviewerLike(agent) && response.status === "skip") {
+    return {
+      status: "speak",
+      position: "reviewer_required",
+      argument: "An explicitly assigned reviewer cannot skip in round 1.",
+      objections: ["reviewer_required"],
+      suggested_revision: "Provide at least one concrete in-scope risk or explicitly state what was checked.",
+      confidence: 0,
+      memory_candidates: []
+    };
+  }
+  return response;
+}
+
+function normalizeMaxToolIterations(value) {
+  const number = Number.parseInt(String(value), 10);
+  if (!Number.isFinite(number)) return 4;
+  return Math.min(8, Math.max(0, number));
 }
 
 function notifyModelCall(options = {}, record = {}) {

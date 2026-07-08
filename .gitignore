@@ -52,6 +52,7 @@ dist/
 prototype/dist-installer/
 prototype/新议会组/
 _review_shots/
+.codex-code-index/
 coverage/
 *.tmp
 *.bak

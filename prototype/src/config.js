@@ -45,6 +45,7 @@ export function validateGroupConfig(group) {
     stopWhenAllSkip: true,
     agentTimeoutMs: 900000,
     toolTimeoutMs: 12000,
+    maxToolIterations: 4,
     contextSearchLimit: 5,
     contextArchiveInjectionLimit: 5,
     contextArchiveInjectionTokens: 900,
@@ -58,6 +59,7 @@ export function validateGroupConfig(group) {
   group.settings.contextArchiveInjectionLimit = clampInteger(group.settings.contextArchiveInjectionLimit, 1, 12, 5);
   group.settings.contextArchiveInjectionTokens = clampInteger(group.settings.contextArchiveInjectionTokens, 120, 4000, 900);
   group.settings.recentMessageLimit = clampInteger(group.settings.recentMessageLimit, 0, 30, 6);
+  group.settings.maxToolIterations = clampInteger(group.settings.maxToolIterations, 0, 8, 4);
 
   return group;
 }

@@ -305,6 +305,210 @@ test("file tool requests emit events and return file content to the same member 
   }
 });
 
+test("tool requests can run in multiple real iterations before the member answers", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-tool-chain-"));
+  fs.writeFileSync(path.join(tmp, "group.json"), JSON.stringify({
+    permissions: {
+      defaultTier: "tool",
+      seatTiers: { researcher: "tool" }
+    }
+  }), "utf8");
+  fs.writeFileSync(path.join(tmp, "brief.md"), [
+    "CHAIN_FIRST_FACT: read this first.",
+    "CHAIN_SECOND_FACT: grep this after reading."
+  ].join("\n"), "utf8");
+  const requestBodies = [];
+  const server = http.createServer(async (req, res) => {
+    const body = JSON.parse(await readRequestBody(req));
+    requestBodies.push(body);
+    const prompt = JSON.stringify(body.messages || []);
+    if (prompt.includes("FinalDecision JSON object")) {
+      writeOpenAiStream(res, JSON.stringify({
+        answer: "Both real tool results were used.",
+        consensus_score: 1,
+        supporting_agents: ["Researcher"],
+        dissenting_agents: [],
+        minority_report: "",
+        risks: [],
+        next_actions: [],
+        selected_file_operation_ids: [],
+        memory_candidates: []
+      }));
+      return;
+    }
+    if (requestBodies.length === 1) {
+      writeOpenAiStream(res, JSON.stringify({
+        status: "speak",
+        argument: "I need to read the brief first.",
+        tool_requests: [
+          {
+            tool: "read_file",
+            path: "brief.md",
+            reason: "Read the local brief before deciding the next step."
+          }
+        ],
+        objections: [],
+        confidence: 0.5,
+        memory_candidates: []
+      }));
+      return;
+    }
+    if (requestBodies.length === 2) {
+      assert.match(prompt, /CHAIN_FIRST_FACT/);
+      writeOpenAiStream(res, JSON.stringify({
+        status: "speak",
+        argument: "I saw the first fact and now need to grep the second one.",
+        tool_requests: [
+          {
+            tool: "grep_content",
+            path: ".",
+            query: "CHAIN_SECOND_FACT",
+            reason: "Verify the second fact with a second real tool step."
+          }
+        ],
+        objections: [],
+        confidence: 0.6,
+        memory_candidates: []
+      }));
+      return;
+    }
+    assert.match(prompt, /CHAIN_SECOND_FACT/);
+    writeOpenAiStream(res, JSON.stringify({
+      status: "speak",
+      argument: "I used CHAIN_FIRST_FACT and CHAIN_SECOND_FACT from real tool results.",
+      objections: [],
+      confidence: 0.9,
+      memory_candidates: []
+    }));
+  });
+  await listen(server);
+  const address = server.address();
+
+  try {
+    const group = validateGroupConfig({
+      id: "tool-chain",
+      name: "Tool Chain",
+      settings: {
+        maxRounds: 1,
+        maxToolIterations: 4,
+        minConsensusWeight: 1,
+        stopWhenAllSkip: true,
+        agentTimeoutMs: 3000,
+        allowSoloCouncil: true
+      },
+      agents: [
+        {
+          id: "researcher",
+          name: "Researcher",
+          role: "Researcher",
+          provider: "openai-compatible",
+          apiBaseUrl: `http://127.0.0.1:${address.port}/v1`,
+          allowUnsafePrivateNetwork: true,
+          apiKey: "secret-runtime-key",
+          model: "tool-chain-model",
+          weight: 1,
+          enabled: true
+        }
+      ]
+    });
+    const result = await runCouncil("Use multiple tools if needed.", group, tmp, { groupPath: tmp });
+
+    assert.equal(requestBodies.length, 4);
+    assert.equal(result.session.toolExecutionResults.length, 2);
+    assert.deepEqual(result.session.toolExecutionResults.map((item) => item.tool), ["read_file", "grep_content"]);
+    assert.equal(result.session.messages[0].toolExecutionResults.length, 2);
+    assert.match(result.session.messages[0].response.argument, /CHAIN_FIRST_FACT/);
+    assert.match(result.session.messages[0].response.argument, /CHAIN_SECOND_FACT/);
+  } finally {
+    await close(server);
+  }
+});
+
+test("repeated tool requests stop at the configured iteration limit without fake success", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-tool-loop-limit-"));
+  fs.writeFileSync(path.join(tmp, "group.json"), JSON.stringify({
+    permissions: {
+      defaultTier: "tool",
+      seatTiers: { looper: "tool" }
+    }
+  }), "utf8");
+  fs.writeFileSync(path.join(tmp, "brief.md"), "LOOP_LIMIT_FACT", "utf8");
+  const requestBodies = [];
+  const server = http.createServer(async (req, res) => {
+    const body = JSON.parse(await readRequestBody(req));
+    requestBodies.push(body);
+    const prompt = JSON.stringify(body.messages || []);
+    if (prompt.includes("FinalDecision JSON object")) {
+      writeOpenAiStream(res, JSON.stringify({
+        answer: "The member hit the tool loop limit.",
+        consensus_score: 0,
+        supporting_agents: [],
+        dissenting_agents: ["Looper"],
+        minority_report: "Tool loop limit hit.",
+        risks: ["tool_iteration_limit_exceeded"],
+        next_actions: [],
+        selected_file_operation_ids: [],
+        memory_candidates: []
+      }));
+      return;
+    }
+    writeOpenAiStream(res, JSON.stringify({
+      status: "speak",
+      argument: "I keep asking for the same tool.",
+      tool_requests: [
+        {
+          tool: "read_file",
+          path: "brief.md",
+          reason: "Repeat the same tool request."
+        }
+      ],
+      objections: [],
+      confidence: 0.2,
+      memory_candidates: []
+    }));
+  });
+  await listen(server);
+  const address = server.address();
+
+  try {
+    const group = validateGroupConfig({
+      id: "tool-loop-limit",
+      name: "Tool Loop Limit",
+      settings: {
+        maxRounds: 1,
+        maxToolIterations: 2,
+        minConsensusWeight: 1,
+        stopWhenAllSkip: true,
+        agentTimeoutMs: 3000,
+        allowSoloCouncil: true
+      },
+      agents: [
+        {
+          id: "looper",
+          name: "Looper",
+          role: "Looper",
+          provider: "openai-compatible",
+          apiBaseUrl: `http://127.0.0.1:${address.port}/v1`,
+          allowUnsafePrivateNetwork: true,
+          apiKey: "secret-runtime-key",
+          model: "tool-loop-model",
+          weight: 1,
+          enabled: true
+        }
+      ]
+    });
+    const result = await runCouncil("Do not loop forever.", group, tmp, { groupPath: tmp });
+
+    assert.equal(requestBodies.length, 4);
+    assert.equal(result.session.toolExecutionResults.length, 2);
+    assert.equal(result.session.messages[0].response.status, "unavailable");
+    assert.equal(result.session.messages[0].response.reason, "tool_iteration_limit_exceeded:2");
+    assert.equal(result.session.messages[0].toolExecutionResults.length, 2);
+  } finally {
+    await close(server);
+  }
+});
+
 test("context search tool requests return archived public snippets to follow-up prompt", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-context-tool-followup-"));
   fs.writeFileSync(path.join(tmp, "group.json"), JSON.stringify({
