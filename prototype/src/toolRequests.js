@@ -1,6 +1,7 @@
 import { makeId, nowIso } from "./types.js";
 import { fetchPublicUrl, searchWeb } from "./webTools.js";
 import { executeFileTool } from "./fileTools.js";
+import { extractArchiveTool } from "./archiveTools.js";
 import { loadSessionContextArchiveItem, searchSessionContextArchive } from "./storage.js";
 import fs from "node:fs";
 import path from "node:path";
@@ -13,10 +14,13 @@ const ALLOWED_TOOLS = new Set([
   "search_files",
   "grep_content",
   "search_context",
-  "load_context"
+  "load_context",
+  "extract_archive"
 ]);
 const FILE_TOOLS = new Set(["list_directory", "read_file", "search_files", "grep_content"]);
 const CONTEXT_TOOLS = new Set(["search_context", "load_context"]);
+const ARCHIVE_TOOLS = new Set(["extract_archive"]);
+const FULL_PERMISSION_TOOLS = new Set(["extract_archive"]);
 
 export function normalizeToolRequests(value) {
   if (!Array.isArray(value)) return [];
@@ -46,7 +50,7 @@ export async function executeToolRequests(options = {}) {
     };
 
     if (!ALLOWED_TOOLS.has(normalized.tool)) {
-      const rejection = reject(base, "invalid_tool", "Tool must be one of web_search, fetch_url, list_directory, read_file, search_files, grep_content, search_context, load_context.");
+      const rejection = reject(base, "invalid_tool", "Tool must be one of web_search, fetch_url, list_directory, read_file, search_files, grep_content, search_context, load_context, extract_archive.");
       rejected.push(rejection);
       events.push(toolEvent("tool_failure", base, { status: "rejected", code: rejection.code, error: rejection.error }));
       appendToolAuditLog(options.groupPath, "rejected", rejection);
@@ -54,6 +58,13 @@ export async function executeToolRequests(options = {}) {
     }
     if (permissionTier === "text") {
       const rejection = reject(base, "permission_denied", "Seat has text-only permission and cannot use tools.");
+      rejected.push(rejection);
+      events.push(toolEvent("tool_failure", base, { status: "rejected", code: rejection.code, error: rejection.error }));
+      appendToolAuditLog(options.groupPath, "rejected", rejection);
+      continue;
+    }
+    if (FULL_PERMISSION_TOOLS.has(normalized.tool) && permissionTier !== "full") {
+      const rejection = reject(base, "permission_denied", `${normalized.tool} writes files and requires full permission.`);
       rejected.push(rejection);
       events.push(toolEvent("tool_failure", base, { status: "rejected", code: rejection.code, error: rejection.error }));
       appendToolAuditLog(options.groupPath, "rejected", rejection);
@@ -146,6 +157,15 @@ async function executeOne(request, options) {
       });
       return resultRecord(request, { status: "completed", result });
     }
+    if (request.tool === "extract_archive") {
+      const result = extractArchiveTool(request, {
+        groupPath: options.groupPath,
+        maxArchiveEntries: options.maxArchiveEntries,
+        maxArchiveFileBytes: options.maxArchiveFileBytes,
+        maxArchiveTotalBytes: options.maxArchiveTotalBytes
+      });
+      return resultRecord(request, { status: "completed", result });
+    }
     const result = await searchWeb(request.query, {
       timeoutMs: options.timeoutMs,
       count: request.count,
@@ -175,10 +195,12 @@ function normalizeToolRequest(item, index) {
     query: stringField(item.query),
     url: stringField(item.url),
     path: stringField(item.path),
+    destination: stringField(item.destination || item.destinationPath || item.outputPath || item.dest),
     pattern: stringField(item.pattern),
     root: stringField(item.root),
     sessionId: stringField(item.sessionId || item.session_id),
     archiveRound: item.round === undefined ? undefined : Number(item.round),
+    overwrite: Boolean(item.overwrite),
     reason: stringField(item.reason),
     count: normalizeCount(item.count, tool),
     maxBytes: normalizeMaxBytes(item.maxBytes || item.max_bytes),
@@ -193,10 +215,12 @@ function reject(request, code, reason) {
     query: request.query,
     url: request.url,
     path: request.path,
+    destination: request.destination,
     pattern: request.pattern,
     root: request.root,
     sessionId: request.sessionId,
     archiveRound: request.archiveRound,
+    overwrite: request.overwrite,
     reason: request.reason,
     round: request.round,
     source_agent_id: request.source_agent_id,
@@ -215,10 +239,12 @@ function resultRecord(request, extra) {
     query: request.query,
     url: request.url,
     path: request.path,
+    destination: request.destination,
     pattern: request.pattern,
     root: request.root,
     sessionId: request.sessionId,
     archiveRound: request.archiveRound,
+    overwrite: request.overwrite,
     reason: request.reason,
     round: request.round,
     source_agent_id: request.source_agent_id,
@@ -235,7 +261,8 @@ function stringField(value) {
 
 function normalizeCount(value, tool) {
   const count = Number(value);
-  if (!Number.isFinite(count)) return FILE_TOOLS.has(tool) ? undefined : 5;
+  if (!Number.isFinite(count)) return FILE_TOOLS.has(tool) || ARCHIVE_TOOLS.has(tool) ? undefined : 5;
+  if (ARCHIVE_TOOLS.has(tool)) return Math.max(1, Math.min(1000, Math.floor(count)));
   const max = FILE_TOOLS.has(tool) ? 300 : CONTEXT_TOOLS.has(tool) ? 20 : 8;
   return Math.max(1, Math.min(max, Math.floor(count)));
 }
@@ -257,10 +284,12 @@ function toolEvent(type, request, extra = {}) {
     query: request.query,
     url: safeUrlForEvent(request.url),
     path: request.path,
+    destination: request.destination,
     pattern: request.pattern,
     root: request.root,
     sessionId: request.sessionId,
     archiveRound: request.archiveRound,
+    overwrite: request.overwrite,
     createdAt: nowIso(),
     ...extra
   };
@@ -292,6 +321,15 @@ function summarizeToolResult(record = {}) {
       truncated: result.truncated
     };
   }
+  if (record.tool === "extract_archive") {
+    return {
+      archivePath: result.archivePath,
+      destinationPath: result.destinationPath,
+      extracted: result.extracted?.length || 0,
+      skipped: result.skipped?.length || 0,
+      totalBytes: result.totalBytes || 0
+    };
+  }
   if (record.tool === "fetch_url") {
     return { url: safeUrlForEvent(record.url), title: result.title || "", bytes: result.bytes };
   }
@@ -314,6 +352,7 @@ function appendToolAuditLog(groupPath, action, item) {
       source_agent_id: item.source_agent_id,
       source_agent_name: item.source_agent_name,
       path: item.path,
+      destination: item.destination,
       sessionId: item.sessionId,
       archiveRound: item.archiveRound,
       query: item.query,

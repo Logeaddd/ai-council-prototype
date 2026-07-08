@@ -9,12 +9,15 @@ test("capability registry reports web search as unconfigured without a real key"
   const capabilities = listCapabilities({ env: {} });
   const search = capabilities.find((item) => item.id === "web-search");
   const fetchUrl = capabilities.find((item) => item.id === "fetch-url");
+  const extractArchive = capabilities.find((item) => item.id === "extract-archive");
 
   assert.equal(search.status, "needs_config");
   assert.equal(search.enabled, false);
   assert.match(search.requirement, /BRAVE_SEARCH_API_KEY/);
   assert.equal(fetchUrl.status, "ready");
   assert.equal(fetchUrl.enabled, true);
+  assert.equal(extractArchive.status, "ready");
+  assert.match(extractArchive.requirement, /full permission/);
 });
 
 test("capability registry accepts a locally stored search key", () => {

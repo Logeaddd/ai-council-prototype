@@ -35,6 +35,16 @@ export function listCapabilities(options = {}) {
       requirement: "Requires tool or full permission and an imported group workspace."
     },
     {
+      id: "extract-archive",
+      label: "Extract ZIP",
+      kind: "tool",
+      status: "ready",
+      enabled: true,
+      provider: "built-in",
+      source: "local_server",
+      requirement: "Requires full permission. Only .zip files inside the group workspace are extracted."
+    },
+    {
       id: "public-memory",
       label: "公共记忆",
       kind: "memory",

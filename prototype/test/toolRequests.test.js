@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import zlib from "node:zlib";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { executeFileTool, extractImportedProjectRoots } from "../src/fileTools.js";
@@ -131,6 +132,67 @@ test("context load tool reads a public archived round", async () => {
   assert.equal(result.events.some((event) => event.type === "tool_success" && event.tool === "load_context"), true);
 });
 
+test("extract_archive extracts safe zip files for full permission only", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-extract-tool-"));
+  fs.writeFileSync(path.join(tmp, "sample.zip"), makeZip([
+    { name: "docs/readme.md", content: "ZIP_PUBLIC_FACT" },
+    { name: "docs/nested/info.txt", content: "nested content" }
+  ]));
+
+  const denied = await executeToolRequests({
+    permissionTier: "tool",
+    groupPath: tmp,
+    agent: { id: "tool", name: "Tool" },
+    round: 1,
+    requests: [
+      { tool: "extract_archive", path: "sample.zip", destination: "unzipped", reason: "Extract docs." }
+    ]
+  });
+  const allowed = await executeToolRequests({
+    permissionTier: "full",
+    groupPath: tmp,
+    agent: { id: "full", name: "Full" },
+    round: 1,
+    requests: [
+      { tool: "extract_archive", path: "sample.zip", destination: "unzipped", reason: "Extract docs." }
+    ]
+  });
+
+  assert.equal(denied.accepted.length, 0);
+  assert.equal(denied.rejected[0].code, "permission_denied");
+  assert.equal(allowed.accepted.length, 1);
+  assert.equal(allowed.results[0].status, "completed");
+  assert.equal(allowed.results[0].result.extracted.length, 2);
+  assert.equal(fs.readFileSync(path.join(tmp, "unzipped", "docs", "readme.md"), "utf8"), "ZIP_PUBLIC_FACT");
+  assert.equal(allowed.events.some((event) => event.type === "tool_success" && event.tool === "extract_archive"), true);
+});
+
+test("extract_archive blocks zip slip entries", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-extract-slip-"));
+  const outside = path.join(path.dirname(tmp), "escape.txt");
+  fs.rmSync(outside, { force: true });
+  fs.writeFileSync(path.join(tmp, "slip.zip"), makeZip([
+    { name: "../escape.txt", content: "SHOULD_NOT_WRITE" },
+    { name: "safe.txt", content: "SAFE_WRITE" }
+  ]));
+
+  const result = await executeToolRequests({
+    permissionTier: "full",
+    groupPath: tmp,
+    agent: { id: "full", name: "Full" },
+    round: 1,
+    requests: [
+      { tool: "extract_archive", path: "slip.zip", destination: "out", reason: "Extract safely." }
+    ]
+  });
+
+  assert.equal(result.results[0].status, "completed");
+  assert.equal(result.results[0].result.extracted.length, 1);
+  assert.equal(result.results[0].result.skipped[0].reason, "unsafe_entry_path");
+  assert.equal(fs.existsSync(outside), false);
+  assert.equal(fs.readFileSync(path.join(tmp, "out", "safe.txt"), "utf8"), "SAFE_WRITE");
+});
+
 test("controlled file tools reject path escape and secret files", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-tools-guard-"));
   fs.writeFileSync(path.join(tmp, "safe.md"), "safe", "utf8");
@@ -208,4 +270,58 @@ function executeFileToolResult(request, groupPath) {
   } catch (error) {
     return { code: error.code, error: error.message };
   }
+}
+
+function makeZip(entries) {
+  const localParts = [];
+  const centralParts = [];
+  let offset = 0;
+  for (const entry of entries) {
+    const name = Buffer.from(entry.name, "utf8");
+    const data = Buffer.from(entry.content, "utf8");
+    const compressed = zlib.deflateRawSync(data);
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0);
+    local.writeUInt16LE(20, 4);
+    local.writeUInt16LE(0, 6);
+    local.writeUInt16LE(8, 8);
+    local.writeUInt32LE(0, 10);
+    local.writeUInt32LE(0, 14);
+    local.writeUInt32LE(compressed.length, 18);
+    local.writeUInt32LE(data.length, 22);
+    local.writeUInt16LE(name.length, 26);
+    local.writeUInt16LE(0, 28);
+    localParts.push(local, name, compressed);
+
+    const central = Buffer.alloc(46);
+    central.writeUInt32LE(0x02014b50, 0);
+    central.writeUInt16LE(20, 4);
+    central.writeUInt16LE(20, 6);
+    central.writeUInt16LE(0, 8);
+    central.writeUInt16LE(8, 10);
+    central.writeUInt32LE(0, 12);
+    central.writeUInt32LE(0, 16);
+    central.writeUInt32LE(compressed.length, 20);
+    central.writeUInt32LE(data.length, 24);
+    central.writeUInt16LE(name.length, 28);
+    central.writeUInt16LE(0, 30);
+    central.writeUInt16LE(0, 32);
+    central.writeUInt16LE(0, 34);
+    central.writeUInt16LE(0, 36);
+    central.writeUInt32LE(0, 38);
+    central.writeUInt32LE(offset, 42);
+    centralParts.push(central, name);
+    offset += local.length + name.length + compressed.length;
+  }
+  const centralDir = Buffer.concat(centralParts);
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0);
+  eocd.writeUInt16LE(0, 4);
+  eocd.writeUInt16LE(0, 6);
+  eocd.writeUInt16LE(entries.length, 8);
+  eocd.writeUInt16LE(entries.length, 10);
+  eocd.writeUInt32LE(centralDir.length, 12);
+  eocd.writeUInt32LE(offset, 16);
+  eocd.writeUInt16LE(0, 20);
+  return Buffer.concat([...localParts, centralDir, eocd]);
 }
