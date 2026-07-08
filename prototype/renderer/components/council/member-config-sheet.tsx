@@ -44,6 +44,7 @@ export function MemberConfigSheet({
     permission: Permission
     role: Role
     reviewIntensity: 1 | 2 | 3
+    reasoningEffort?: string
   }) => Promise<void> | void
   onDiscoverModels: (values: {
     providerId: string
@@ -65,6 +66,7 @@ export function MemberConfigSheet({
   const [permission, setPermission] = useState<Permission>("text")
   const [role, setRole] = useState<Role>("ordinary")
   const [intensity, setIntensity] = useState<1 | 2 | 3>(2)
+  const [reasoningEffort, setReasoningEffort] = useState("")
   const [discovered, setDiscovered] = useState<string[]>([])
   const [discoveryStatus, setDiscoveryStatus] = useState("")
   const [discovering, setDiscovering] = useState(false)
@@ -100,6 +102,7 @@ export function MemberConfigSheet({
     setPermission(member.permission)
     setRole(member.role)
     setIntensity(member.reviewIntensity)
+    setReasoningEffort(member.reasoningEffort || "")
     setDiscovered([])
     setDiscoveryStatus("")
     setHealthStatus("")
@@ -111,6 +114,7 @@ export function MemberConfigSheet({
   const keyless = Boolean(
     preset?.keyless || providerPresets.find((p) => p.id === providerId)?.keyless,
   )
+  const reasoningSupported = supportsReasoningEffort(providerId, baseUrl, model)
 
   async function save() {
     if (!member || saving) return
@@ -126,6 +130,7 @@ export function MemberConfigSheet({
         permission,
         role,
         reviewIntensity: intensity,
+        reasoningEffort,
       })
     } finally {
       setSaving(false)
@@ -318,6 +323,37 @@ export function MemberConfigSheet({
           </Field>
 
           <Field
+            label="推理强度"
+            hint={
+              reasoningSupported
+                ? "只给支持该字段的模型发送，关闭时不会发送推理参数。"
+                : "当前供应商或模型未确认支持，保存后也不会发送推理参数。"
+            }
+          >
+            <div className="grid grid-cols-4 gap-2">
+              {[
+                { value: "", label: "关闭" },
+                { value: "low", label: "低" },
+                { value: "medium", label: "中" },
+                { value: "high", label: "高" },
+              ].map((item) => (
+                <button
+                  key={item.value || "off"}
+                  onClick={() => setReasoningEffort(item.value)}
+                  className={cn(
+                    "rounded-md border px-2 py-1.5 text-[13px] transition-colors",
+                    reasoningEffort === item.value
+                      ? "border-primary/40 bg-primary/10 text-foreground"
+                      : "border-border text-muted-foreground hover:bg-accent hover:text-foreground",
+                  )}
+                >
+                  {item.label}
+                </button>
+              ))}
+            </div>
+          </Field>
+
+          <Field
             label="API 密钥"
             hint={
               keyless
@@ -444,4 +480,17 @@ function sourceLabel(source: string) {
 function roleLabel(role: Role, workMode: WorkMode) {
   if (role === "reviewer" && workMode === "independent") return "监督员"
   return ROLE_LABEL[role]
+}
+
+function supportsReasoningEffort(providerId: string, baseUrl: string, model: string) {
+  const provider = String(providerId || "").toLowerCase()
+  const url = String(baseUrl || "").toLowerCase()
+  const name = String(model || "").toLowerCase()
+  if ((provider === "openai" || url.includes("api.openai.com")) && /^(o1|o3|o4|gpt-5|gpt-oss)\b/.test(name)) {
+    return true
+  }
+  if ((provider === "anthropic" || url.includes("api.anthropic.com")) && /^claude-(3-7|4|opus-4|sonnet-4)/.test(name)) {
+    return true
+  }
+  return false
 }

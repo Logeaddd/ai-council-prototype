@@ -4,7 +4,7 @@ import { execFile } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { readAppSettings, updateAppSettings, userDataDir } from "./appSettings.js";
+import { readAppSettings, redactAppSettingsForClient, updateAppSettings, userDataDir } from "./appSettings.js";
 import { loadJson, validateGroupConfig, validateRuntimeEnv } from "./config.js";
 import { runCouncil, runCouncilEvents } from "./discussionEngine.js";
 import { approveExecutionStandards, prepareExecutionStandards, readExecutionStandards } from "./executionStandards.js";
@@ -17,8 +17,14 @@ import { appendPrivateChatMessage, readPrivateChatMessages, readPrivateContextMe
 import { listProviderPresets } from "./providerRegistry.js";
 import { discoverProviderModels, checkProviderHealth } from "./modelDiscovery.js";
 import { readUsageSnapshot } from "./usageStats.js";
+import { formatFileAttachmentsForPrompt, normalizeFileAttachments } from "./attachments.js";
 import { addMember, initGroupWorkspace, replaceMember } from "./workspaceManager.js";
 import { addReview, createRecorderDraft, finalizeDraft, listApproved, listDrafts } from "./writeFlow.js";
+import { listGroupSessions, readGroupSession } from "./storage.js";
+import { importProjectFolder } from "./projectImporter.js";
+import { deletePublicMemory, listPublicMemories, upsertPublicMemory } from "./publicMemory.js";
+import { listCapabilities } from "./capabilityRegistry.js";
+import { fetchPublicUrl, searchWeb } from "./webTools.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const baseDir = path.resolve(__dirname, "..");
@@ -78,6 +84,31 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (req.method === "GET" && url.pathname === "/api/capabilities") {
+    sendJson(res, 200, { capabilities: listCapabilities({ env: process.env, appSettings: readCurrentAppSettings() }) });
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/tools/fetch-url") {
+    const body = await readBody(req);
+    sendJson(res, 200, await fetchPublicUrl(body.url, {
+      timeoutMs: body.timeoutMs,
+      maxBytes: body.maxBytes
+    }));
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/tools/web-search") {
+    const body = await readBody(req);
+    sendJson(res, 200, await searchWeb(body.query, {
+      count: body.count,
+      timeoutMs: body.timeoutMs,
+      env: process.env,
+      appSettings: readCurrentAppSettings()
+    }));
+    return;
+  }
+
   if (req.method === "POST" && url.pathname === "/api/models/discover") {
     const body = await readBody(req);
     sendJson(res, 200, await discoverProviderModels({
@@ -112,6 +143,17 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (req.method === "GET" && url.pathname === "/api/project-folder-picker") {
+    sendJson(res, 200, await pickFolder({ description: "选择要导入的项目文件夹" }));
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/project/import") {
+    const body = await readBody(req);
+    sendJson(res, 200, importProjectFolder(body.folderPath, body.options || {}));
+    return;
+  }
+
   if (req.method === "GET" && url.pathname === "/api/group") {
     const groupPath = resolveWorkspacePath(requireQuery(url, "groupPath"), "groupPath");
     sendJson(res, 200, readJson(path.join(groupPath, "group.json")));
@@ -119,17 +161,15 @@ async function handleApi(req, res, url) {
   }
 
   if (req.method === "GET" && url.pathname === "/api/app-settings") {
-    sendJson(res, 200, readAppSettings(baseDir, { groupsRoot: defaultGroupsRoot }));
+    sendJson(res, 200, redactAppSettingsForClient(readCurrentAppSettings(), { env: process.env }));
     return;
   }
 
   if (req.method === "POST" && url.pathname === "/api/app-settings") {
     const body = await readBody(req);
-    const groupsRoot = body.groupsRoot ? resolveWorkspaceRoot(body.groupsRoot) : defaultGroupsRoot;
-    sendJson(res, 200, updateAppSettings(baseDir, {
-      groupsRoot,
-      firstRunComplete: body.firstRunComplete !== false
-    }, { groupsRoot: defaultGroupsRoot }));
+    const patch = buildAppSettingsPatch(body);
+    const settings = updateAppSettings(baseDir, patch, { groupsRoot: defaultGroupsRoot });
+    sendJson(res, 200, redactAppSettingsForClient(settings, { env: process.env }));
     return;
   }
 
@@ -177,8 +217,9 @@ async function handleApi(req, res, url) {
     const body = await readBody(req);
     const groupPath = resolveWorkspacePath(body.groupPath, "groupPath");
     const seatId = String(body.seatId || "");
+    const attachments = normalizeFileAttachments(body.attachments || []);
     const bossMessage = appendPrivateChatMessage(groupPath, seatId, body.text, { from: body.from || "boss", seat: body.seat });
-    const reply = await replyToPrivateMessage(groupPath, seatId, body);
+    const reply = await replyToPrivateMessage(groupPath, seatId, { ...body, attachments });
     sendJson(res, 200, { ok: true, message: bossMessage, reply });
     return;
   }
@@ -186,6 +227,39 @@ async function handleApi(req, res, url) {
   if (req.method === "GET" && url.pathname === "/api/usage") {
     const groupPath = resolveWorkspacePath(requireQuery(url, "groupPath"), "groupPath");
     sendJson(res, 200, readUsageSnapshot(groupPath, readJson(path.join(groupPath, "group.json"))));
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/public-memory") {
+    const groupPath = resolveWorkspacePath(requireQuery(url, "groupPath"), "groupPath");
+    sendJson(res, 200, { memories: listPublicMemories(groupPath) });
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/public-memory") {
+    const body = await readBody(req);
+    const groupPath = resolveWorkspacePath(body.groupPath, "groupPath");
+    sendJson(res, 200, { ok: true, memory: upsertPublicMemory(groupPath, body.memory || body) });
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/public-memory/delete") {
+    const body = await readBody(req);
+    const groupPath = resolveWorkspacePath(body.groupPath, "groupPath");
+    sendJson(res, 200, deletePublicMemory(groupPath, body.id));
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/sessions") {
+    const groupPath = resolveWorkspacePath(requireQuery(url, "groupPath"), "groupPath");
+    sendJson(res, 200, { sessions: listGroupSessions(groupPath, { limit: url.searchParams.get("limit") || 50 }) });
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/session") {
+    const groupPath = resolveWorkspacePath(requireQuery(url, "groupPath"), "groupPath");
+    const sessionId = requireQuery(url, "sessionId");
+    sendJson(res, 200, { session: readGroupSession(groupPath, sessionId) });
     return;
   }
 
@@ -326,7 +400,9 @@ async function handleApi(req, res, url) {
     const result = await runCouncil(body.question, group, baseDir, {
       groupPath: workspaceGroupPath,
       globalRequirement: body.globalRequirement || group.settings?.globalRequirement || "",
-      continuationContext: body.continuationContext
+      continuationContext: body.continuationContext,
+      appSettings: readCurrentAppSettings(),
+      attachments: normalizeFileAttachments(body.attachments || [])
     });
     sendJson(res, 200, result);
     return;
@@ -387,7 +463,9 @@ async function handleApi(req, res, url) {
       startAfterAgentId: body.startAfterAgentId || "",
       startAtAgentId: body.startAtAgentId || "",
       resumeInstruction: body.resumeInstruction || "",
-      continuationContext: body.continuationContext
+      continuationContext: body.continuationContext,
+      appSettings: readCurrentAppSettings(),
+      attachments: normalizeFileAttachments(body.attachments || [])
     });
     return;
   }
@@ -469,6 +547,10 @@ async function replyToPrivateMessage(groupPath, seatId, body) {
       role: "system",
       content: assignment
     },
+    ...(body.attachments?.length ? [{
+      role: "user",
+      content: `Attached files for this private reply only:\n${formatFileAttachmentsForPrompt(body.attachments)}`
+    }] : []),
     ...history.map((item) => ({
       role: item.from === "boss" ? "user" : "assistant",
       content: item.text
@@ -531,6 +613,12 @@ function normalizeMaxRounds(value) {
   return Math.min(100, Math.max(1, count));
 }
 
+function normalizeAgentTimeoutMs(value) {
+  const count = Number.parseInt(String(value || 900000), 10);
+  if (!Number.isFinite(count)) return 900000;
+  return Math.min(60 * 60_000, Math.max(60_000, count));
+}
+
 function updateGroupGlobalRequirement(groupPath, globalRequirement) {
   const groupFile = path.join(groupPath, "group.json");
   const group = readJson(groupFile);
@@ -551,6 +639,9 @@ function updateGroupSettings(groupPath, settings = {}) {
   }
   if (settings.maxRounds !== undefined) {
     nextSettings.maxRounds = normalizeMaxRounds(settings.maxRounds);
+  }
+  if (settings.agentTimeoutMs !== undefined) {
+    nextSettings.agentTimeoutMs = normalizeAgentTimeoutMs(settings.agentTimeoutMs);
   }
   if (settings.workMode !== undefined) {
     nextSettings.workMode = normalizeWorkMode(settings.workMode);
@@ -609,6 +700,9 @@ function updateGroupSeat(groupPath, body = {}) {
   if (patch.reviewIntensity !== undefined) {
     seat.reviewIntensity = normalizeReviewIntensity(patch.reviewIntensity);
   }
+  if (patch.reasoningEffort !== undefined) {
+    seat.reasoningEffort = normalizeReasoningEffort(patch.reasoningEffort);
+  }
   if (patch.role !== undefined) {
     applySeatRole(seat, patch.role);
   }
@@ -654,6 +748,12 @@ function normalizeReviewIntensity(value) {
   return 2;
 }
 
+function normalizeReasoningEffort(value) {
+  const effort = String(value || "").trim().toLowerCase();
+  if (["low", "medium", "high"].includes(effort)) return effort;
+  return "";
+}
+
 function cleanOptionalString(value) {
   return String(value || "").trim();
 }
@@ -680,14 +780,15 @@ function requiresGit(value) {
   return value === "tool" || value === "full";
 }
 
-async function pickFolder() {
+async function pickFolder(options = {}) {
   if (process.platform !== "win32") {
     return { supported: false, path: "" };
   }
+  const description = String(options.description || "选择 AI 小组文件夹").replace(/'/g, "''");
   const script = [
     "Add-Type -AssemblyName System.Windows.Forms",
     "$dialog = New-Object System.Windows.Forms.FolderBrowserDialog",
-    "$dialog.Description = '选择 AI 小组文件夹'",
+    `$dialog.Description = '${description}'`,
     "$dialog.ShowNewFolderButton = $true",
     "if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { $dialog.SelectedPath }"
   ].join("; ");
@@ -719,6 +820,30 @@ async function readBody(req) {
 function sendJson(res, status, data) {
   res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
   res.end(JSON.stringify(data, null, 2));
+}
+
+function readCurrentAppSettings() {
+  return readAppSettings(baseDir, { groupsRoot: defaultGroupsRoot });
+}
+
+function buildAppSettingsPatch(body) {
+  const patch = {};
+  if (Object.hasOwn(body, "groupsRoot")) {
+    patch.groupsRoot = body.groupsRoot ? resolveWorkspaceRoot(body.groupsRoot) : defaultGroupsRoot;
+  }
+  if (Object.hasOwn(body, "firstRunComplete")) {
+    patch.firstRunComplete = body.firstRunComplete !== false;
+  }
+
+  const webSearch = body.capabilities?.webSearch || {};
+  if (Object.hasOwn(webSearch, "apiKey") || Object.hasOwn(body, "webSearchApiKey")) {
+    patch.capabilities = {
+      webSearch: {
+        apiKey: String(Object.hasOwn(webSearch, "apiKey") ? webSearch.apiKey : body.webSearchApiKey).trim()
+      }
+    };
+  }
+  return patch;
 }
 
 async function streamCouncilEvents(req, res, question, group, options = {}) {

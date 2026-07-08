@@ -18,9 +18,9 @@ export function runAutoFileOperations(options = {}) {
   const results = [];
 
   if (!pending.length) {
-    session.fileOperationExecutionResults = [];
-    session.fileOperationExecutionState = "not_requested";
-    return { state: "not_requested", results: [] };
+    const existing = Array.isArray(session.fileOperationExecutionResults) ? session.fileOperationExecutionResults : [];
+    session.fileOperationExecutionState = existing.length ? executionState(existing) : "not_requested";
+    return { state: session.fileOperationExecutionState, results: existing };
   }
 
   if (finalState !== "ready_to_execute") {
@@ -193,9 +193,10 @@ function terminalSkippedStatus(status, reason) {
 }
 
 function attachResults(session, results) {
-  session.fileOperationExecutionResults = results;
+  const existing = Array.isArray(session.fileOperationExecutionResults) ? session.fileOperationExecutionResults : [];
+  session.fileOperationExecutionResults = [...existing, ...results];
   session.fileOperationExecutionState = executionState(results);
-  return { state: session.fileOperationExecutionState, results };
+  return { state: session.fileOperationExecutionState, results: session.fileOperationExecutionResults };
 }
 
 function executionState(results) {
@@ -205,6 +206,7 @@ function executionState(results) {
   const actionableExecuted = actionable.filter((item) => item.status === "executed").length;
   if (actionable.length && actionableExecuted === actionable.length) return "executed";
   if (executed === results.length) return "executed";
+  if (results.some((item) => item.status === "completed")) return "read_completed";
   if (executed > 0) return "partial_executed";
   if (results.some((item) => item.status === "failed_execution")) return "failed_execution";
   if (results.some((item) => item.status === "skipped_permission")) return "pending_approval";

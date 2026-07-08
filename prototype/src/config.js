@@ -43,7 +43,8 @@ export function validateGroupConfig(group) {
     minRounds: 1,
     minConsensusWeight: 0.75,
     stopWhenAllSkip: true,
-    agentTimeoutMs: 60000,
+    agentTimeoutMs: 900000,
+    toolTimeoutMs: 12000,
     allowSoloCouncil: false,
     ...(group.settings ?? {})
   };

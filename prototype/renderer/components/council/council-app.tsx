@@ -7,6 +7,7 @@ import {
   type AgentState,
   type Blocker,
   type DecisionState,
+  type FileAttachment,
   type FileOperation,
   type Group,
   type TranscriptItem,
@@ -31,6 +32,7 @@ import {
   groupRecordToUiGroup,
   messageToTranscriptItem,
   rejectFileOperation,
+  saveAppSettings,
   saveGroupSettings,
   saveSeatConfig,
   streamCouncilEvents,
@@ -44,6 +46,7 @@ import {
   type ModelDiscoveryResult,
   type ProviderHealthResult,
   type ProviderPresetRecord,
+  type AppSettings,
   type UsageSnapshot,
   type WorkspaceGroup,
 } from "@/lib/council-live"
@@ -54,6 +57,7 @@ import { Composer } from "./composer"
 import { RightPanel } from "./right-panel"
 import { MemberConfigSheet } from "./member-config-sheet"
 import { SettingsSheet } from "./settings-sheet"
+import { ChatHistorySheet } from "./chat-history-sheet"
 
 const LAYOUT_KEY = "ai-council:layout-v3-template"
 const CREATE_MEMBER_ID = "__new_member__"
@@ -114,12 +118,15 @@ export function CouncilApp() {
   const [currentTask, setCurrentTask] = useState(EMPTY_TASK)
   const [agentStates, setAgentStates] = useState<Record<string, AgentState>>({})
   const [maxRounds, setMaxRounds] = useState(10)
+  const [agentTimeoutMinutes, setAgentTimeoutMinutes] = useState(15)
   const [globalRequirement, setGlobalRequirement] = useState("")
   const [providerOptions, setProviderOptions] = useState<ProviderPresetRecord[]>([])
+  const [appSettings, setAppSettings] = useState<AppSettings | null>(null)
   const [statusText, setStatusText] = useState("正在读取本地小组...")
   const [configMemberId, setConfigMemberId] = useState<string | null>(null)
   const [createMemberDraft, setCreateMemberDraft] = useState<AgentMember | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [historyOpen, setHistoryOpen] = useState(false)
   const [mutedSeatIds, setMutedSeatIds] = useState<string[]>([])
 
   const activeRun = useRef<AbortController | null>(null)
@@ -171,6 +178,11 @@ export function CouncilApp() {
         fetchProviderPresets()
           .then((data) => {
             if (!cancelled) setProviderOptions(data.providers || [])
+          })
+          .catch(() => {})
+        fetchAppSettings()
+          .then((settings) => {
+            if (!cancelled) setAppSettings(settings)
           })
           .catch(() => {})
         const index = await api<GroupIndexResponse>("/api/groups-index")
@@ -226,6 +238,7 @@ export function CouncilApp() {
       setWorkspaceGroup(loaded)
       setMode(loaded.settings?.workMode === "independent" ? "independent" : "collab")
       setMaxRounds(Number(loaded.settings?.maxRounds || 10))
+      setAgentTimeoutMinutes(normalizeTimeoutMinutes(loaded.settings?.agentTimeoutMs))
       setGlobalRequirement(String(loaded.settings?.globalRequirement || ""))
       setCurrentTask("请输入问题后开始讨论。")
       setItems([
@@ -361,10 +374,31 @@ export function CouncilApp() {
     mode: WorkMode
     globalRequirement: string
     totalRounds: number
+    agentTimeoutMinutes: number
+    webSearchApiKey?: string
+    clearWebSearchKey?: boolean
   }) {
     setMode(values.mode)
     setGlobalRequirement(values.globalRequirement)
     setMaxRounds(values.totalRounds)
+    setAgentTimeoutMinutes(values.agentTimeoutMinutes)
+    const shouldUpdateWebSearchKey = Boolean(values.webSearchApiKey) || Boolean(values.clearWebSearchKey)
+    if (shouldUpdateWebSearchKey) {
+      try {
+        const nextSettings = await saveAppSettings({
+          capabilities: {
+            webSearch: {
+              apiKey: values.clearWebSearchKey ? "" : values.webSearchApiKey || "",
+            },
+          },
+        })
+        setAppSettings(nextSettings)
+      } catch (error) {
+        addSystemItem(`保存联网搜索密钥失败：${errorMessage(error)}`)
+        setStatusText("保存联网搜索密钥失败。")
+        return
+      }
+    }
     if (!group.path) {
       addSystemItem("还没有本地小组，暂时不能保存议会设置。")
       return
@@ -374,6 +408,7 @@ export function CouncilApp() {
         groupPath: group.path,
         globalRequirement: values.globalRequirement,
         maxRounds: values.totalRounds,
+        agentTimeoutMs: values.agentTimeoutMinutes * 60_000,
         workMode: values.mode,
       })
       setWorkspaceGroup(result.group)
@@ -395,6 +430,7 @@ export function CouncilApp() {
     permission: "text" | "tool" | "full"
     role: "ordinary" | "reviewer" | "summarizer"
     reviewIntensity: 1 | 2 | 3
+    reasoningEffort?: string
   }) {
     if (!group.path) {
       addSystemItem("还没有本地小组，暂时不能保存成员配置。")
@@ -413,6 +449,7 @@ export function CouncilApp() {
           permission: values.permission,
           role: values.role,
           reviewIntensity: values.reviewIntensity,
+          reasoningEffort: values.reasoningEffort,
         })
         setWorkspaceGroup(result.group)
         const seatCount = (result.group.seats || result.group.agents || []).length
@@ -438,6 +475,7 @@ export function CouncilApp() {
         permission: values.permission,
         role: values.role,
         reviewIntensity: values.reviewIntensity,
+        reasoningEffort: values.reasoningEffort,
       })
       setWorkspaceGroup(result.group)
       setConfigMemberId(null)
@@ -509,16 +547,16 @@ export function CouncilApp() {
 
   async function handleSend(
     text: string,
-    options: { privateMode: boolean; targetId: string },
+    options: { privateMode: boolean; targetId: string; attachments: FileAttachment[] },
   ) {
     if (options.privateMode) {
-      await handlePrivateMessage(text, options.targetId)
+      await handlePrivateMessage(text, options.targetId, options.attachments)
       return
     }
-    await startCouncil(text)
+    await startCouncil(text, options.attachments)
   }
 
-  async function handlePrivateMessage(text: string, targetId: string) {
+  async function handlePrivateMessage(text: string, targetId: string, attachments: FileAttachment[] = []) {
     const groupPath = group.path
     if (!groupPath || !workspaceGroup) {
       addSystemItem("请先加载一个本地小组，再私聊成员。")
@@ -540,7 +578,8 @@ export function CouncilApp() {
         groupPath,
         seatId: targetId,
         text,
-        runtimeGroup: workspaceGroupToRuntimeGroup(workspaceGroup, maxRounds, [], mode),
+        attachments,
+        runtimeGroup: buildRuntimeGroup(workspaceGroup, maxRounds, [], mode, agentTimeoutMinutes),
       })
       const reply = result.reply
       if (reply?.text) {
@@ -565,7 +604,7 @@ export function CouncilApp() {
     }
   }
 
-  async function startCouncil(question: string) {
+  async function startCouncil(question: string, attachments: FileAttachment[] = []) {
     const groupPath = group.path
     if (!groupPath || !workspaceGroup) {
       addSystemItem("请先加载一个本地小组，再开始讨论。")
@@ -593,7 +632,9 @@ export function CouncilApp() {
         kind: "system",
         id: `question-${Date.now()}`,
         time: formatTime(),
-        body: `你：${question}`,
+        body: attachments.length
+          ? `${question}\n附件：${attachments.map((file) => file.name).join("、")}`
+          : question,
       },
     ])
     setDecision({ state: "revise", confidence: 0, summary: "讨论进行中，还没有最终决议。" })
@@ -611,9 +652,10 @@ export function CouncilApp() {
         {
           question,
           workspaceGroupPath: groupPath,
-          runtimeGroup: workspaceGroupToRuntimeGroup(workspaceGroup, maxRounds, mutedSeatIds, mode),
+          runtimeGroup: buildRuntimeGroup(workspaceGroup, maxRounds, mutedSeatIds, mode, agentTimeoutMinutes),
           maxRounds,
           globalRequirement,
+          attachments,
         },
         handleCouncilEvent,
         controller.signal,
@@ -671,6 +713,10 @@ export function CouncilApp() {
       }
       return
     }
+    if (event.type === "tool_start" || event.type === "tool_success" || event.type === "tool_failure") {
+      addSystemItem(formatToolEvent(event))
+      return
+    }
     if (event.type === "error") {
       addSystemItem(event.error || "讨论流出错。")
     }
@@ -712,6 +758,34 @@ export function CouncilApp() {
         body,
       },
     ])
+  }
+
+  function formatToolEvent(event: CouncilEvent) {
+    const actor = event.agentName || "AI"
+    const target = event.path || event.query || event.resultSummary?.path || event.resultSummary?.query || ""
+    const label = toolLabel(event.tool)
+    if (event.type === "tool_start") return `${actor} ${label}${target ? `：${target}` : ""}`
+    if (event.type === "tool_success") {
+      const summary = event.resultSummary?.entries !== undefined
+        ? `${event.resultSummary.entries} 项`
+        : event.resultSummary?.results !== undefined
+          ? `${event.resultSummary.results} 条`
+          : event.resultSummary?.bytes !== undefined
+            ? `${event.resultSummary.bytes} 字节`
+            : "完成"
+      return `${actor} ${label}完成：${summary}`
+    }
+    return `${actor} ${label}失败：${event.status || "failed"}`
+  }
+
+  function toolLabel(tool?: string) {
+    if (tool === "read_file") return "读取文件"
+    if (tool === "list_directory") return "查看目录"
+    if (tool === "search_files") return "搜索文件"
+    if (tool === "grep_content") return "搜索正文"
+    if (tool === "web_search") return "联网搜索"
+    if (tool === "fetch_url") return "读取网页"
+    return "使用工具"
   }
 
   function stopRun() {
@@ -758,6 +832,7 @@ export function CouncilApp() {
           if (nextStyle === "workbench") setVisualStyle("workbench")
         }}
         onToggleRight={() => setRightOpen((open) => !open)}
+        onOpenHistory={() => setHistoryOpen(true)}
       />
 
       <div className="flex min-h-0 flex-1">
@@ -787,6 +862,7 @@ export function CouncilApp() {
           <Composer
             members={members}
             running={running}
+            draftKey={group.path || group.id || ""}
             onSend={handleSend}
             onStop={stopRun}
             onContinue={continueRound}
@@ -834,10 +910,38 @@ export function CouncilApp() {
         onGlobalRequirementChange={setGlobalRequirement}
         totalRounds={maxRounds}
         onTotalRoundsChange={setMaxRounds}
+        agentTimeoutMinutes={agentTimeoutMinutes}
+        onAgentTimeoutMinutesChange={setAgentTimeoutMinutes}
+        webSearchConfigured={appSettings?.capabilities?.webSearch?.configured}
+        webSearchSource={formatSearchKeySource(appSettings?.capabilities?.webSearch?.source)}
         onSave={handleSaveSettings}
+      />
+      <ChatHistorySheet
+        open={historyOpen}
+        onClose={() => setHistoryOpen(false)}
+        groupPath={group.path || ""}
       />
     </div>
   )
+}
+
+function buildRuntimeGroup(
+  group: WorkspaceGroup,
+  maxRounds: number,
+  mutedSeatIds: string[],
+  mode: WorkMode,
+  agentTimeoutMinutes: number,
+) {
+  const runtimeGroup = workspaceGroupToRuntimeGroup(group, maxRounds, mutedSeatIds, mode)
+  runtimeGroup.settings.agentTimeoutMs = normalizeTimeoutMinutes(agentTimeoutMinutes * 60_000) * 60_000
+  return runtimeGroup
+}
+
+function normalizeTimeoutMinutes(value: unknown) {
+  const raw = Number(value)
+  const minutes = raw > 1000 ? Math.round(raw / 60_000) : raw
+  if (!Number.isFinite(minutes)) return 15
+  return Math.max(1, Math.min(60, Math.round(minutes)))
 }
 
 function buildCreateMemberDraft(
@@ -872,10 +976,16 @@ function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error)
 }
 
+function formatSearchKeySource(source?: string) {
+  if (source === "configured_local") return "本地设置"
+  if (source === "configured_env") return "环境变量"
+  return "未设置"
+}
+
 function formatTime(value?: string) {
   const date = value ? new Date(value) : new Date()
   if (!Number.isFinite(date.getTime())) {
-    return new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })
+    return new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" })
   }
-  return date.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })
+  return date.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" })
 }

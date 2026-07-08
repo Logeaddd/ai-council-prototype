@@ -8,6 +8,7 @@ import type {
   FileOperation,
   FileOpStatus,
   Group,
+  FileAttachment,
   Permission,
   Role,
   TranscriptItem,
@@ -48,6 +49,7 @@ export interface WorkspaceSeat {
   apiBaseUrl?: string
   apiKey?: string
   providerPreset?: string
+  reasoningEffort?: string
 }
 
 export interface WorkspaceGroup {
@@ -59,6 +61,7 @@ export interface WorkspaceGroup {
   agents?: WorkspaceSeat[]
   settings?: {
     maxRounds?: number
+    agentTimeoutMs?: number
     globalRequirement?: string
     [key: string]: unknown
   }
@@ -73,6 +76,18 @@ export interface CouncilEvent {
   round?: number
   agentId?: string
   agentName?: string
+  tool?: string
+  path?: string
+  query?: string
+  status?: string
+  resultSummary?: {
+    path?: string
+    query?: string
+    entries?: number
+    results?: number
+    bytes?: number
+    truncated?: boolean
+  }
   delta?: string
   message?: CouncilMessage
   consensus?: unknown
@@ -83,6 +98,7 @@ export interface CouncilEvent {
   }
   error?: string
   createdAt?: string
+  durationMs?: number
 }
 
 export interface CouncilMessage {
@@ -101,6 +117,7 @@ export interface CouncilMessage {
     totalTokens?: number
   }
   createdAt?: string
+  durationMs?: number
   partial?: boolean
 }
 
@@ -114,6 +131,7 @@ export interface CouncilFinalDecision {
   blocking_issues?: RawBlocker[]
   file_execution_state?: string
   file_execution_results?: unknown[]
+  durationMs?: number
 }
 
 export interface CouncilSession {
@@ -121,6 +139,21 @@ export interface CouncilSession {
   question?: string
   messages?: CouncilMessage[]
   finalDecision?: CouncilFinalDecision
+  createdAt?: string
+  completedAt?: string
+  durationMs?: number
+}
+
+export interface ChatSessionSummary {
+  id: string
+  question: string
+  createdAt: string
+  completedAt?: string
+  durationMs?: number
+  messageCount: number
+  rounds: number
+  finalState?: string
+  answerPreview?: string
 }
 
 interface RawBlocker {
@@ -232,6 +265,7 @@ export function workspaceGroupToMembers(
       state: states[id] || "idle",
       reviewer,
       reviewIntensity: normalizeIntensity(seat.reviewIntensity),
+      reasoningEffort: seat.reasoningEffort || "",
       tokensIn: Number(totals.estimatedInputTokens || 0),
       tokensOut: Number(totals.estimatedOutputTokens || 0),
       latencyMs: null,
@@ -276,9 +310,10 @@ export function workspaceGroupToRuntimeGroup(
         provider: runtimeProviderForSeat(seat.providerPreset, baseUrl, apiKey),
         providerPreset: seat.providerPreset || inferProviderPreset(baseUrl),
         apiBaseUrl: baseUrl || "mock://local",
-        apiKey,
-        model: seat.model || seat.currentModel || "mock-builder",
-        weight: Number(seat.weight || 1),
+      apiKey,
+      model: seat.model || seat.currentModel || "mock-builder",
+      reasoningEffort: seat.reasoningEffort || "",
+      weight: Number(seat.weight || 1),
         enabled: seat.enabled !== false && !muted.has(id),
         reviewer,
         mandatoryRedTeam: reviewer,
@@ -299,6 +334,7 @@ export function messageToTranscriptItem(message: CouncilMessage, totalRounds: nu
     state: responseStatusToAgentState(message.response?.status, Boolean(message.partial)),
     body: cleanDisplayText(message),
     tokens: Number(message.contextStatus?.totalTokens || 0) || undefined,
+    durationMs: Number(message.durationMs || 0) || undefined,
   }
 }
 
@@ -312,6 +348,7 @@ export function finalDecisionToTranscriptItem(event: CouncilEvent): TranscriptIt
     time: formatTime(event.createdAt),
     state: "completed",
     body: event.finalDecision.answer,
+    durationMs: Number(event.durationMs || event.finalDecision.durationMs || 0) || undefined,
   }
 }
 
@@ -396,6 +433,43 @@ export interface ProviderHealthResult {
 export interface AppSettings {
   groupsRoot?: string
   firstRunComplete?: boolean
+  capabilities?: {
+    webSearch?: {
+      provider?: string
+      configured?: boolean
+      storedKeyConfigured?: boolean
+      envKeyConfigured?: boolean
+      source?: string
+    }
+  }
+}
+
+export interface FolderPickerResult {
+  supported: boolean
+  path: string
+  containsGroup?: boolean
+}
+
+export interface ProjectImportResult {
+  root: string
+  totalTextFiles: number
+  importedFiles: number
+  skippedBinary: number
+  skippedLarge: number
+  skippedDirs: number
+  treeTruncated: boolean
+  attachments: FileAttachment[]
+}
+
+export interface PublicMemoryRecord {
+  id: string
+  title: string
+  content: string
+  source: string
+  sourceSessionId?: string
+  createdBy: string
+  createdAt: string
+  updatedAt: string
 }
 
 export function usageSnapshotToSummary(snapshot?: UsageSnapshot | null): UsageSummary {
@@ -488,6 +562,56 @@ export async function fetchAppSettings() {
   return api<AppSettings>("/api/app-settings")
 }
 
+export async function saveAppSettings(body: Partial<AppSettings> & {
+  capabilities?: {
+    webSearch?: {
+      apiKey?: string
+    }
+  }
+}) {
+  return api<AppSettings>("/api/app-settings", body)
+}
+
+export async function pickProjectFolder() {
+  return api<FolderPickerResult>("/api/project-folder-picker")
+}
+
+export async function importProjectFolder(folderPath: string) {
+  return api<ProjectImportResult>("/api/project/import", { folderPath })
+}
+
+export async function fetchPublicMemories(groupPath: string) {
+  return api<{ memories: PublicMemoryRecord[] }>(
+    `/api/public-memory?groupPath=${encodeURIComponent(groupPath)}`,
+  )
+}
+
+export async function savePublicMemory(groupPath: string, memory: Partial<PublicMemoryRecord>) {
+  return api<{ ok: boolean; memory: PublicMemoryRecord }>("/api/public-memory", {
+    groupPath,
+    memory,
+  })
+}
+
+export async function deletePublicMemory(groupPath: string, id: string) {
+  return api<{ ok: boolean; deleted: boolean; id: string }>("/api/public-memory/delete", {
+    groupPath,
+    id,
+  })
+}
+
+export async function fetchChatSessions(groupPath: string) {
+  return api<{ sessions: ChatSessionSummary[] }>(
+    `/api/sessions?groupPath=${encodeURIComponent(groupPath)}`,
+  )
+}
+
+export async function fetchChatSession(groupPath: string, sessionId: string) {
+  return api<{ session: CouncilSession }>(
+    `/api/session?groupPath=${encodeURIComponent(groupPath)}&sessionId=${encodeURIComponent(sessionId)}`,
+  )
+}
+
 export async function createWorkspaceGroup(body: {
   root: string
   groupFolderName: string
@@ -520,6 +644,7 @@ export async function addWorkspaceMember(body: {
   permission?: Permission
   role?: Role
   reviewIntensity?: 1 | 2 | 3
+  reasoningEffort?: string
 }) {
   return api<{ ok: boolean; group: WorkspaceGroup; seat: WorkspaceSeat }>(
     "/api/workspace/add-member",
@@ -532,6 +657,7 @@ export async function saveGroupSettings(body: {
   globalRequirement: string
   maxRounds: number
   workMode: WorkMode
+  agentTimeoutMs?: number
 }) {
   return api<{ ok: boolean; group: WorkspaceGroup }>("/api/group/settings", body)
 }
@@ -547,6 +673,7 @@ export async function saveSeatConfig(body: {
   permission: Permission
   role: Role
   reviewIntensity: 1 | 2 | 3
+  reasoningEffort?: string
 }) {
   return api<{ ok: boolean; group: WorkspaceGroup }>("/api/group/seat", body)
 }
@@ -729,6 +856,6 @@ function formatLastActive(value?: string) {
 
 function formatTime(value?: string) {
   const date = value ? new Date(value) : new Date()
-  if (!Number.isFinite(date.getTime())) return new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })
-  return date.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })
+  if (!Number.isFinite(date.getTime())) return new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" })
+  return date.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" })
 }

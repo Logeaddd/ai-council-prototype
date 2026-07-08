@@ -1,5 +1,6 @@
 import { ROUND_STATUSES } from "./types.js";
 import { normalizeObjectionItems, normalizeResolvedIds } from "./objectionLedger.js";
+import { normalizeToolRequests } from "./toolRequests.js";
 
 export function parseRoundResponse(rawText) {
   const parsed = parseJsonLike(rawText);
@@ -31,6 +32,7 @@ export function parseRoundResponse(rawText) {
     suggested_revision: optionalString(parsed.suggested_revision),
     artifacts: normalizeArtifacts(parsed.artifacts),
     file_operations: normalizeFileOperations(parsed.file_operations),
+    tool_requests: normalizeToolRequests(parsed.tool_requests),
     confidence: normalizeConfidence(parsed.confidence),
     memory_candidates: normalizeStringArray(parsed.memory_candidates)
   };

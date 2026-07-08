@@ -154,6 +154,28 @@ test("OpenAI-compatible payload includes configurable max_tokens for Claude-styl
   assert.equal(payload.max_tokens, 1234);
 });
 
+test("OpenAI-compatible payload sends reasoning effort only for known OpenAI reasoning models", () => {
+  const supported = buildOpenAiCompatiblePayload({
+    providerPreset: "openai",
+    apiBaseUrl: "https://api.openai.com/v1",
+    reasoningEffort: "high"
+  }, {
+    model: "o3-mini",
+    messages: [{ role: "user", content: "Question" }]
+  });
+  const unsupported = buildOpenAiCompatiblePayload({
+    providerPreset: "custom",
+    apiBaseUrl: "https://code-plan.site/v1",
+    reasoningEffort: "high"
+  }, {
+    model: "claude-opus-4-8",
+    messages: [{ role: "user", content: "Question" }]
+  });
+
+  assert.equal(supported.reasoning_effort, "high");
+  assert.equal(unsupported.reasoning_effort, undefined);
+});
+
 test("OpenAI-compatible payload can add explicit provider prompt cache block after question", () => {
   const payload = buildOpenAiCompatiblePayload({
     providerPromptCache: {
@@ -301,6 +323,30 @@ test("Anthropic payload separates system from user messages", () => {
     { role: "assistant", content: "Previous answer" },
     { role: "user", content: "Question" }
   ]);
+});
+
+test("Anthropic payload sends thinking only for supported official Claude models", () => {
+  const supported = buildAnthropicMessagesPayload({
+    providerPreset: "anthropic",
+    apiBaseUrl: "https://api.anthropic.com/v1",
+    reasoningEffort: "medium",
+    maxTokens: 5000
+  }, {
+    model: "claude-4-sonnet-20260701",
+    messages: [{ role: "user", content: "Question" }]
+  });
+  const unsupported = buildAnthropicMessagesPayload({
+    providerPreset: "custom",
+    apiBaseUrl: "https://code-plan.site/v1",
+    reasoningEffort: "medium",
+    maxTokens: 5000
+  }, {
+    model: "claude-opus-4-8",
+    messages: [{ role: "user", content: "Question" }]
+  });
+
+  assert.deepEqual(supported.thinking, { type: "enabled", budget_tokens: 4096 });
+  assert.equal(unsupported.thinking, undefined);
 });
 
 function writeOpenAiStream(res, text) {

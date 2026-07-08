@@ -18,6 +18,64 @@ export function writeGroupSession(session, groupPath) {
   return filePath;
 }
 
+export function listGroupSessions(groupPath, options = {}) {
+  const dir = path.resolve(groupPath, "sessions");
+  const limit = Math.max(1, Math.min(200, Number(options.limit || 50)));
+  if (!fs.existsSync(dir)) return [];
+  return fs.readdirSync(dir)
+    .filter((name) => name.endsWith(".json"))
+    .map((name) => {
+      const filePath = path.join(dir, name);
+      try {
+        const stat = fs.statSync(filePath);
+        const session = JSON.parse(fs.readFileSync(filePath, "utf8"));
+        return summarizeSession(session, stat.mtime.toISOString());
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean)
+    .sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime())
+    .slice(0, limit);
+}
+
+export function readGroupSession(groupPath, sessionId) {
+  const id = String(sessionId || "").trim();
+  if (!/^[A-Za-z0-9_-]+$/.test(id)) throw new Error("Invalid session id");
+  const root = path.resolve(groupPath, "sessions");
+  const filePath = path.resolve(root, `${id}.json`);
+  if (filePath !== root && !filePath.startsWith(`${root}${path.sep}`)) {
+    throw new Error("Session path escapes group workspace");
+  }
+  if (!fs.existsSync(filePath)) throw new Error(`Unknown session id: ${id}`);
+  return JSON.parse(fs.readFileSync(filePath, "utf8"));
+}
+
+function summarizeSession(session, fallbackTime) {
+  const messages = Array.isArray(session.messages) ? session.messages : [];
+  const createdAt = session.createdAt || session.startedAt || messages[0]?.createdAt || fallbackTime;
+  const completedAt = session.completedAt || messages.at(-1)?.createdAt || createdAt;
+  const rounds = Math.max(0, ...messages.map((message) => Number(message.round || 0)));
+  return {
+    id: session.id || "",
+    question: session.question || "",
+    createdAt,
+    completedAt,
+    durationMs: Number(session.durationMs || durationBetween(createdAt, completedAt) || 0),
+    messageCount: messages.length,
+    rounds,
+    finalState: session.finalDecision?.final_state || "",
+    answerPreview: String(session.finalDecision?.answer || "").slice(0, 240)
+  };
+}
+
+function durationBetween(start, end) {
+  const a = new Date(start).getTime();
+  const b = new Date(end).getTime();
+  if (!Number.isFinite(a) || !Number.isFinite(b) || b < a) return 0;
+  return b - a;
+}
+
 export function appendMemoryCandidates(finalDecision, session, baseDir) {
   const candidates = filterDurableMemoryCandidates(finalDecision.memory_candidates ?? []);
   if (!candidates.length) return [];

@@ -11,6 +11,7 @@ import { appendCompressedTranscriptChunk, readSummaryCache, writeGroupSharedSumm
 import { appendSessionUsage, readGroupUsage } from "../src/usageStats.js";
 import { approveExecutionStandards, prepareExecutionStandards } from "../src/executionStandards.js";
 import { appendPrivateChatMessage } from "../src/privateChat.js";
+import { upsertPublicMemory } from "../src/publicMemory.js";
 
 
 test("onModelCall records round and final model payloads", async () => {
@@ -41,9 +42,14 @@ test("onModelCall records round and final model payloads", async () => {
     ]
   });
 
-  await runCouncil("Question", group, tmp, { onModelCall: (call) => calls.push(call) });
+  const result = await runCouncil("Question", group, tmp, { onModelCall: (call) => calls.push(call) });
 
   assert.equal(calls.length, 2);
+  assert.ok(result.session.createdAt);
+  assert.ok(result.session.completedAt);
+  assert.equal(Number.isFinite(result.session.durationMs), true);
+  assert.equal(Number.isFinite(result.session.messages[0].durationMs), true);
+  assert.equal(Number.isFinite(result.session.finalDecision.durationMs), true);
   assert.equal(calls[0].phase, "round");
   assert.equal(calls[0].agentId, "judge");
   assert.match(calls[0].inputMessages.map((message) => message.content).join("\n"), /Question:/);
@@ -51,6 +57,251 @@ test("onModelCall records round and final model payloads", async () => {
   assert.equal(calls[1].phase, "final");
   assert.match(calls[1].inputMessages[0].content, /FinalDecision JSON object/);
   assert.match(calls[1].rawText, /answer/);
+});
+
+test("attached files reach round and final model prompts", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-attachments-"));
+  const calls = [];
+  const group = validateGroupConfig({
+    id: "attachment-call-log",
+    name: "Attachment Call Log",
+    settings: {
+      maxRounds: 1,
+      minConsensusWeight: 1,
+      stopWhenAllSkip: true,
+      agentTimeoutMs: 1000,
+      allowSoloCouncil: true
+    },
+    agents: [
+      {
+        id: "judge",
+        name: "Judge",
+        role: "Judge",
+        provider: "mock",
+        apiBaseUrl: "mock://local",
+        model: "mock-judge",
+        weight: 1,
+        enabled: true,
+        judge: true
+      }
+    ]
+  });
+
+  await runCouncil("Read the attached file.", group, tmp, {
+    attachments: [
+      {
+        name: "handoff.md",
+        type: "text/markdown",
+        sizeBytes: 48,
+        content: "ATTACHED_HANDOFF_SECRET: pass this into the council."
+      }
+    ],
+    onModelCall: (call) => calls.push(call)
+  });
+
+  const roundPrompt = calls.find((call) => call.phase === "round").inputMessages.map((message) => message.content).join("\n");
+  const finalPrompt = calls.find((call) => call.phase === "final").inputMessages.map((message) => message.content).join("\n");
+  assert.match(roundPrompt, /User attached files/);
+  assert.match(roundPrompt, /handoff\.md/);
+  assert.match(roundPrompt, /ATTACHED_HANDOFF_SECRET/);
+  assert.match(finalPrompt, /ATTACHED_HANDOFF_SECRET/);
+});
+
+test("tool requests execute and return results to the same member follow-up prompt", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-tool-followup-"));
+  fs.writeFileSync(path.join(tmp, "group.json"), JSON.stringify({
+    permissions: {
+      defaultTier: "tool",
+      seatTiers: { researcher: "tool" }
+    }
+  }), "utf8");
+  const requestBodies = [];
+  const server = http.createServer(async (req, res) => {
+    const body = JSON.parse(await readRequestBody(req));
+    requestBodies.push(body);
+    const prompt = JSON.stringify(body.messages || []);
+    if (prompt.includes("FinalDecision JSON object")) {
+      writeOpenAiStream(res, JSON.stringify({
+        answer: "Used the guarded tool result.",
+        consensus_score: 1,
+        supporting_agents: ["Researcher"],
+        dissenting_agents: [],
+        minority_report: "",
+        risks: [],
+        next_actions: [],
+        selected_file_operation_ids: [],
+        memory_candidates: []
+      }));
+      return;
+    }
+    if (requestBodies.length === 1) {
+      writeOpenAiStream(res, JSON.stringify({
+        status: "speak",
+        argument: "I need to inspect a URL before answering.",
+        tool_requests: [
+          {
+            tool: "fetch_url",
+            url: "https://169.254.169.254/latest",
+            reason: "Verify the web tool guard before relying on the page."
+          }
+        ],
+        objections: [],
+        confidence: 0.5,
+        memory_candidates: []
+      }));
+      return;
+    }
+    writeOpenAiStream(res, JSON.stringify({
+      status: "speak",
+      argument: "The app returned a guarded tool result, so I will not claim the blocked URL was read.",
+      objections: [],
+      confidence: 0.8,
+      memory_candidates: []
+    }));
+  });
+  await listen(server);
+  const address = server.address();
+
+  try {
+    const group = validateGroupConfig({
+      id: "tool-followup",
+      name: "Tool Followup",
+      settings: {
+        maxRounds: 1,
+        minConsensusWeight: 1,
+        stopWhenAllSkip: true,
+        agentTimeoutMs: 3000,
+        allowSoloCouncil: true
+      },
+      agents: [
+        {
+          id: "researcher",
+          name: "Researcher",
+          role: "Researcher",
+          provider: "openai-compatible",
+          apiBaseUrl: `http://127.0.0.1:${address.port}/v1`,
+          allowUnsafePrivateNetwork: true,
+          apiKey: "secret-runtime-key",
+          model: "tool-model",
+          weight: 1,
+          enabled: true
+        }
+      ]
+    });
+    const result = await runCouncil("Use a web tool if needed.", group, tmp, { groupPath: tmp });
+    const followupPrompt = JSON.stringify(requestBodies[1]?.messages || []);
+
+    assert.equal(result.session.toolExecutionResults.length, 1);
+    assert.equal(result.session.toolExecutionResults[0].status, "failed");
+    assert.match(followupPrompt, /Tool execution results/);
+    assert.match(followupPrompt, /Blocked unsafe URL/);
+    assert.match(result.session.messages[0].response.argument, /guarded tool result/);
+  } finally {
+    await close(server);
+  }
+});
+
+test("file tool requests emit events and return file content to the same member follow-up prompt", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-file-tool-followup-"));
+  fs.writeFileSync(path.join(tmp, "group.json"), JSON.stringify({
+    permissions: {
+      defaultTier: "tool",
+      seatTiers: { reader: "tool" }
+    }
+  }), "utf8");
+  fs.writeFileSync(path.join(tmp, "brief.md"), "FILE_TOOL_SECRET_FACT: real local content", "utf8");
+  const requestBodies = [];
+  const server = http.createServer(async (req, res) => {
+    const body = JSON.parse(await readRequestBody(req));
+    requestBodies.push(body);
+    const prompt = JSON.stringify(body.messages || []);
+    if (prompt.includes("FinalDecision JSON object")) {
+      writeOpenAiStream(res, JSON.stringify({
+        answer: "File tool result was used.",
+        consensus_score: 1,
+        supporting_agents: ["Reader"],
+        dissenting_agents: [],
+        minority_report: "",
+        risks: [],
+        next_actions: [],
+        selected_file_operation_ids: [],
+        memory_candidates: []
+      }));
+      return;
+    }
+    if (requestBodies.length === 1) {
+      writeOpenAiStream(res, JSON.stringify({
+        status: "speak",
+        argument: "I need the local brief first.",
+        tool_requests: [
+          {
+            tool: "read_file",
+            path: "brief.md",
+            reason: "Read the local brief before answering."
+          }
+        ],
+        objections: [],
+        confidence: 0.5,
+        memory_candidates: []
+      }));
+      return;
+    }
+    writeOpenAiStream(res, JSON.stringify({
+      status: "speak",
+      argument: "I read FILE_TOOL_SECRET_FACT from the real file tool result.",
+      objections: [],
+      confidence: 0.9,
+      memory_candidates: []
+    }));
+  });
+  await listen(server);
+  const address = server.address();
+
+  try {
+    const group = validateGroupConfig({
+      id: "file-tool-followup",
+      name: "File Tool Followup",
+      settings: {
+        maxRounds: 1,
+        minConsensusWeight: 1,
+        stopWhenAllSkip: true,
+        agentTimeoutMs: 3000,
+        allowSoloCouncil: true
+      },
+      agents: [
+        {
+          id: "reader",
+          name: "Reader",
+          role: "Reader",
+          provider: "openai-compatible",
+          apiBaseUrl: `http://127.0.0.1:${address.port}/v1`,
+          allowUnsafePrivateNetwork: true,
+          apiKey: "secret-runtime-key",
+          model: "file-tool-model",
+          weight: 1,
+          enabled: true
+        }
+      ]
+    });
+    const events = [];
+    let result;
+    for await (const event of runCouncilEvents("Use the local brief.", group, tmp, { groupPath: tmp })) {
+      events.push(event);
+      if (event.type === "done") result = event.result;
+    }
+    const followupPrompt = JSON.stringify(requestBodies[1]?.messages || []);
+
+    assert.equal(result.session.toolExecutionResults.length, 1);
+    assert.equal(result.session.toolExecutionResults[0].tool, "read_file");
+    assert.equal(result.session.toolExecutionResults[0].status, "completed");
+    assert.match(followupPrompt, /Tool execution results/);
+    assert.match(followupPrompt, /FILE_TOOL_SECRET_FACT/);
+    assert.ok(events.some((event) => event.type === "tool_start" && event.tool === "read_file"));
+    assert.ok(events.some((event) => event.type === "tool_success" && event.tool === "read_file"));
+    assert.match(result.session.messages[0].response.argument, /FILE_TOOL_SECRET_FACT/);
+  } finally {
+    await close(server);
+  }
 });
 
 test("group model call trace records prompt and output summaries without api keys", async () => {
@@ -1857,7 +2108,11 @@ test("group sessions preserve sandboxed file operation proposals without executi
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-file-proposals-"));
   const groupPath = path.join(tmp, "group");
   fs.mkdirSync(path.join(groupPath, "sessions"), { recursive: true });
-  fs.writeFileSync(path.join(groupPath, "group.json"), JSON.stringify({ groupPath, seats: [] }, null, 2), "utf8");
+  fs.writeFileSync(path.join(groupPath, "group.json"), JSON.stringify({
+    groupPath,
+    seats: [{ seatId: "runtime", displayName: "Runtime Agent", privateFolder: "members/Runtime" }],
+    permissions: { defaultTier: "text", seatTiers: { runtime: "full" } }
+  }, null, 2), "utf8");
 
   let callCount = 0;
   const server = http.createServer(async (req, res) => {
@@ -3033,6 +3288,154 @@ test("cycle continuation context is injected into the next council prompt", asyn
   }
 });
 
+test("public memory reaches model prompts as editable shared memory", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-public-memory-runtime-"));
+  const groupPath = path.join(tmp, "group");
+  fs.mkdirSync(groupPath, { recursive: true });
+  const requests = [];
+  const server = http.createServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    requests.push(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+    writeOpenAiStream(res, JSON.stringify({ status: "skip", reason: "Memory received.", memory_candidates: [] }));
+  });
+  await listen(server);
+  const apiBaseUrl = "http://127.0.0.1:" + server.address().port + "/v1";
+
+  try {
+    const workspaceGroup = {
+      id: "public-memory-runtime",
+      groupFolderName: "Public Memory Runtime",
+      seats: [
+        { seatId: "builder", displayName: "Builder", privateFolder: "members/Builder" },
+        { seatId: "finalizer", displayName: "Finalizer", privateFolder: "members/Finalizer", judge: true }
+      ],
+      permissions: { defaultTier: "text", seatTiers: {} }
+    };
+    fs.writeFileSync(path.join(groupPath, "group.json"), JSON.stringify(workspaceGroup, null, 2), "utf8");
+    upsertPublicMemory(groupPath, {
+      title: "World rule",
+      content: "PUBLIC_MEMORY_RUNTIME_SECRET",
+      source: "summarizer",
+      sourceSessionId: "session_public"
+    });
+
+    const baseAgent = {
+      provider: "openai-compatible",
+      apiBaseUrl,
+      allowUnsafePrivateNetwork: true,
+      apiKey: "secret-runtime-key",
+      model: "runtime-model",
+      weight: 1,
+      enabled: true,
+      providerLimits: { contextWindow: 12000, maxOutputTokens: 1000 }
+    };
+    const group = validateGroupConfig({
+      id: "public-memory-runtime",
+      name: "Public Memory Runtime",
+      settings: { maxRounds: 1, minConsensusWeight: 1, stopWhenAllSkip: true, agentTimeoutMs: 1000 },
+      agents: [
+        { ...baseAgent, id: "builder", name: "Builder", role: "Builder" },
+        { ...baseAgent, id: "finalizer", name: "Finalizer", role: "Finalizer", judge: true }
+      ]
+    });
+
+    await runCouncil("Use public memory.", group, tmp, { groupPath });
+    const firstPrompt = requests[0].messages.at(-1).content;
+    assert.match(firstPrompt, /PUBLIC_MEMORY_RUNTIME_SECRET/);
+    assert.match(firstPrompt, /editable summary, not as the original facts/);
+    assert.match(firstPrompt, /Source: summarizer/);
+  } finally {
+    await close(server);
+  }
+});
+
+test("read/list file operations are executed and returned in later model context", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-read-list-runtime-"));
+  const groupPath = path.join(tmp, "group");
+  fs.mkdirSync(groupPath, { recursive: true });
+  fs.writeFileSync(path.join(groupPath, "README.md"), "REAL_READ_RESULT", "utf8");
+  fs.writeFileSync(path.join(groupPath, "group.json"), JSON.stringify({
+    seats: [{ seatId: "builder", displayName: "Builder", privateFolder: "members/Builder" }],
+    permissions: { defaultTier: "text", seatTiers: { builder: "tool" } }
+  }, null, 2), "utf8");
+
+  const requests = [];
+  const server = http.createServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    requests.push(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+    const payloads = [
+      {
+        status: "speak",
+        argument: "I need to inspect README.",
+        objections: [],
+        file_operations: [
+          {
+            op: "read",
+            path: "README.md",
+            reason: "Read the project note.",
+            expected_effect: "README content is available."
+          }
+        ],
+        confidence: 0.6,
+        memory_candidates: []
+      },
+      { status: "skip", reason: "Read result is now available." },
+      {
+        answer: "Done.",
+        consensus_score: 1,
+        supporting_agents: ["Builder"],
+        dissenting_agents: [],
+        minority_report: "None.",
+        risks: [],
+        next_actions: [],
+        memory_candidates: []
+      }
+    ];
+    writeOpenAiStream(res, JSON.stringify(payloads[Math.min(requests.length - 1, payloads.length - 1)]));
+  });
+  await listen(server);
+  const apiBaseUrl = "http://127.0.0.1:" + server.address().port + "/v1";
+
+  try {
+    const group = validateGroupConfig({
+      id: "read-list-runtime",
+      name: "Read List Runtime",
+      settings: { maxRounds: 2, minConsensusWeight: 1, stopWhenAllSkip: true, agentTimeoutMs: 1000, allowSoloCouncil: true },
+      agents: [
+        {
+          id: "builder",
+          name: "Builder",
+          role: "Builder",
+          provider: "openai-compatible",
+          apiBaseUrl,
+          allowUnsafePrivateNetwork: true,
+          apiKey: "secret-runtime-key",
+          model: "runtime-model",
+          weight: 1,
+          enabled: true,
+          judge: true,
+          consensusParticipant: true,
+          providerLimits: { contextWindow: 12000, maxOutputTokens: 1000 }
+        }
+      ]
+    });
+
+    const { session } = await runCouncil("Inspect README then answer.", group, tmp, { groupPath });
+    const secondRoundPrompt = requests[1].messages.at(-1).content;
+
+    assert.equal(session.pendingFileOperationProposals.length, 0);
+    assert.equal(session.fileOperationExecutionResults.length, 1);
+    assert.equal(session.fileOperationExecutionResults[0].status, "completed");
+    assert.match(session.fileOperationExecutionResults[0].content, /REAL_READ_RESULT/);
+    assert.match(secondRoundPrompt, /File operation execution results/);
+    assert.match(secondRoundPrompt, /REAL_READ_RESULT/);
+  } finally {
+    await close(server);
+  }
+});
+
 function git(cwd, args) {
   return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
 }
@@ -3050,4 +3453,10 @@ function listen(server) {
 
 function close(server) {
   return new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+}
+
+async function readRequestBody(req) {
+  let body = "";
+  for await (const chunk of req) body += chunk;
+  return body;
 }

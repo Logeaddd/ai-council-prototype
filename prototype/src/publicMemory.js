@@ -1,0 +1,89 @@
+import fs from "node:fs";
+import path from "node:path";
+import { makeId, nowIso } from "./types.js";
+
+const MAX_MEMORY_ITEMS = 80;
+const MAX_MEMORY_TEXT = 4000;
+
+export function listPublicMemories(groupPath) {
+  const filePath = publicMemoryPath(groupPath);
+  if (!fs.existsSync(filePath)) return [];
+  const parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
+  const items = Array.isArray(parsed.items) ? parsed.items : [];
+  return items.map(normalizeMemoryRecord).filter((item) => item.content);
+}
+
+export function upsertPublicMemory(groupPath, record = {}) {
+  const current = listPublicMemories(groupPath);
+  const now = nowIso();
+  const id = cleanId(record.id) || makeId("pmem");
+  const nextRecord = normalizeMemoryRecord({
+    ...record,
+    id,
+    updatedAt: now,
+    createdAt: record.createdAt || current.find((item) => item.id === id)?.createdAt || now
+  });
+  if (!nextRecord.content) throw new Error("Public memory content is required");
+
+  const withoutOld = current.filter((item) => item.id !== id);
+  const items = [...withoutOld, nextRecord].slice(-MAX_MEMORY_ITEMS);
+  writePublicMemoryFile(groupPath, items);
+  return nextRecord;
+}
+
+export function deletePublicMemory(groupPath, id) {
+  const clean = cleanId(id);
+  if (!clean) throw new Error("Public memory id is required");
+  const before = listPublicMemories(groupPath);
+  const items = before.filter((item) => item.id !== clean);
+  writePublicMemoryFile(groupPath, items);
+  return { ok: true, deleted: before.length !== items.length, id: clean };
+}
+
+export function formatPublicMemoriesForPrompt(groupPath) {
+  const items = listPublicMemories(groupPath);
+  if (!items.length) return "";
+  return [
+    "Public memory managed by the summarizer or user. Treat it as an editable summary, not as the original facts.",
+    ...items.map((item, index) => {
+      return [
+        `Memory ${index + 1}: ${item.title || item.id}`,
+        `Source: ${item.source || "unknown"}`,
+        `Updated: ${item.updatedAt || item.createdAt || "unknown"}`,
+        item.sourceSessionId ? `Source session: ${item.sourceSessionId}` : "",
+        item.content
+      ].filter(Boolean).join("\n");
+    })
+  ].join("\n\n");
+}
+
+function normalizeMemoryRecord(record = {}) {
+  return {
+    id: cleanId(record.id) || makeId("pmem"),
+    title: cleanText(record.title, 160),
+    content: cleanText(record.content, MAX_MEMORY_TEXT),
+    source: cleanText(record.source || "user", 80),
+    sourceSessionId: cleanText(record.sourceSessionId || "", 120),
+    createdBy: cleanText(record.createdBy || "user", 80),
+    createdAt: cleanText(record.createdAt || nowIso(), 80),
+    updatedAt: cleanText(record.updatedAt || record.createdAt || nowIso(), 80)
+  };
+}
+
+function writePublicMemoryFile(groupPath, items) {
+  const filePath = publicMemoryPath(groupPath);
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, JSON.stringify({ version: 1, items }, null, 2), "utf8");
+}
+
+function publicMemoryPath(groupPath) {
+  return path.join(path.resolve(groupPath), "shared", "memory", "public-memory.json");
+}
+
+function cleanText(value, max) {
+  return String(value || "").replace(/\u0000/g, "").trim().slice(0, max);
+}
+
+function cleanId(value) {
+  return String(value || "").trim().replace(/[^a-zA-Z0-9_.:-]/g, "_").slice(0, 120);
+}

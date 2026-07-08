@@ -26,9 +26,12 @@ export function buildRoundPrompt(agent, question, session, round, options = {}) 
         independentAnswerModeLine(options),
         reviewProtocolLine(agent, options),
         fileOperationProtocolLine(options),
-        "If speaking, use keys: status, position, argument, objections, objection_items, resolved_ids, suggested_revision, artifacts, file_operations, confidence, memory_candidates.",
-        "Use file_operations only to propose file work. The app will validate, approve, and execute later; you do not have direct filesystem access.",
+        toolRequestProtocolLine(options),
+        "If speaking, use keys: status, position, argument, objections, objection_items, resolved_ids, suggested_revision, artifacts, file_operations, tool_requests, confidence, memory_candidates.",
+        "Use file_operations only to request file work. The app validates every path; read/list can be executed by the app and returned in later context, while write/append/delete require approval before execution. You do not have direct filesystem access.",
         "Each file_operations item must include op, path, reason, expected_effect; write/append also require content. Allowed op values: read, list, write, append, delete.",
+        "Use tool_requests only when you need the app to fetch a web page, search the web, list/read workspace files, search file names, or grep file content before you can answer. Do not invent tool results; wait for the app to return them in later context.",
+        "Each tool_requests item must include tool and reason. For web_search include query. For fetch_url include url. For list_directory/read_file include path. For search_files/grep_content include query and optional path. Allowed tool values: web_search, fetch_url, list_directory, read_file, search_files, grep_content.",
         "If skipping, use keys: status, reason.",
         globalRequirement ? `[Boss global requirement]\n${globalRequirement}` : "",
         resumeInstruction ? `[Continuation]\n${resumeInstruction}` : "",
@@ -134,7 +137,13 @@ function fileOperationProtocolLine(options = {}) {
   if (!options.fileOperationContext) return "";
   const tier = options.fileOperationPermissionTier || "text";
   if (tier === "text") return "You have text-only file permission for this workspace. If the task requires creating or modifying files, do not propose file_operations yourself; discuss requirements and leave file proposals to a member with tool or full file permission.";
-  return "If this task requires creating or modifying workspace files, you MUST propose the change in file_operations with the full file content for write/append. Do not put complete file content only in argument, suggested_revision, or artifacts; those fields may summarize it.";
+  return "If this task requires inspecting workspace files, request read/list in file_operations. If it requires creating or modifying workspace files, you MUST propose the change in file_operations with the full file content for write/append. Do not put complete file content only in argument, suggested_revision, or artifacts; those fields may summarize it.";
+}
+
+function toolRequestProtocolLine(options = {}) {
+  const tier = options.fileOperationPermissionTier || "text";
+  if (tier === "text") return "You have text-only tool permission. Do not request web_search, fetch_url, list_directory, read_file, search_files, or grep_content; explain what information would be needed.";
+  return "You may request built-in tools with tool_requests. Available tools: web_search for live search when configured, fetch_url for reading a public https page, list_directory/read_file for allowed workspace files, search_files for file names, and grep_content for file text. Tool results will be returned by the app in later context.";
 }
 function reviewProtocolLine(agent, options = {}) {
   if (!isReviewerLike(agent)) return "";

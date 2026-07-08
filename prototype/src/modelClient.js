@@ -135,7 +135,8 @@ export function buildOpenAiCompatiblePayload(agent, { model, messages }) {
     messages: applyProviderPromptCache(agent, messages),
     max_tokens: normalizeMaxTokens(agent.maxTokens ?? agent.max_tokens ?? 4096),
     temperature: 0.2,
-    stream: true
+    stream: true,
+    ...openAiReasoningPayload(agent, model)
   };
 }
 
@@ -153,13 +154,62 @@ export function buildAnthropicMessagesPayload(agent, { model, messages }) {
     }))
     .filter((message) => message.content);
 
+  const maxTokens = normalizeMaxTokens(agent.maxTokens ?? agent.max_tokens ?? 4096);
   return {
     model,
     ...(system ? { system } : {}),
     messages: anthropicMessages.length ? anthropicMessages : [{ role: "user", content: "" }],
-    max_tokens: normalizeMaxTokens(agent.maxTokens ?? agent.max_tokens ?? 4096),
-    temperature: 0.2
+    max_tokens: maxTokens,
+    temperature: 0.2,
+    ...anthropicThinkingPayload(agent, model, maxTokens)
   };
+}
+
+function openAiReasoningPayload(agent = {}, model = "") {
+  const effort = normalizeReasoningEffort(agent.reasoningEffort ?? agent.reasoning?.effort);
+  if (!effort) return {};
+  if (!supportsOpenAiReasoningEffort(agent, model)) return {};
+  return { reasoning_effort: effort };
+}
+
+function anthropicThinkingPayload(agent = {}, model = "", maxTokens = 4096) {
+  const effort = normalizeReasoningEffort(agent.reasoningEffort ?? agent.reasoning?.effort);
+  if (!effort) return {};
+  if (!supportsAnthropicThinking(agent, model)) return {};
+  const budget = anthropicThinkingBudget(effort, maxTokens);
+  if (!budget) return {};
+  return { thinking: { type: "enabled", budget_tokens: budget } };
+}
+
+function normalizeReasoningEffort(value) {
+  const effort = String(value || "").trim().toLowerCase();
+  if (["low", "medium", "high"].includes(effort)) return effort;
+  return "";
+}
+
+function supportsOpenAiReasoningEffort(agent = {}, model = "") {
+  const preset = String(agent.providerPreset || agent.providerId || "").toLowerCase();
+  const baseUrl = String(agent.apiBaseUrl || "").toLowerCase();
+  const name = String(model || agent.model || "").toLowerCase();
+  const officialOpenAi = preset === "openai" || baseUrl.includes("api.openai.com");
+  if (!officialOpenAi) return false;
+  return /^(o1|o3|o4|gpt-5|gpt-oss)\b/.test(name);
+}
+
+function supportsAnthropicThinking(agent = {}, model = "") {
+  const preset = String(agent.providerPreset || agent.providerId || "").toLowerCase();
+  const baseUrl = String(agent.apiBaseUrl || "").toLowerCase();
+  const name = String(model || agent.model || "").toLowerCase();
+  const officialAnthropic = preset === "anthropic" || baseUrl.includes("api.anthropic.com");
+  if (!officialAnthropic) return false;
+  return /^claude-(3-7|4|opus-4|sonnet-4)/.test(name);
+}
+
+function anthropicThinkingBudget(effort, maxTokens) {
+  const requested = effort === "low" ? 1024 : effort === "medium" ? 4096 : 8192;
+  const ceiling = Math.max(0, Number(maxTokens) - 1);
+  const budget = Math.min(requested, ceiling);
+  return budget >= 1024 ? budget : 0;
 }
 
 function readAnthropicText(payload) {

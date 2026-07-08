@@ -84,7 +84,7 @@ function TranscriptRow({
     return (
       <div className="flex items-start gap-2 rounded-md bg-secondary/50 px-3 py-2 text-xs text-muted-foreground">
         <Info className="mt-0.5 size-3.5 shrink-0" />
-        <span className="leading-relaxed">{item.body}</span>
+        <span className="leading-relaxed">{cleanSystemBody(item.body)}</span>
       </div>
     )
   }
@@ -160,10 +160,27 @@ function TranscriptRow({
               {item.tokens} tok
             </span>
           ) : null}
+          {item.durationMs ? (
+            <span className="font-mono text-[11px] text-muted-foreground">
+              用时 {formatDuration(item.durationMs)}
+            </span>
+          ) : null}
         </div>
       </div>
     </div>
   )
+}
+
+function formatDuration(value: number) {
+  const totalSeconds = Math.max(0, Math.round(Number(value || 0) / 1000))
+  const minutes = Math.floor(totalSeconds / 60)
+  const seconds = totalSeconds % 60
+  if (!minutes) return `${seconds}秒`
+  return `${minutes}分${seconds}秒`
+}
+
+function cleanSystemBody(body: string) {
+  return body.replace(/^\s*你[:：]\s*/, "")
 }
 
 function TypingRow({ members }: { members: AgentMember[] }) {
@@ -173,10 +190,10 @@ function TypingRow({ members }: { members: AgentMember[] }) {
 
   return (
     <div className="flex items-center gap-2 px-2 py-3 text-xs text-muted-foreground">
-      <span className="flex gap-1">
-        <span className="size-1.5 animate-bounce rounded-full bg-primary [animation-delay:-0.3s]" />
-        <span className="size-1.5 animate-bounce rounded-full bg-primary [animation-delay:-0.15s]" />
-        <span className="size-1.5 animate-bounce rounded-full bg-primary" />
+      <span className="flex h-4 items-end gap-1.5">
+        <span className="size-2 rounded-full bg-primary typing-dot-bounce [animation-delay:-0.24s]" />
+        <span className="size-2 rounded-full bg-primary typing-dot-bounce [animation-delay:-0.12s]" />
+        <span className="size-2 rounded-full bg-primary typing-dot-bounce" />
       </span>
       {speaker?.name || "成员"} 正在输入...
     </div>

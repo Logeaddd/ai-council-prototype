@@ -4,6 +4,7 @@ import {
   Activity,
   Armchair,
   Coins,
+  History,
   LayoutGrid,
   PanelRight,
   Play,
@@ -32,6 +33,7 @@ interface TopBarProps {
   onToggleRun: () => void
   onVisualStyleChange: (s: VisualStyle) => void
   onToggleRight: () => void
+  onOpenHistory: () => void
 }
 
 function Metric({
@@ -68,6 +70,7 @@ export function TopBar({
   onToggleRun,
   onVisualStyleChange,
   onToggleRight,
+  onOpenHistory,
 }: TopBarProps) {
   return (
     <header className="flex h-14 shrink-0 items-center gap-3 border-b border-border bg-card px-3">
@@ -160,6 +163,12 @@ export function TopBar({
               { value: "roundtable", label: "圆桌会议", icon: Armchair, disabled: true },
             ]}
           />
+          <IconButton
+            label="聊天记录"
+            onClick={onOpenHistory}
+          >
+            <History className="size-4" />
+          </IconButton>
           <IconButton
             label={rightOpen ? "关闭侧栏" : "打开侧栏"}
             active={rightOpen}

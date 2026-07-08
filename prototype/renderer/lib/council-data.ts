@@ -30,6 +30,7 @@ export interface AgentMember {
   state: AgentState
   reviewer: boolean
   reviewIntensity: 1 | 2 | 3
+  reasoningEffort?: string
   tokensIn: number
   tokensOut: number
   latencyMs: number | null
@@ -62,6 +63,7 @@ export type TranscriptItem =
       state: AgentState
       body: string
       tokens?: number
+      durationMs?: number
     }
   | {
       kind: "private-hint"
@@ -110,6 +112,14 @@ export interface UsageSummary {
   avgLatencyMs: number
 }
 
+export interface FileAttachment {
+  name: string
+  type: string
+  sizeBytes: number
+  content: string
+  truncated?: boolean
+}
+
 export interface ProviderPreset {
   id: string
   name: string
@@ -128,7 +138,7 @@ export const PERMISSION_LABEL: Record<Permission, string> = {
 export const PERMISSION_HINT: Record<Permission, string> = {
   text: "仅生成文本，不能调用任何工具或改动文件。",
   tool: "可调用受控工具，文件改动需经审批后执行。",
-  full: "可直接执行工具与文件操作，谨慎授予。",
+  full: "完全允许就是自主执行：可自动使用工具和执行安全文件操作，谨慎授予。",
 }
 
 export const ROLE_LABEL: Record<Role, string> = {

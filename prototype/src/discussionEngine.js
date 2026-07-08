@@ -8,12 +8,17 @@ import { appendMemoryCandidates, writeGroupSession, writeSession } from "./stora
 import { assessBudgetUsage, assessSizeUsage } from "./tokenLimits.js";
 import { appendSessionTranscriptChunk, readSummaryCache, updateDeterministicSummaries } from "./summaryCache.js";
 import { appendSessionUsage, estimateCost, estimateMemberAccruedCost } from "./usageStats.js";
+import { formatPublicMemoriesForPrompt } from "./publicMemory.js";
 import { applyObjectionLedger, isReviewerLike } from "./objectionLedger.js";
 import { computeFinalState } from "./finalState.js";
 import { parseFileOperationProposals } from "./fileOperations.js";
+import { executeReadListFileOperations } from "./fileOperationReader.js";
+import { executeToolRequests } from "./toolRequests.js";
+import { extractImportedProjectRoots } from "./fileTools.js";
 import { runAutoFileOperations } from "./fileOperationAutoRunner.js";
 import { enqueueFileOperationProposals } from "./fileOperationQueue.js";
 import { readPrivateContextMessages } from "./privateChat.js";
+import { normalizeFileAttachments } from "./attachments.js";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -27,6 +32,10 @@ export async function runCouncil(question, group, baseDir, options = {}) {
 
 export async function* runCouncilEvents(question, group, baseDir, options = {}) {
   const enabledAgents = group.agents.filter((agent) => agent.enabled);
+  const attachments = normalizeFileAttachments(options.attachments || []);
+  const importedProjectRoots = extractImportedProjectRoots(attachments);
+  const sessionStartMs = Date.now();
+  const sessionStartedAt = nowIso();
   const workMode = normalizeWorkMode(group.settings?.workMode);
   const firstRoundAgents = selectFirstRoundAgents(enabledAgents, {
     startAfterAgentId: options.startAfterAgentId,
@@ -39,6 +48,8 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
   const session = {
     id: makeId("session"),
     question,
+    createdAt: sessionStartedAt,
+    startedAt: sessionStartedAt,
     continuationContext,
     groupId: group.id,
     groupSnapshot: redactGroupForSession(group),
@@ -48,6 +59,10 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
     consensusByRound: [],
     artifacts: [],
     fileOperationProposals: [],
+    fileOperationExecutionResults: [],
+    toolExecutionResults: [],
+    toolRequests: [],
+    rejectedToolRequests: [],
     rejectedFileOperationProposals: [],
     pendingFileOperationProposals: [],
     messages: []
@@ -60,6 +75,8 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
 
     for (const agent of agentsToCall) {
       throwIfAborted(options.signal);
+      const agentStartMs = Date.now();
+      const agentStartedAt = nowIso();
       const seat = findWorkspaceSeat(workspaceGroup, agent);
       const transcriptVisibility = contextVisibilityForAgent(agent, workMode);
       const memberContext = buildMemberContext(agent, session, {
@@ -69,6 +86,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
         continuationContext,
         transcriptVisibility,
         latestBossInstruction: options.latestBossInstruction || "",
+        attachments,
         ...loadSummaryContext(options.groupPath, agent),
         privateBossMessages: loadPrivateBossMessages(options.groupPath, agent)
       });
@@ -83,11 +101,14 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
         agentId: agent.id,
         agentName: agent.name,
         contextStatus,
-        createdAt: nowIso()
+        createdAt: agentStartedAt
       };
 
       if (memberContext.coreOverflow) {
-        const message = buildUnavailableMessage(agent, round, `non_compressible_core_exceeds_input_limit:${contextStatus.nonCompressibleCoreTokens}/${contextStatus.effectiveInputLimit}`, contextStatus);
+        const message = buildUnavailableMessage(agent, round, `non_compressible_core_exceeds_input_limit:${contextStatus.nonCompressibleCoreTokens}/${contextStatus.effectiveInputLimit}`, contextStatus, {
+          startedAt: agentStartedAt,
+          durationMs: elapsedMs(agentStartMs)
+        });
         results.push(message);
         session.messages.push(message);
         recordObjections(session, agent, message.response, round, group.settings);
@@ -105,7 +126,10 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
         agent
       });
       if (budgetBlockReason) {
-        const message = buildUnavailableMessage(agent, round, budgetBlockReason, contextStatus);
+        const message = buildUnavailableMessage(agent, round, budgetBlockReason, contextStatus, {
+          startedAt: agentStartedAt,
+          durationMs: elapsedMs(agentStartMs)
+        });
         results.push(message);
         session.messages.push(message);
         recordObjections(session, agent, message.response, round, group.settings);
@@ -117,12 +141,13 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
         continue;
       }
 
+      const fileOperationPermissionTier = effectiveWorkspacePermissionTier(workspaceGroup, agent);
       const messages = buildRoundPrompt(agent, question, session, round, {
         globalRequirement,
         resumeInstruction: options.startAtAgentId === agent.id ? options.resumeInstruction : "",
         contextSections: buildContextPromptSections(memberContext),
         fileOperationContext: Boolean(options.groupPath),
-        fileOperationPermissionTier: effectiveWorkspacePermissionTier(workspaceGroup, agent),
+        fileOperationPermissionTier,
         groupSettings: group.settings,
         independentAnswerMode: transcriptVisibility === "own",
         hideOpenObjectionLedger: transcriptVisibility === "own"
@@ -155,6 +180,8 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
       let response = rawText.error
         ? { status: "unavailable", reason: rawText.error, retryable: true }
         : parseRoundResponse(rawText.text);
+      let rawTextForMessage = rawText.error ? "" : rawText.text;
+      let errorForMessage = rawText.error;
 
       if (round === 1 && isReviewerLike(agent) && response.status === "skip") {
         response = {
@@ -168,10 +195,99 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
         };
       }
 
+      const toolResult = await executeToolRequests({
+        requests: response.tool_requests || [],
+        permissionTier: fileOperationPermissionTier,
+        agent,
+        round,
+        timeoutMs: group.settings.toolTimeoutMs || 12000,
+        groupPath: options.groupPath,
+        importedProjectRoots,
+        appSettings: options.appSettings,
+        searchApiKey: options.searchApiKey,
+        signal: options.signal
+      });
+      session.toolRequests.push(...toolResult.accepted);
+      session.toolExecutionResults.push(...toolResult.results);
+      session.rejectedToolRequests.push(...toolResult.rejected);
+      for (const event of toolResult.events || []) {
+        yield event;
+      }
+
+      if (toolResult.results.length && response.status === "speak") {
+        const followupContext = buildMemberContext(agent, session, {
+          question,
+          groupSettings: group.settings,
+          globalRequirement,
+          continuationContext,
+          transcriptVisibility,
+          latestBossInstruction: "Tool results from your previous request are now available in context. Use the real tool results to finish this round. Do not repeat a tool request unless new external information is still required.",
+          attachments,
+          ...loadSummaryContext(options.groupPath, agent),
+          privateBossMessages: loadPrivateBossMessages(options.groupPath, agent)
+        });
+        const followupMessages = buildRoundPrompt(agent, question, session, round, {
+          globalRequirement,
+          resumeInstruction: "Tool results have been returned by the app. Finish this round with speak or skip JSON.",
+          contextSections: buildContextPromptSections(followupContext),
+          fileOperationContext: Boolean(options.groupPath),
+          fileOperationPermissionTier,
+          groupSettings: group.settings,
+          independentAnswerMode: transcriptVisibility === "own",
+          hideOpenObjectionLedger: transcriptVisibility === "own"
+        });
+        const followupRecord = notifyModelCall(options, {
+          sessionId: session.id,
+          phase: "tool_followup",
+          round,
+          agentId: agent.id,
+          agentName: agent.name,
+          model: agent.model || "",
+          provider: agent.provider || "",
+          inputMessages: followupMessages
+        });
+        const followupCall = startAgentCallWithDeltaQueue(agent, followupMessages, group.settings.agentTimeoutMs, options.signal);
+        while (!followupCall.done() || followupCall.hasDeltas()) {
+          const delta = await followupCall.nextDelta();
+          if (!delta) continue;
+          yield {
+            type: "agent_delta",
+            round,
+            agentId: agent.id,
+            agentName: agent.name,
+            delta,
+            createdAt: nowIso()
+          };
+        }
+        const followupRaw = await followupCall.result();
+        completeModelCall(followupRecord, followupRaw);
+        response = followupRaw.error
+          ? { status: "unavailable", reason: followupRaw.error, retryable: true }
+          : parseRoundResponse(followupRaw.text);
+        rawTextForMessage = followupRaw.error ? "" : followupRaw.text;
+        errorForMessage = followupRaw.error;
+        if (round === 1 && isReviewerLike(agent) && response.status === "skip") {
+          response = {
+            status: "speak",
+            position: "reviewer_required",
+            argument: "An explicitly assigned reviewer cannot skip in round 1.",
+            objections: ["reviewer_required"],
+            suggested_revision: "Provide at least one concrete in-scope risk or explicitly state what was checked.",
+            confidence: 0,
+            memory_candidates: []
+          };
+        }
+      }
+
       const artifacts = collectMessageArtifacts(response, agent, round);
       session.artifacts.push(...artifacts);
-      const fileOperationResult = collectFileOperationProposals(response, agent, round, options.groupPath);
+      const fileOperationResult = applyFilePermissionTier(
+        collectFileOperationProposals(response, agent, round, options.groupPath),
+        fileOperationPermissionTier
+      );
       session.fileOperationProposals.push(...fileOperationResult.accepted);
+      const readListResults = executeReadListFileOperations(options.groupPath, fileOperationResult.accepted);
+      session.fileOperationExecutionResults.push(...readListResults);
       const queueResult = queueFileOperationProposals(fileOperationResult, options.groupPath);
       session.pendingFileOperationProposals.push(...queueResult.queued);
       session.rejectedFileOperationProposals.push(...queueResult.rejected);
@@ -183,13 +299,19 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
         response,
         artifacts,
         fileOperationProposals: fileOperationResult.accepted,
+        fileOperationExecutionResults: readListResults,
+        toolRequests: toolResult.accepted,
+        toolExecutionResults: toolResult.results,
+        rejectedToolRequests: toolResult.rejected,
         pendingFileOperationProposals: queueResult.queued,
         rejectedFileOperationProposals: [...fileOperationResult.rejected, ...queueResult.rejected],
         displayText: formatDisplayText(agent, response),
-        rawText: rawText.error ? "" : rawText.text,
-        error: rawText.error,
+        rawText: rawTextForMessage,
+        error: errorForMessage,
         contextStatus,
-        createdAt: nowIso()
+        startedAt: agentStartedAt,
+        createdAt: nowIso(),
+        durationMs: elapsedMs(agentStartMs)
       };
       results.push(message);
       session.messages.push(message);
@@ -216,6 +338,8 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
 
   throwIfAborted(options.signal);
   const judge = selectFinalizer(enabledAgents, session);
+  const finalStartMs = Date.now();
+  const finalStartedAt = nowIso();
   const fallback = fallbackFinalDecision(session, consensus);
   const finalSeat = findWorkspaceSeat(workspaceGroup, judge);
   const finalContext = buildMemberContext(judge, session, {
@@ -224,6 +348,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
     globalRequirement,
     continuationContext,
     latestBossInstruction: options.latestBossInstruction || "",
+    attachments,
     ...loadSummaryContext(options.groupPath, judge),
     privateBossMessages: loadPrivateBossMessages(options.groupPath, judge)
   });
@@ -242,7 +367,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
     agentId: judge.id,
     agentName: judge.name,
     contextStatus: finalContextStatus,
-    createdAt: nowIso()
+    createdAt: finalStartedAt
   };
   if (finalContext.coreOverflow) {
     session.finalDecision = {
@@ -280,6 +405,8 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
       ? { ...fallback, risks: [...fallback.risks, finalRaw.error] }
       : parseFinalDecision(finalRaw.text, fallback);
   }
+  session.finalDecision.startedAt = finalStartedAt;
+  session.finalDecision.durationMs = elapsedMs(finalStartMs);
   applyEngineFinalState(session, consensus, group.settings);
   if (options.groupPath) {
     const fileExecution = runAutoFileOperations({
@@ -291,6 +418,8 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
     session.finalDecision.file_execution_results = fileExecution.results;
   }
   session.finalDecision.memory_candidates = limitMemoryCandidates(session.finalDecision.memory_candidates);
+  session.completedAt = nowIso();
+  session.durationMs = elapsedMs(sessionStartMs);
   session.status = "completed";
 
   const sessionPath = options.groupPath
@@ -315,7 +444,8 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
     session,
     finalDecision: session.finalDecision,
     contextStatus: finalContextStatus,
-    createdAt: nowIso()
+    durationMs: session.finalDecision.durationMs,
+    createdAt: session.completedAt
   };
   yield {
     type: "done",
@@ -726,6 +856,7 @@ function loadSummaryContext(groupPath, agent) {
     return {
       memberShortSummary: cache.memberShortSummary,
       groupSharedSummary: [
+        formatPublicMemoriesForPrompt(groupPath),
         cache.groupSharedSummary,
         formatCompressedTranscriptChunks(cache.compressedTranscriptChunks)
       ].filter(Boolean).join("\n\n")
@@ -766,7 +897,7 @@ function formatCompressedTranscriptChunks(chunks = []) {
   return summaries.join("\n");
 }
 
-function buildUnavailableMessage(agent, round, reason, contextStatus) {
+function buildUnavailableMessage(agent, round, reason, contextStatus, timing = {}) {
   const response = {
     status: "unavailable",
     reason,
@@ -782,8 +913,14 @@ function buildUnavailableMessage(agent, round, reason, contextStatus) {
     rawText: "",
     error: reason,
     contextStatus,
-    createdAt: nowIso()
+    startedAt: timing.startedAt || nowIso(),
+    createdAt: nowIso(),
+    durationMs: Number(timing.durationMs || 0)
   };
+}
+
+function elapsedMs(startMs) {
+  return Math.max(0, Date.now() - Number(startMs || Date.now()));
 }
 
 function collectMessageArtifacts(response, agent, round) {
@@ -825,9 +962,29 @@ function queueFileOperationProposals(fileOperationResult, groupPath) {
   if (!groupPath) return { queued: [], rejected: [] };
   return enqueueFileOperationProposals({
     groupPath,
-    accepted: fileOperationResult.accepted,
+    accepted: fileOperationResult.accepted.filter((proposal) => proposal.op !== "read" && proposal.op !== "list"),
     rejected: fileOperationResult.rejected
   });
+}
+
+function applyFilePermissionTier(fileOperationResult, tier) {
+  if (tier !== "text") return fileOperationResult;
+  return {
+    accepted: [],
+    rejected: [
+      ...fileOperationResult.rejected,
+      ...fileOperationResult.accepted.map((proposal) => ({
+        id: proposal.id,
+        op: proposal.op,
+        path: proposal.path,
+        sourceIndex: proposal.sourceIndex,
+        source_agent_id: proposal.source_agent_id,
+        source_agent_name: proposal.source_agent_name,
+        code: "permission_denied",
+        reason: "Seat has text-only permission and cannot request file operations."
+      }))
+    ]
+  };
 }
 
 function formatDisplayText(agent, response) {

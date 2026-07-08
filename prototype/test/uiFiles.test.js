@@ -247,6 +247,40 @@ test("preferences wording is removed while group pin and delete actions are wire
   assert.match(live, /\/api\/groups-index\/remove/);
 });
 
+test("settings page is category-first and avoids explanatory filler text", () => {
+  const settings = read("renderer/components/council/settings-sheet.tsx");
+  const sidebar = read("renderer/components/council/groups-sidebar.tsx");
+
+  for (const label of [
+    "议会规则",
+    "网络搜索",
+    "MCP 服务器",
+    "技能",
+    "插件",
+  ]) {
+    assert.match(settings, new RegExp(label));
+  }
+
+  for (const text of [
+    "议会规则应用",
+    "能力设置",
+    "填写 Brave",
+    "工具授权或完全允许",
+    "这些设置会",
+    "控制成员之间",
+    "对全体成员生效",
+    "达到上限后",
+    "限制单个成员",
+  ]) {
+    assert.doesNotMatch(settings, new RegExp(text));
+  }
+
+  assert.doesNotMatch(settings, /description=/);
+  assert.doesNotMatch(settings, /hint=/);
+  assert.doesNotMatch(sidebar, />\s*全局要求\s*</);
+  assert.match(sidebar, />\s*设置\s*</);
+});
+
 test("renderer does not seed undeletable demo council groups", () => {
   const data = read("renderer/lib/council-data.ts");
   const app = read("renderer/components/council/council-app.tsx");
@@ -312,4 +346,78 @@ test("renderer source does not contain common mojibake markers", () => {
   for (const file of files) {
     assert.doesNotMatch(read(file), /灏忕粍|璇达細|鍏ㄥ|鏅鸿兘|闃诲|绉佽亰|寰呭|鐩戣€?/);
   }
+});
+
+test("renderer sends real file attachments with council and private messages", () => {
+  const composer = read("renderer/components/council/composer.tsx");
+  const app = read("renderer/components/council/council-app.tsx");
+  const live = read("renderer/lib/council-live.ts");
+  assert.match(composer, /Paperclip/);
+  assert.match(composer, /FolderOpen/);
+  assert.match(composer, /type="file"/);
+  assert.match(composer, /file\.text\(\)/);
+  assert.match(composer, /pickProjectFolder/);
+  assert.match(composer, /importProjectFolder/);
+  assert.match(composer, /MAX_ATTACHMENT_BYTES/);
+  assert.match(composer, /attachments: files/);
+  assert.match(live, /\/api\/project-folder-picker/);
+  assert.match(live, /\/api\/project\/import/);
+  assert.match(app, /type FileAttachment/);
+  assert.match(app, /attachments,\s*\n\s*runtimeGroup/);
+  assert.match(app, /attachments,\s*\n\s*\}/);
+});
+
+test("renderer keeps per-group drafts and opens real chat history", () => {
+  const composer = read("renderer/components/council/composer.tsx");
+  const app = read("renderer/components/council/council-app.tsx");
+  const topBar = read("renderer/components/council/top-bar.tsx");
+  const history = read("renderer/components/council/chat-history-sheet.tsx");
+  const live = read("renderer/lib/council-live.ts");
+  const data = read("renderer/lib/council-data.ts");
+
+  assert.match(composer, /DRAFT_PREFIX/);
+  assert.match(composer, /draftKey/);
+  assert.match(composer, /localStorage\.getItem/);
+  assert.match(composer, /localStorage\.setItem/);
+  assert.match(app, /draftKey=\{group\.path \|\| group\.id \|\| ""\}/);
+  assert.match(topBar, /聊天记录/);
+  assert.match(history, /fetchChatSessions/);
+  assert.match(history, /fetchChatSession/);
+  assert.match(live, /\/api\/sessions\?groupPath=/);
+  assert.match(live, /\/api\/session\?groupPath=/);
+  assert.match(data, /完全允许就是自主执行/);
+});
+
+test("renderer data layer exposes real public memory APIs for the future settings UI", () => {
+  const live = read("renderer/lib/council-live.ts");
+  assert.match(live, /PublicMemoryRecord/);
+  assert.match(live, /fetchPublicMemories/);
+  assert.match(live, /savePublicMemory/);
+  assert.match(live, /deletePublicMemory/);
+  assert.match(live, /\/api\/public-memory/);
+});
+
+test("renderer displays real duration fields and configurable agent timeout", () => {
+  const data = read("renderer/lib/council-data.ts");
+  const live = read("renderer/lib/council-live.ts");
+  const app = read("renderer/components/council/council-app.tsx");
+  const settings = read("renderer/components/council/settings-sheet.tsx");
+  const transcript = read("renderer/components/council/transcript-panel.tsx");
+
+  assert.match(data, /durationMs\?: number/);
+  assert.match(live, /durationMs: Number\(message\.durationMs/);
+  assert.match(live, /second: "2-digit"/);
+  assert.match(app, /agentTimeoutMinutes/);
+  assert.match(app, /agentTimeoutMs: values\.agentTimeoutMinutes \* 60_000/);
+  assert.match(settings, /单个 AI 最长等待时间/);
+  assert.match(transcript, /用时 \{formatDuration\(item\.durationMs\)\}/);
+});
+
+test("renderer does not prefix the user's submitted question with a speaker label", () => {
+  const app = read("renderer/components/council/council-app.tsx");
+  const transcript = read("renderer/components/council/transcript-panel.tsx");
+  assert.match(app, /:\s*question,/);
+  assert.doesNotMatch(app, /`你：\$\{question\}/);
+  assert.match(transcript, /cleanSystemBody\(item\.body\)/);
+  assert.match(transcript, /replace\(\/\^\\s\*你\[:：\]\\s\*\//);
 });

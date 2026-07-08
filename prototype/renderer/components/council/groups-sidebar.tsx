@@ -107,7 +107,7 @@ export function GroupsSidebar({
           className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[13px] text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-sidebar-foreground"
         >
           <Sliders className="size-4" />
-          全局要求
+          设置
         </button>
       </div>
     </nav>

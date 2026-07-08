@@ -197,6 +197,59 @@ test("context prompt sections include file operation execution results", () => {
   assert.match(core, /overwrite_requires_confirmation/);
 });
 
+test("context prompt sections include web tool execution results", () => {
+  const context = buildMemberContext(agent, {
+    question: "Check current sources.",
+    unresolvedObjections: {},
+    artifacts: [],
+    toolExecutionResults: [
+      {
+        id: "tool_1",
+        tool: "web_search",
+        status: "completed",
+        query: "AI Council",
+        result: { ok: true, results: [{ title: "AI Council", url: "https://example.com" }] },
+        source_agent_id: "critic",
+        source_agent_name: "Critic"
+      }
+    ],
+    messages: []
+  });
+  const sections = buildContextPromptSections(context);
+  const core = sections.find((section) => section.title === "Non-compressible core")?.content || "";
+
+  assert.match(core, /Tool execution results/);
+  assert.match(core, /AI Council/);
+  assert.match(core, /https:\/\/example\.com/);
+});
+
+test("context prompt sections include user attached text files in protected core", () => {
+  const context = buildMemberContext(agent, {
+    question: "Review attached project notes.",
+    unresolvedObjections: {},
+    artifacts: [],
+    messages: [
+      { round: 1, agentName: "Builder", response: { status: "speak", argument: "old transcript" } }
+    ]
+  }, {
+    attachments: [
+      {
+        name: "PROJECT_NOTES.md",
+        type: "text/markdown",
+        sizeBytes: 42,
+        content: "ATTACHMENT_SECRET: context plan goes here."
+      }
+    ]
+  });
+  const sections = buildContextPromptSections(context);
+  const core = sections.find((section) => section.title === "Non-compressible core")?.content || "";
+
+  assert.equal(context.core.attachedFiles.length, 1);
+  assert.match(core, /User attached files/);
+  assert.match(core, /PROJECT_NOTES\.md/);
+  assert.match(core, /ATTACHMENT_SECRET/);
+});
+
 test("independent member context hides other ordinary members' answers", () => {
   const context = buildMemberContext({
     ...agent,
@@ -220,6 +273,10 @@ test("independent member context hides other ordinary members' answers", () => {
     fileOperationExecutionResults: [
       { source_agent_id: "alpha", path: "alpha.js", status: "executed" },
       { source_agent_id: "beta", path: "beta.js", status: "executed" }
+    ],
+    toolExecutionResults: [
+      { source_agent_id: "alpha", tool: "web_search", result: { results: [{ title: "ALPHA_TOOL_SECRET" }] } },
+      { source_agent_id: "beta", tool: "web_search", result: { results: [{ title: "BETA_TOOL_SECRET" }] } }
     ]
   }, {
     transcriptVisibility: "own",
@@ -233,10 +290,12 @@ test("independent member context hides other ordinary members' answers", () => {
   assert.match(combined, /ALPHA_ARTIFACT_SECRET/);
   assert.match(combined, /ALPHA_LEDGER_SECRET/);
   assert.match(combined, /alpha\.js/);
+  assert.match(combined, /ALPHA_TOOL_SECRET/);
   assert.doesNotMatch(combined, /BETA_MESSAGE_SECRET/);
   assert.doesNotMatch(combined, /BETA_ARTIFACT_SECRET/);
   assert.doesNotMatch(combined, /BETA_LEDGER_SECRET/);
   assert.doesNotMatch(combined, /beta\.js/);
+  assert.doesNotMatch(combined, /BETA_TOOL_SECRET/);
 });
 
 

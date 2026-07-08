@@ -1,4 +1,5 @@
 import { isReviewerLike } from "./objectionLedger.js";
+import { formatFileAttachmentsForPrompt, normalizeFileAttachments } from "./attachments.js";
 import { estimateMessagesTokens, estimateTokens, hasCoreOverflow, resolveEffectiveLimits } from "./tokenLimits.js";
 
 const DEFAULT_RECENT_MESSAGES = 6;
@@ -13,6 +14,8 @@ export function buildMemberContext(agent, session, options = {}) {
   const latestArtifacts = selectLatestArtifacts(selectVisibleArtifacts(session.artifacts || [], agent, transcriptVisibility));
   const unresolvedObjections = selectVisibleObjections(session.unresolvedObjections || {}, agent, transcriptVisibility);
   const fileOperationExecutionResults = selectVisibleFileOperationResults(session.fileOperationExecutionResults || [], agent, transcriptVisibility);
+  const toolExecutionResults = selectVisibleToolResults(session.toolExecutionResults || [], agent, transcriptVisibility);
+  const attachedFiles = normalizeFileAttachments(options.attachments || []);
   const stable = {
     roleIdentity: roleIdentity(agent),
     roleAssignment: roleAssignmentLine(agent),
@@ -28,7 +31,9 @@ export function buildMemberContext(agent, session, options = {}) {
     unresolvedObjections,
     executionStandard: options.executionStandard || "",
     verificationStandard: options.verificationStandard || "",
-    fileOperationExecutionResults
+    fileOperationExecutionResults,
+    toolExecutionResults,
+    attachedFiles
   };
   const summaries = {
     memberShortSummary: options.memberShortSummary || "",
@@ -103,7 +108,9 @@ export function buildContextPromptSections(context) {
       `Unresolved objections: ${JSON.stringify(context.core.unresolvedObjections)}`,
       context.core.executionStandard ? `Execution standard: ${context.core.executionStandard}` : "",
       context.core.verificationStandard ? `Verification standard: ${context.core.verificationStandard}` : "",
-      context.core.fileOperationExecutionResults?.length ? `File operation execution results: ${JSON.stringify(context.core.fileOperationExecutionResults)}` : ""
+      context.core.attachedFiles?.length ? `User attached files:\n${formatFileAttachmentsForPrompt(context.core.attachedFiles)}` : "",
+      context.core.fileOperationExecutionResults?.length ? `File operation execution results: ${JSON.stringify(context.core.fileOperationExecutionResults)}` : "",
+      context.core.toolExecutionResults?.length ? `Tool execution results: ${JSON.stringify(context.core.toolExecutionResults)}` : ""
     ]],
     ["Summaries", [
       context.summaries.memberShortSummary ? `Member summary: ${context.summaries.memberShortSummary}` : "",
@@ -151,6 +158,14 @@ function selectVisibleObjections(unresolvedObjections, agent, visibility) {
 }
 
 function selectVisibleFileOperationResults(results, agent, visibility) {
+  if (visibility === "full") return results;
+  return results.filter((item) => {
+    const source = item.source_agent_id || item.sourceAgentId || item.proposedBy?.seatId || item.proposedBy?.id;
+    return source === agent.id;
+  });
+}
+
+function selectVisibleToolResults(results, agent, visibility) {
   if (visibility === "full") return results;
   return results.filter((item) => {
     const source = item.source_agent_id || item.sourceAgentId || item.proposedBy?.seatId || item.proposedBy?.id;
@@ -228,7 +243,9 @@ function contextMessagesFromCore(core) {
     { role: "user", content: JSON.stringify(core.unresolvedObjections) },
     { role: "user", content: core.executionStandard },
     { role: "user", content: core.verificationStandard },
-    { role: "user", content: JSON.stringify(core.fileOperationExecutionResults || []) }
+    { role: "user", content: formatFileAttachmentsForPrompt(core.attachedFiles || []) },
+    { role: "user", content: JSON.stringify(core.fileOperationExecutionResults || []) },
+    { role: "user", content: JSON.stringify(core.toolExecutionResults || []) }
   ].filter((message) => message.content);
 }
 

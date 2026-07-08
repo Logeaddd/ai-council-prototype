@@ -47,7 +47,8 @@ export function initGroupWorkspace(options) {
       providerPreset: member.providerPreset || "",
       apiBaseUrl: member.apiBaseUrl || member.apiUrl || "",
       apiUrl: member.apiUrl || member.apiBaseUrl || "",
-      apiKey: member.apiKey || ""
+      apiKey: member.apiKey || "",
+      reasoningEffort: normalizeReasoningEffort(member.reasoningEffort)
     };
   });
 
@@ -136,6 +137,7 @@ export function addMember(options) {
     mandatoryRedTeam: Boolean(options.mandatoryRedTeam || reviewer),
     judge,
     reviewIntensity: normalizeReviewIntensity(options.reviewIntensity),
+    reasoningEffort: normalizeReasoningEffort(options.reasoningEffort),
     providerPreset: options.providerPreset || "",
     apiBaseUrl: options.apiBaseUrl || options.apiUrl || "",
     apiUrl: options.apiUrl || options.apiBaseUrl || "",
@@ -219,6 +221,12 @@ function normalizeReviewIntensity(value) {
   const count = Number.parseInt(String(value || 2), 10);
   if (count === 1 || count === 2 || count === 3) return count;
   return 2;
+}
+
+function normalizeReasoningEffort(value) {
+  const effort = String(value || "").trim().toLowerCase();
+  if (["low", "medium", "high"].includes(effort)) return effort;
+  return "";
 }
 
 function normalizeSeatRole(value) {

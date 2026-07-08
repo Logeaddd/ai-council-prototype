@@ -271,8 +271,10 @@ test("round prompt advertises artifacts in speak schema", () => {
     role: "Executor"
   }, "Question", { messages: [] }, 1);
 
-  assert.match(messages[0].content, /suggested_revision, artifacts, file_operations, confidence/);
-  assert.match(messages[0].content, /only to propose file work/);
+  assert.match(messages[0].content, /suggested_revision, artifacts, file_operations, tool_requests, confidence/);
+  assert.match(messages[0].content, /only to request file work/);
+  assert.match(messages[0].content, /Do not invent tool results/);
+  assert.match(messages[0].content, /read\/list can be executed by the app/);
   assert.match(messages[0].content, /op, path, reason, expected_effect/);
   assert.match(messages[0].content, /write\/append also require content/);
 });

@@ -38,7 +38,30 @@ test("server exposes an SSE council events endpoint", () => {
   assert.match(serverJs, /loadCouncilGroupFromRequest/);
   assert.match(serverJs, /runtimeGroup/);
   assert.match(serverJs, /continuationContext: body\.continuationContext/);
+  assert.match(serverJs, /attachments: normalizeFileAttachments\(body\.attachments \|\| \[\]\)/);
   assert.match(serverJs, /req\.on\("close", \(\) => controller\.abort\(\)\)/);
+});
+
+test("server validates user file attachments before sending them to agents", () => {
+  const serverJs = fs.readFileSync(path.join(root, "src", "server.js"), "utf8");
+  const attachmentsJs = fs.readFileSync(path.join(root, "src", "attachments.js"), "utf8");
+  assert.match(serverJs, /normalizeFileAttachments/);
+  assert.match(serverJs, /\/api\/private-chat/);
+  assert.match(attachmentsJs, /MAX_FILE_ATTACHMENTS = 8/);
+  assert.match(attachmentsJs, /MAX_ATTACHMENT_BYTES = 256 \* 1024/);
+  assert.match(attachmentsJs, /MAX_TOTAL_ATTACHMENT_BYTES = 768 \* 1024/);
+  assert.match(attachmentsJs, /looks like binary data/);
+});
+
+test("server exposes real project folder import for council context", () => {
+  const serverJs = fs.readFileSync(path.join(root, "src", "server.js"), "utf8");
+  const importerJs = fs.readFileSync(path.join(root, "src", "projectImporter.js"), "utf8");
+  assert.match(serverJs, /\/api\/project-folder-picker/);
+  assert.match(serverJs, /\/api\/project\/import/);
+  assert.match(serverJs, /importProjectFolder\(body\.folderPath/);
+  assert.match(importerJs, /project-directory-tree\.txt/);
+  assert.match(importerJs, /node_modules/);
+  assert.match(importerJs, /Text files imported/);
 });
 
 test("server clamps requested autonomous max rounds", () => {
@@ -111,6 +134,7 @@ test("server stores app settings under local user-data and guards groups root", 
   assert.match(serverJs, /containsGroup/);
   assert.match(serverJs, /group\.json/);
   assert.match(serverJs, /readAppSettings/);
+  assert.match(serverJs, /redactAppSettingsForClient/);
   assert.match(serverJs, /updateAppSettings/);
   assert.match(serverJs, /resolveWorkspaceRoot\(body\.groupsRoot\)/);
   assert.match(serverJs, /AI_COUNCIL_DATA_DIR/);
@@ -118,6 +142,8 @@ test("server stores app settings under local user-data and guards groups root", 
   assert.match(appSettingsJs, /userDataDir/);
   assert.match(appSettingsJs, /app-settings\.json/);
   assert.match(appSettingsJs, /groupsRoot/);
+  assert.match(appSettingsJs, /storedKeyConfigured/);
+  assert.match(appSettingsJs, /envKeyConfigured/);
 });
 
 test("server exposes guarded usage stats endpoint", () => {
@@ -128,6 +154,29 @@ test("server exposes guarded usage stats endpoint", () => {
   assert.match(serverJs, /resolveWorkspacePath\(requireQuery\(url, "groupPath"\), "groupPath"\)/);
   assert.match(usageStatsJs, /shared", "usage", "usage\.jsonl"/);
   assert.match(usageStatsJs, /private_memory", "usage\.jsonl"/);
+});
+
+test("server exposes guarded chat history endpoints", () => {
+  const serverJs = fs.readFileSync(path.join(root, "src", "server.js"), "utf8");
+  const storageJs = fs.readFileSync(path.join(root, "src", "storage.js"), "utf8");
+  assert.match(serverJs, /\/api\/sessions/);
+  assert.match(serverJs, /\/api\/session/);
+  assert.match(serverJs, /listGroupSessions/);
+  assert.match(serverJs, /readGroupSession/);
+  assert.match(serverJs, /resolveWorkspacePath\(requireQuery\(url, "groupPath"\), "groupPath"\)/);
+  assert.match(storageJs, /Invalid session id/);
+});
+
+test("server exposes guarded public memory endpoints", () => {
+  const serverJs = fs.readFileSync(path.join(root, "src", "server.js"), "utf8");
+  const memoryJs = fs.readFileSync(path.join(root, "src", "publicMemory.js"), "utf8");
+  assert.match(serverJs, /\/api\/public-memory/);
+  assert.match(serverJs, /listPublicMemories/);
+  assert.match(serverJs, /upsertPublicMemory/);
+  assert.match(serverJs, /deletePublicMemory/);
+  assert.match(serverJs, /resolveWorkspacePath\(requireQuery\(url, "groupPath"\), "groupPath"\)/);
+  assert.match(serverJs, /resolveWorkspacePath\(body\.groupPath, "groupPath"\)/);
+  assert.match(memoryJs, /public-memory\.json/);
 });
 
 test("server exposes guarded file operation endpoints", () => {
@@ -164,4 +213,18 @@ test("server exposes model discovery endpoints with source labels", () => {
   assert.match(discoveryJs, /real_response/);
   assert.match(discoveryJs, /timeout_inference/);
   assert.match(discoveryJs, /cache/);
+});
+
+test("server exposes real capability and guarded web tool endpoints", () => {
+  const serverJs = fs.readFileSync(path.join(root, "src", "server.js"), "utf8");
+  const capabilityJs = fs.readFileSync(path.join(root, "src", "capabilityRegistry.js"), "utf8");
+  const webToolsJs = fs.readFileSync(path.join(root, "src", "webTools.js"), "utf8");
+
+  assert.match(serverJs, /\/api\/capabilities/);
+  assert.match(serverJs, /\/api\/tools\/fetch-url/);
+  assert.match(serverJs, /\/api\/tools\/web-search/);
+  assert.match(capabilityJs, /web-search/);
+  assert.match(capabilityJs, /needs_config/);
+  assert.match(webToolsJs, /Blocked unsafe URL/);
+  assert.match(webToolsJs, /api\.search\.brave\.com/);
 });

@@ -111,3 +111,21 @@
     @apply font-sans;
   }
 }
+
+@layer utilities {
+  .typing-dot-bounce {
+    animation: typing-dot-bounce 0.72s ease-in-out infinite;
+  }
+}
+
+@keyframes typing-dot-bounce {
+  0%,
+  100% {
+    opacity: 0.55;
+    transform: translateY(0) scale(0.92);
+  }
+  45% {
+    opacity: 1;
+    transform: translateY(-7px) scale(1.18);
+  }
+}
