@@ -285,6 +285,7 @@ test("round prompt advertises artifacts in speak schema", () => {
   assert.match(messages[0].content, /run_tests/);
   assert.match(messages[0].content, /git_operation/);
   assert.match(messages[0].content, /browser_control/);
+  assert.match(messages[0].content, /database_query/);
   assert.match(messages[0].content, /sessionId and optional round/);
   assert.match(messages[0].content, /read\/list can be executed by the app/);
   assert.match(messages[0].content, /op, path, reason, expected_effect/);
@@ -317,7 +318,7 @@ test("text-only workspace round prompt does not ask the member to propose file_o
   });
 
   assert.match(messages[0].content, /text-only file permission/);
-  assert.match(messages[0].content, /Do not request .*api_request.*search_context.*load_context.*extract_archive.*execute_command.*run_code.*install_package.*run_tests.*git_operation.*browser_control/);
+  assert.match(messages[0].content, /Do not request .*api_request.*search_context.*load_context.*extract_archive.*execute_command.*run_code.*install_package.*run_tests.*git_operation.*browser_control.*database_query/);
   assert.match(messages[0].content, /do not propose file_operations yourself/);
   assert.doesNotMatch(messages[0].content, /MUST propose the change in file_operations/);
 });
@@ -349,6 +350,9 @@ test("full tool prompt advertises full-only tools while tool tier does not", () 
   assert.match(full[0].content, /run_tests for real npm, pytest, cargo, or custom test commands/);
   assert.match(full[0].content, /git_operation for real Git status/);
   assert.match(full[0].content, /browser_control for opening a real browser page/);
+  assert.match(full[0].content, /database_query for reading or writing SQLite/);
+  assert.match(tool[0].content, /database_query for read-only SQLite SELECT queries/);
+  assert.match(tool[0].content, /database_query write operations require full permission/);
   assert.match(tool[0].content, /extract_archive, execute_command, run_code, install_package, run_tests, git_operation, and browser_control require full permission/);
   assert.doesNotMatch(tool[0].content, /extract_archive for zip files/);
   assert.doesNotMatch(tool[0].content, /execute_command for real shell commands/);
@@ -357,6 +361,7 @@ test("full tool prompt advertises full-only tools while tool tier does not", () 
   assert.doesNotMatch(tool[0].content, /run_tests for real/);
   assert.doesNotMatch(tool[0].content, /git_operation for real Git/);
   assert.doesNotMatch(tool[0].content, /browser_control for opening/);
+  assert.doesNotMatch(tool[0].content, /database_query for reading or writing/);
 });
 
 test("reviewer prompt includes intensity, scope gate, duplicate gate, and open ledger", () => {

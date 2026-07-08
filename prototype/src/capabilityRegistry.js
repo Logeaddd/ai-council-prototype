@@ -115,6 +115,16 @@ export function listCapabilities(options = {}) {
       requirement: "完全允许"
     },
     {
+      id: "database-query",
+      label: "数据库",
+      kind: "tool",
+      status: "ready",
+      enabled: true,
+      provider: "built-in SQLite",
+      source: "local_server",
+      requirement: "读取需工具授权，写入需完全允许"
+    },
+    {
       id: "public-memory",
       label: "公共记忆",
       kind: "memory",

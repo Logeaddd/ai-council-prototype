@@ -9,6 +9,7 @@ import { runTestsTool } from "./testRunTools.js";
 import { apiRequestTool } from "./apiTools.js";
 import { gitOperationTool } from "./gitTools.js";
 import { browserControlTool } from "./browserTools.js";
+import { databaseQueryTool } from "./databaseTools.js";
 import { loadSessionContextArchiveItem, searchSessionContextArchive } from "./storage.js";
 import fs from "node:fs";
 import path from "node:path";
@@ -29,7 +30,8 @@ const ALLOWED_TOOLS = new Set([
   "run_tests",
   "api_request",
   "git_operation",
-  "browser_control"
+  "browser_control",
+  "database_query"
 ]);
 const FILE_TOOLS = new Set(["list_directory", "read_file", "search_files", "grep_content"]);
 const CONTEXT_TOOLS = new Set(["search_context", "load_context"]);
@@ -41,6 +43,7 @@ const TEST_TOOLS = new Set(["run_tests"]);
 const API_TOOLS = new Set(["api_request"]);
 const GIT_TOOLS = new Set(["git_operation"]);
 const BROWSER_TOOLS = new Set(["browser_control"]);
+const DATABASE_TOOLS = new Set(["database_query"]);
 const FULL_PERMISSION_TOOLS = new Set(["extract_archive", "execute_command", "run_code", "install_package", "run_tests", "git_operation", "browser_control"]);
 
 export function normalizeToolRequests(value) {
@@ -71,7 +74,7 @@ export async function executeToolRequests(options = {}) {
     };
 
     if (!ALLOWED_TOOLS.has(normalized.tool)) {
-      const rejection = reject(base, "invalid_tool", "Tool must be one of web_search, fetch_url, list_directory, read_file, search_files, grep_content, search_context, load_context, extract_archive, execute_command, run_code, install_package, run_tests, api_request, git_operation, browser_control.");
+      const rejection = reject(base, "invalid_tool", "Tool must be one of web_search, fetch_url, list_directory, read_file, search_files, grep_content, search_context, load_context, extract_archive, execute_command, run_code, install_package, run_tests, api_request, git_operation, browser_control, database_query.");
       rejected.push(rejection);
       events.push(toolEvent("tool_failure", base, { status: "rejected", code: rejection.code, error: rejection.error }));
       appendToolAuditLog(options.groupPath, "rejected", rejection);
@@ -82,6 +85,7 @@ export async function executeToolRequests(options = {}) {
       appendApiAuditLog(options.groupPath, "rejected", rejection);
       appendGitAuditLog(options.groupPath, "rejected", rejection);
       appendBrowserAuditLog(options.groupPath, "rejected", rejection);
+      appendDatabaseAuditLog(options.groupPath, "rejected", rejection);
       continue;
     }
     if (permissionTier === "text") {
@@ -96,6 +100,7 @@ export async function executeToolRequests(options = {}) {
       appendApiAuditLog(options.groupPath, "rejected", rejection);
       appendGitAuditLog(options.groupPath, "rejected", rejection);
       appendBrowserAuditLog(options.groupPath, "rejected", rejection);
+      appendDatabaseAuditLog(options.groupPath, "rejected", rejection);
       continue;
     }
     if (FULL_PERMISSION_TOOLS.has(normalized.tool) && permissionTier !== "full") {
@@ -110,6 +115,7 @@ export async function executeToolRequests(options = {}) {
       appendApiAuditLog(options.groupPath, "rejected", rejection);
       appendGitAuditLog(options.groupPath, "rejected", rejection);
       appendBrowserAuditLog(options.groupPath, "rejected", rejection);
+      appendDatabaseAuditLog(options.groupPath, "rejected", rejection);
       continue;
     }
 
@@ -134,6 +140,7 @@ export async function executeToolRequests(options = {}) {
     appendApiAuditLog(options.groupPath, "completed", result);
     appendGitAuditLog(options.groupPath, "completed", result);
     appendBrowserAuditLog(options.groupPath, "completed", result);
+    appendDatabaseAuditLog(options.groupPath, "completed", result);
   }
 
   return { accepted, rejected, results, events };
@@ -321,6 +328,19 @@ async function executeOne(request, options) {
         result
       });
     }
+    if (request.tool === "database_query") {
+      const result = await databaseQueryTool(request, {
+        groupPath: options.groupPath,
+        permissionTier: options.permissionTier || "text",
+        maxDatabaseRows: options.maxDatabaseRows
+      });
+      return resultRecord(request, {
+        status: result.ok ? "completed" : "failed",
+        code: result.code,
+        error: result.error,
+        result
+      });
+    }
     const result = await searchWeb(request.query, {
       timeoutMs: options.timeoutMs,
       count: request.count,
@@ -374,6 +394,11 @@ function normalizeToolRequest(item, index) {
     steps: arrayOfObjects(item.steps),
     viewport: objectField(item.viewport),
     waitMs: normalizeOptionalNumber(item.waitMs || item.wait_ms),
+    databasePath: stringField(item.databasePath || item.database_path || item.dbPath || item.db_path),
+    sql: stringField(item.sql),
+    params: arrayOfPrimitive(item.params),
+    mode: stringField(item.mode),
+    maxRows: normalizeOptionalNumber(item.maxRows || item.max_rows),
     headers: objectField(item.headers),
     body: item.body,
     json: item.json,
@@ -382,6 +407,7 @@ function normalizeToolRequest(item, index) {
     background: Boolean(item.background),
     force: Boolean(item.force),
     screenshot: Boolean(item.screenshot),
+    create: Boolean(item.create),
     reason: stringField(item.reason),
     count: normalizeCount(item.count, tool),
     maxBytes: normalizeMaxBytes(item.maxBytes || item.max_bytes),
@@ -422,12 +448,18 @@ function reject(request, code, reason) {
     steps: request.steps,
     viewport: request.viewport,
     waitMs: request.waitMs,
+    databasePath: request.databasePath,
+    sql: request.sql ? summarizeBodyForStorage(request.sql) : undefined,
+    params: request.params,
+    mode: request.mode,
+    maxRows: request.maxRows,
     headers: safeHeadersForStorage(request.headers),
     archiveRound: request.archiveRound,
     overwrite: request.overwrite,
     background: request.background,
     force: request.force,
     screenshot: request.screenshot,
+    create: request.create,
     timeoutMs: request.timeoutMs,
     reason: request.reason,
     round: request.round,
@@ -471,12 +503,18 @@ function resultRecord(request, extra) {
     steps: request.steps,
     viewport: request.viewport,
     waitMs: request.waitMs,
+    databasePath: request.databasePath,
+    sql: request.sql ? summarizeBodyForStorage(request.sql) : undefined,
+    params: request.params,
+    mode: request.mode,
+    maxRows: request.maxRows,
     headers: safeHeadersForStorage(request.headers),
     archiveRound: request.archiveRound,
     overwrite: request.overwrite,
     background: request.background,
     force: request.force,
     screenshot: request.screenshot,
+    create: request.create,
     timeoutMs: request.timeoutMs,
     reason: request.reason,
     round: request.round,
@@ -494,7 +532,7 @@ function stringField(value) {
 
 function normalizeCount(value, tool) {
   const count = Number(value);
-  if (!Number.isFinite(count)) return FILE_TOOLS.has(tool) || ARCHIVE_TOOLS.has(tool) || CODE_TOOLS.has(tool) || PACKAGE_TOOLS.has(tool) || TEST_TOOLS.has(tool) || API_TOOLS.has(tool) || GIT_TOOLS.has(tool) || BROWSER_TOOLS.has(tool) ? undefined : 5;
+  if (!Number.isFinite(count)) return FILE_TOOLS.has(tool) || ARCHIVE_TOOLS.has(tool) || CODE_TOOLS.has(tool) || PACKAGE_TOOLS.has(tool) || TEST_TOOLS.has(tool) || API_TOOLS.has(tool) || GIT_TOOLS.has(tool) || BROWSER_TOOLS.has(tool) || DATABASE_TOOLS.has(tool) ? undefined : 5;
   if (ARCHIVE_TOOLS.has(tool)) return Math.max(1, Math.min(1000, Math.floor(count)));
   const max = FILE_TOOLS.has(tool) ? 300 : CONTEXT_TOOLS.has(tool) ? 20 : 8;
   return Math.max(1, Math.min(max, Math.floor(count)));
@@ -547,12 +585,18 @@ function toolEvent(type, request, extra = {}) {
     steps: request.steps,
     viewport: request.viewport,
     waitMs: request.waitMs,
+    databasePath: request.databasePath,
+    sql: request.sql ? summarizeBodyForStorage(request.sql) : undefined,
+    params: request.params,
+    mode: request.mode,
+    maxRows: request.maxRows,
     headers: safeHeadersForStorage(request.headers),
     archiveRound: request.archiveRound,
     overwrite: request.overwrite,
     background: request.background,
     force: request.force,
     screenshot: request.screenshot,
+    create: request.create,
     timeoutMs: request.timeoutMs,
     createdAt: nowIso(),
     ...extra
@@ -673,6 +717,17 @@ function summarizeToolResult(record = {}) {
       timedOut: Boolean(result.timedOut)
     };
   }
+  if (record.tool === "database_query") {
+    return {
+      engine: result.engine,
+      mode: result.mode,
+      databasePath: result.databasePath,
+      readOnly: Boolean(result.readOnly),
+      rowCount: result.rowCount || 0,
+      changes: result.changes || 0,
+      truncated: Boolean(result.truncated)
+    };
+  }
   if (record.tool === "fetch_url") {
     return { url: safeUrlForEvent(record.url), title: result.title || "", bytes: result.bytes };
   }
@@ -717,6 +772,12 @@ function appendToolAuditLog(groupPath, action, item) {
       expressionBytes: item.expression ? Buffer.byteLength(item.expression, "utf8") : 0,
       steps: item.steps?.length || 0,
       screenshot: item.screenshot,
+      databasePath: item.databasePath,
+      sqlBytes: item.sql ? Buffer.byteLength(item.sql, "utf8") : 0,
+      paramsCount: item.params?.length || 0,
+      mode: item.mode,
+      maxRows: item.maxRows,
+      create: item.create,
       sessionId: item.sessionId,
       method: item.method,
       headers: safeHeadersForStorage(item.headers),
@@ -950,6 +1011,39 @@ function appendBrowserAuditLog(groupPath, action, item) {
   }
 }
 
+function appendDatabaseAuditLog(groupPath, action, item) {
+  if (!groupPath || item.tool !== "database_query") return;
+  try {
+    const filePath = path.join(groupPath, "shared", "logs", "database.jsonl");
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    const record = {
+      action,
+      id: item.id,
+      tool: item.tool,
+      status: item.status,
+      code: item.code,
+      error: item.error,
+      round: item.round,
+      source_agent_id: item.source_agent_id,
+      source_agent_name: item.source_agent_name,
+      databasePath: item.result?.databasePath || item.databasePath || item.path,
+      mode: item.result?.mode || item.mode,
+      readOnly: Boolean(item.result?.readOnly),
+      rowCount: item.result?.rowCount,
+      changes: item.result?.changes,
+      truncated: Boolean(item.result?.truncated),
+      sqlBytes: item.sql?.bytes || (item.sql ? Buffer.byteLength(String(item.sql), "utf8") : 0),
+      paramsCount: item.params?.length || 0,
+      durationMs: item.result?.durationMs,
+      resultSummary: summarizeToolResult(item),
+      createdAt: nowIso()
+    };
+    fs.appendFileSync(filePath, `${JSON.stringify(record)}\n`, "utf8");
+  } catch {
+    // Database audit is best-effort; never hide the actual database result because logging failed.
+  }
+}
+
 function safeRequestForStorage(request) {
   return {
     ...request,
@@ -980,12 +1074,18 @@ function safeRequestForStorage(request) {
     })) || [],
     viewport: request.viewport,
     waitMs: request.waitMs,
+    databasePath: request.databasePath,
+    sql: request.sql ? summarizeBodyForStorage(request.sql) : undefined,
+    params: request.params,
+    mode: request.mode,
+    maxRows: request.maxRows,
     headers: safeHeadersForStorage(request.headers),
     body: request.body ? summarizeBodyForStorage(request.body) : undefined,
     json: request.json ? summarizeBodyForStorage(request.json) : undefined,
     url: request.url,
     force: request.force,
-    screenshot: request.screenshot
+    screenshot: request.screenshot,
+    create: request.create
   };
 }
 
@@ -1037,6 +1137,15 @@ function arrayOfStrings(value) {
 function arrayOfObjects(value) {
   if (!Array.isArray(value)) return [];
   return value.filter((item) => item && typeof item === "object" && !Array.isArray(item));
+}
+
+function arrayOfPrimitive(value) {
+  if (!Array.isArray(value)) return [];
+  return value.map((item) => {
+    if (item === null) return null;
+    if (["string", "number", "boolean"].includes(typeof item)) return item;
+    return String(item);
+  });
 }
 
 function normalizeOptionalNumber(value) {

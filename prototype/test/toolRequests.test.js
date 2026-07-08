@@ -670,6 +670,65 @@ test("browser_control drives a real browser page for full permission only", asyn
   }
 });
 
+test("database_query reads SQLite with tool permission and writes with full permission only", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-database-tool-"));
+  const setup = await executeToolRequests({
+    permissionTier: "full",
+    groupPath: tmp,
+    agent: { id: "full", name: "Full" },
+    round: 1,
+    requests: [
+      {
+        tool: "database_query",
+        path: "data/app.sqlite",
+        create: true,
+        mode: "execute",
+        sql: "CREATE TABLE notes(id INTEGER PRIMARY KEY, body TEXT); INSERT INTO notes(body) VALUES ('DB_FACT');",
+        reason: "Create database fixture."
+      }
+    ]
+  });
+  const read = await executeToolRequests({
+    permissionTier: "tool",
+    groupPath: tmp,
+    agent: { id: "tool", name: "Tool" },
+    round: 1,
+    requests: [
+      {
+        tool: "database_query",
+        path: "data/app.sqlite",
+        sql: "SELECT body FROM notes WHERE body = ?",
+        params: ["DB_FACT"],
+        reason: "Read database fact."
+      }
+    ]
+  });
+  const deniedWrite = await executeToolRequests({
+    permissionTier: "tool",
+    groupPath: tmp,
+    agent: { id: "tool", name: "Tool" },
+    round: 1,
+    requests: [
+      {
+        tool: "database_query",
+        path: "data/app.sqlite",
+        mode: "execute",
+        sql: "INSERT INTO notes(body) VALUES ('SHOULD_NOT_WRITE')",
+        reason: "Try write without full permission."
+      }
+    ]
+  });
+
+  assert.equal(setup.results[0].status, "completed");
+  assert.equal(read.accepted.length, 1);
+  assert.equal(read.results[0].status, "completed");
+  assert.deepEqual(read.results[0].result.rows, [{ body: "DB_FACT" }]);
+  assert.equal(read.results[0].result.readOnly, true);
+  assert.equal(deniedWrite.results[0].status, "failed");
+  assert.equal(deniedWrite.results[0].code, "permission_denied");
+  assert.equal(fs.existsSync(path.join(tmp, "shared", "logs", "database.jsonl")), true);
+});
+
 test("controlled file tools reject path escape and secret files", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-tools-guard-"));
   fs.writeFileSync(path.join(tmp, "safe.md"), "safe", "utf8");
