@@ -2,6 +2,7 @@ import { makeId, nowIso } from "./types.js";
 import { fetchPublicUrl, searchWeb } from "./webTools.js";
 import { executeFileTool } from "./fileTools.js";
 import { extractArchiveTool } from "./archiveTools.js";
+import { executeCommandTool } from "./commandTools.js";
 import { loadSessionContextArchiveItem, searchSessionContextArchive } from "./storage.js";
 import fs from "node:fs";
 import path from "node:path";
@@ -15,12 +16,14 @@ const ALLOWED_TOOLS = new Set([
   "grep_content",
   "search_context",
   "load_context",
-  "extract_archive"
+  "extract_archive",
+  "execute_command"
 ]);
 const FILE_TOOLS = new Set(["list_directory", "read_file", "search_files", "grep_content"]);
 const CONTEXT_TOOLS = new Set(["search_context", "load_context"]);
 const ARCHIVE_TOOLS = new Set(["extract_archive"]);
-const FULL_PERMISSION_TOOLS = new Set(["extract_archive"]);
+const COMMAND_TOOLS = new Set(["execute_command"]);
+const FULL_PERMISSION_TOOLS = new Set(["extract_archive", "execute_command"]);
 
 export function normalizeToolRequests(value) {
   if (!Array.isArray(value)) return [];
@@ -50,10 +53,11 @@ export async function executeToolRequests(options = {}) {
     };
 
     if (!ALLOWED_TOOLS.has(normalized.tool)) {
-      const rejection = reject(base, "invalid_tool", "Tool must be one of web_search, fetch_url, list_directory, read_file, search_files, grep_content, search_context, load_context, extract_archive.");
+      const rejection = reject(base, "invalid_tool", "Tool must be one of web_search, fetch_url, list_directory, read_file, search_files, grep_content, search_context, load_context, extract_archive, execute_command.");
       rejected.push(rejection);
       events.push(toolEvent("tool_failure", base, { status: "rejected", code: rejection.code, error: rejection.error }));
       appendToolAuditLog(options.groupPath, "rejected", rejection);
+      appendCommandAuditLog(options.groupPath, "rejected", rejection);
       continue;
     }
     if (permissionTier === "text") {
@@ -61,17 +65,19 @@ export async function executeToolRequests(options = {}) {
       rejected.push(rejection);
       events.push(toolEvent("tool_failure", base, { status: "rejected", code: rejection.code, error: rejection.error }));
       appendToolAuditLog(options.groupPath, "rejected", rejection);
+      appendCommandAuditLog(options.groupPath, "rejected", rejection);
       continue;
     }
     if (FULL_PERMISSION_TOOLS.has(normalized.tool) && permissionTier !== "full") {
-      const rejection = reject(base, "permission_denied", `${normalized.tool} writes files and requires full permission.`);
+      const rejection = reject(base, "permission_denied", `${normalized.tool} requires full permission.`);
       rejected.push(rejection);
       events.push(toolEvent("tool_failure", base, { status: "rejected", code: rejection.code, error: rejection.error }));
       appendToolAuditLog(options.groupPath, "rejected", rejection);
+      appendCommandAuditLog(options.groupPath, "rejected", rejection);
       continue;
     }
 
-    accepted.push(base);
+    accepted.push(safeRequestForStorage(base));
     const start = Date.now();
     events.push(toolEvent("tool_start", base, { status: "running" }));
     const result = await executeOne(base, options);
@@ -85,6 +91,7 @@ export async function executeToolRequests(options = {}) {
       resultSummary: summarizeToolResult(result)
     }));
     appendToolAuditLog(options.groupPath, "completed", result);
+    appendCommandAuditLog(options.groupPath, "completed", result);
   }
 
   return { accepted, rejected, results, events };
@@ -166,6 +173,21 @@ async function executeOne(request, options) {
       });
       return resultRecord(request, { status: "completed", result });
     }
+    if (request.tool === "execute_command") {
+      const result = await executeCommandTool(request, {
+        groupPath: options.groupPath,
+        timeoutMs: options.timeoutMs,
+        commandTimeoutMs: options.commandTimeoutMs,
+        maxCommandOutputBytes: options.maxCommandOutputBytes,
+        signal: options.signal
+      });
+      return resultRecord(request, {
+        status: result.ok ? "completed" : "failed",
+        code: result.code,
+        error: result.error,
+        result
+      });
+    }
     const result = await searchWeb(request.query, {
       timeoutMs: options.timeoutMs,
       count: request.count,
@@ -196,14 +218,20 @@ function normalizeToolRequest(item, index) {
     url: stringField(item.url),
     path: stringField(item.path),
     destination: stringField(item.destination || item.destinationPath || item.outputPath || item.dest),
+    command: stringField(item.command || item.cmd || item.shellCommand || item.shell_command),
+    cwd: stringField(item.cwd || item.workingDirectory || item.working_directory),
+    shell: stringField(item.shell),
     pattern: stringField(item.pattern),
     root: stringField(item.root),
     sessionId: stringField(item.sessionId || item.session_id),
     archiveRound: item.round === undefined ? undefined : Number(item.round),
     overwrite: Boolean(item.overwrite),
+    background: Boolean(item.background),
     reason: stringField(item.reason),
     count: normalizeCount(item.count, tool),
     maxBytes: normalizeMaxBytes(item.maxBytes || item.max_bytes),
+    timeoutMs: normalizeTimeoutMs(item.timeoutMs || item.timeout_ms),
+    maxOutputBytes: normalizeMaxBytes(item.maxOutputBytes || item.max_output_bytes),
     sourceIndex: index
   };
 }
@@ -216,11 +244,16 @@ function reject(request, code, reason) {
     url: request.url,
     path: request.path,
     destination: request.destination,
+    command: safeCommandForStorage(request.command),
+    cwd: request.cwd,
+    shell: request.shell,
     pattern: request.pattern,
     root: request.root,
     sessionId: request.sessionId,
     archiveRound: request.archiveRound,
     overwrite: request.overwrite,
+    background: request.background,
+    timeoutMs: request.timeoutMs,
     reason: request.reason,
     round: request.round,
     source_agent_id: request.source_agent_id,
@@ -240,11 +273,16 @@ function resultRecord(request, extra) {
     url: request.url,
     path: request.path,
     destination: request.destination,
+    command: safeCommandForStorage(request.command),
+    cwd: request.cwd,
+    shell: request.shell,
     pattern: request.pattern,
     root: request.root,
     sessionId: request.sessionId,
     archiveRound: request.archiveRound,
     overwrite: request.overwrite,
+    background: request.background,
+    timeoutMs: request.timeoutMs,
     reason: request.reason,
     round: request.round,
     source_agent_id: request.source_agent_id,
@@ -273,6 +311,12 @@ function normalizeMaxBytes(value) {
   return Math.max(1024, Math.min(512 * 1024, Math.floor(bytes)));
 }
 
+function normalizeTimeoutMs(value) {
+  const timeoutMs = Number(value);
+  if (!Number.isFinite(timeoutMs)) return undefined;
+  return Math.max(1000, Math.min(60 * 60 * 1000, Math.floor(timeoutMs)));
+}
+
 function toolEvent(type, request, extra = {}) {
   return {
     type,
@@ -285,11 +329,16 @@ function toolEvent(type, request, extra = {}) {
     url: safeUrlForEvent(request.url),
     path: request.path,
     destination: request.destination,
+    command: safeCommandForStorage(request.command),
+    cwd: request.cwd,
+    shell: request.shell,
     pattern: request.pattern,
     root: request.root,
     sessionId: request.sessionId,
     archiveRound: request.archiveRound,
     overwrite: request.overwrite,
+    background: request.background,
+    timeoutMs: request.timeoutMs,
     createdAt: nowIso(),
     ...extra
   };
@@ -330,6 +379,18 @@ function summarizeToolResult(record = {}) {
       totalBytes: result.totalBytes || 0
     };
   }
+  if (record.tool === "execute_command") {
+    return {
+      command: record.command,
+      cwd: record.result?.cwd || record.cwd || ".",
+      shell: record.result?.shell || record.shell || "system",
+      background: Boolean(record.result?.background || record.background),
+      exitCode: record.result?.exitCode,
+      timedOut: Boolean(record.result?.timedOut),
+      stdoutBytes: record.result?.stdout?.length || 0,
+      stderrBytes: record.result?.stderr?.length || 0
+    };
+  }
   if (record.tool === "fetch_url") {
     return { url: safeUrlForEvent(record.url), title: result.title || "", bytes: result.bytes };
   }
@@ -353,6 +414,11 @@ function appendToolAuditLog(groupPath, action, item) {
       source_agent_name: item.source_agent_name,
       path: item.path,
       destination: item.destination,
+      command: safeCommandForStorage(item.command),
+      cwd: item.cwd,
+      shell: item.shell,
+      background: item.background,
+      timeoutMs: item.timeoutMs,
       sessionId: item.sessionId,
       archiveRound: item.archiveRound,
       query: item.query,
@@ -366,6 +432,43 @@ function appendToolAuditLog(groupPath, action, item) {
   }
 }
 
+function appendCommandAuditLog(groupPath, action, item) {
+  if (!groupPath || item.tool !== "execute_command") return;
+  try {
+    const filePath = path.join(groupPath, "shared", "logs", "commands.jsonl");
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    const record = {
+      action,
+      id: item.id,
+      tool: item.tool,
+      status: item.status,
+      code: item.code,
+      error: item.error,
+      round: item.round,
+      source_agent_id: item.source_agent_id,
+      source_agent_name: item.source_agent_name,
+      command: safeCommandForStorage(item.command),
+      cwd: item.result?.cwd || item.cwd || ".",
+      shell: item.result?.shell || item.shell || "system",
+      background: Boolean(item.result?.background || item.background),
+      timeoutMs: item.timeoutMs,
+      resultSummary: summarizeToolResult(item),
+      createdAt: nowIso()
+    };
+    fs.appendFileSync(filePath, `${JSON.stringify(record)}\n`, "utf8");
+  } catch {
+    // Command audit is best-effort; never hide the actual command result because logging failed.
+  }
+}
+
+function safeRequestForStorage(request) {
+  return {
+    ...request,
+    command: safeCommandForStorage(request.command),
+    url: request.url
+  };
+}
+
 function safeUrlForEvent(value) {
   if (!value) return "";
   try {
@@ -376,4 +479,12 @@ function safeUrlForEvent(value) {
   } catch {
     return "";
   }
+}
+
+function safeCommandForStorage(value) {
+  return String(value || "")
+    .replace(/sk-[A-Za-z0-9_-]{8,}/g, "sk-[redacted]")
+    .replace(/(api[_-]?key\s*[:=]\s*)[^\s'"]+/gi, "$1[redacted]")
+    .replace(/(authorization\s*[:=]\s*bearer\s+)[^\s'"]+/gi, "$1[redacted]")
+    .replace(/(password\s*[:=]\s*)[^\s'"]+/gi, "$1[redacted]");
 }

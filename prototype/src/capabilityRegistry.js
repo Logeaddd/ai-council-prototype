@@ -45,6 +45,16 @@ export function listCapabilities(options = {}) {
       requirement: "Requires full permission. Only .zip files inside the group workspace are extracted."
     },
     {
+      id: "execute-command",
+      label: "终端",
+      kind: "tool",
+      status: "ready",
+      enabled: true,
+      provider: "built-in",
+      source: "local_server",
+      requirement: "完全允许"
+    },
+    {
       id: "public-memory",
       label: "公共记忆",
       kind: "memory",

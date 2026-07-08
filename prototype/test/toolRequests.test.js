@@ -193,6 +193,97 @@ test("extract_archive blocks zip slip entries", async () => {
   assert.equal(fs.readFileSync(path.join(tmp, "out", "safe.txt"), "utf8"), "SAFE_WRITE");
 });
 
+test("execute_command runs real shell commands for full permission only", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-command-tool-"));
+  const denied = await executeToolRequests({
+    permissionTier: "tool",
+    groupPath: tmp,
+    agent: { id: "tool", name: "Tool" },
+    round: 1,
+    requests: [
+      { tool: "execute_command", command: nodeCommand("console.log('COMMAND_DENIED')"), shell: shellForNodeCommand(), reason: "Run command." }
+    ]
+  });
+  const allowed = await executeToolRequests({
+    permissionTier: "full",
+    groupPath: tmp,
+    agent: { id: "full", name: "Full" },
+    round: 1,
+    requests: [
+      { tool: "execute_command", command: nodeCommand("console.log('COMMAND_FACT')"), shell: shellForNodeCommand(), reason: "Run command." }
+    ]
+  });
+
+  assert.equal(denied.accepted.length, 0);
+  assert.equal(denied.rejected[0].code, "permission_denied");
+  assert.equal(allowed.accepted.length, 1);
+  assert.equal(allowed.results[0].status, "completed");
+  assert.match(allowed.results[0].result.stdout, /COMMAND_FACT/);
+  assert.equal(allowed.events.some((event) => event.type === "tool_success" && event.tool === "execute_command"), true);
+  assert.equal(fs.existsSync(path.join(tmp, "shared", "logs", "commands.jsonl")), true);
+});
+
+test("execute_command supports pipes redirection and background processes", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-command-shell-"));
+  const piped = process.platform === "win32"
+    ? { shell: "cmd", command: "echo PIPE_FACT | findstr PIPE > piped.txt" }
+    : { shell: "sh", command: "printf PIPE_FACT | cat > piped.txt" };
+
+  const pipeResult = await executeToolRequests({
+    permissionTier: "full",
+    groupPath: tmp,
+    agent: { id: "full", name: "Full" },
+    round: 1,
+    requests: [
+      { tool: "execute_command", shell: piped.shell, command: piped.command, reason: "Use shell pipeline." }
+    ]
+  });
+  const backgroundResult = await executeToolRequests({
+    permissionTier: "full",
+    groupPath: tmp,
+    agent: { id: "full", name: "Full" },
+    round: 1,
+    requests: [
+      { tool: "execute_command", command: nodeCommand("setTimeout(()=>{}, 500)"), shell: shellForNodeCommand(), background: true, reason: "Start background process." }
+    ]
+  });
+
+  assert.equal(pipeResult.results[0].status, "completed");
+  assert.match(fs.readFileSync(path.join(tmp, "piped.txt"), "utf8"), /PIPE_FACT/);
+  assert.equal(backgroundResult.results[0].status, "completed");
+  assert.equal(backgroundResult.results[0].result.background, true);
+  assert.ok(backgroundResult.results[0].result.pid > 0);
+});
+
+test("execute_command keeps cwd inside workspace and reports timeouts", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-command-guard-"));
+  const escaped = await executeToolRequests({
+    permissionTier: "full",
+    groupPath: tmp,
+    agent: { id: "full", name: "Full" },
+    round: 1,
+    requests: [
+      { tool: "execute_command", command: nodeCommand("console.log('OUTSIDE')"), shell: shellForNodeCommand(), cwd: "..", reason: "Try outside cwd." }
+    ]
+  });
+  const timedOut = await executeToolRequests({
+    permissionTier: "full",
+    groupPath: tmp,
+    agent: { id: "full", name: "Full" },
+    round: 1,
+    requests: [
+      { tool: "execute_command", command: nodeCommand("setTimeout(()=>{}, 2000)"), shell: shellForNodeCommand(), timeoutMs: 50, reason: "Timeout command." }
+    ]
+  });
+
+  assert.equal(escaped.accepted.length, 1);
+  assert.equal(escaped.results[0].status, "failed");
+  assert.equal(escaped.results[0].code, "path_escape_denied");
+  assert.equal(timedOut.results[0].status, "failed");
+  assert.equal(timedOut.results[0].code, "command_timeout");
+  assert.equal(timedOut.results[0].result.timedOut, true);
+});
+
 test("controlled file tools reject path escape and secret files", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-tools-guard-"));
   fs.writeFileSync(path.join(tmp, "safe.md"), "safe", "utf8");
@@ -270,6 +361,15 @@ function executeFileToolResult(request, groupPath) {
   } catch (error) {
     return { code: error.code, error: error.message };
   }
+}
+
+function shellForNodeCommand() {
+  return process.platform === "win32" ? "cmd" : "sh";
+}
+
+function nodeCommand(script) {
+  const escapedScript = String(script).replace(/"/g, '\\"');
+  return `"${process.execPath}" -e "${escapedScript}"`;
 }
 
 function makeZip(entries) {
