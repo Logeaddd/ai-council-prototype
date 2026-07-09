@@ -15,7 +15,7 @@ const PROTOCOL_VERSION = "2025-06-18";
 const TOOLS = [
   {
     name: "web_search",
-    description: "Search the web through the configured Brave Search key.",
+    description: "Search the web through the built-in search provider.",
     inputSchema: {
       type: "object",
       properties: {

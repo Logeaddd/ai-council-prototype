@@ -175,7 +175,7 @@ export function SettingsSheet({
     setSettingsError("")
     try {
       const result = await installMcpCatalogItem(item.id)
-      if (!result.ok) throw new Error(result.error || result.code || "安装失败")
+      if (!result.ok) throw new Error(result.error || result.code || "加入失败")
       await reloadFacts()
     } catch (error) {
       setSettingsError(errorMessage(error))
@@ -191,7 +191,7 @@ export function SettingsSheet({
     setSettingsError("")
     try {
       const result = await uninstallMcpServer(id)
-      if (!result.ok) throw new Error(result.error || result.code || "卸载失败")
+      if (!result.ok) throw new Error(result.error || result.code || "移除失败")
       await reloadFacts()
     } catch (error) {
       setSettingsError(errorMessage(error))
@@ -450,12 +450,12 @@ function SearchPanel({
       <PanelTitle title="网络搜索" />
 
       <SettingRow label="状态">
-        <Badge tone={configured ? "success" : "warning"}>
-          {configured ? `可用 · ${source || "本地"}` : "需密钥"}
+        <Badge tone="success">
+          {`可用 · ${source || "内置搜索"}`}
         </Badge>
       </SettingRow>
 
-      <SettingRow label="Brave Search">
+      <SettingRow label="Brave">
         <div className="flex items-center gap-2">
           <input
             type="password"
@@ -515,7 +515,7 @@ function McpPanel({
 
       <div className="space-y-2">
         {loading ? <EmptyLine text="读取中" /> : null}
-        {!loading && !catalog.length ? <EmptyLine text="暂无可安装项" /> : null}
+        {!loading && !catalog.length ? <EmptyLine text="暂无可加入项" /> : null}
         {catalog.map((item) => (
           <div
             key={item.id}
@@ -525,7 +525,7 @@ function McpPanel({
               <div className="flex items-center gap-2">
                 <span className="truncate text-[13px] font-medium text-foreground">{item.name}</span>
                 <Badge tone={item.installed ? "success" : "neutral"}>
-                  {item.installed ? "已安装" : "可安装"}
+                  {item.installed ? "已加入" : "可加入"}
                 </Badge>
               </div>
               <div className="mt-1 truncate font-mono text-[11px] text-muted-foreground">
@@ -539,7 +539,7 @@ function McpPanel({
                 onClick={() => void onUninstall(item)}
                 className="rounded-md border border-border px-3 py-1.5 text-[13px] text-danger transition-colors hover:bg-danger/10 disabled:opacity-50"
               >
-                {busyId === item.id ? "卸载中" : "卸载"}
+                {busyId === item.id ? "移除中" : "移除"}
               </button>
             ) : (
               <button
@@ -548,7 +548,7 @@ function McpPanel({
                 onClick={() => void onInstall(item)}
                 className="rounded-md bg-primary px-3 py-1.5 text-[13px] font-semibold text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
               >
-                {busyId === item.id ? "安装中" : "安装"}
+                {busyId === item.id ? "加入中" : "加入"}
               </button>
             )}
           </div>
@@ -556,7 +556,7 @@ function McpPanel({
       </div>
 
       <div className="space-y-2">
-        <div className="text-[13px] font-medium text-foreground">已配置</div>
+        <div className="text-[13px] font-medium text-foreground">已加入</div>
         {!servers.length ? <EmptyLine text="暂无" /> : null}
         {servers.map((server) => (
           <div
@@ -582,7 +582,7 @@ function McpPanel({
                 onClick={() => void onUninstall(server)}
                 className="rounded-md border border-border px-3 py-1.5 text-[13px] text-danger transition-colors hover:bg-danger/10 disabled:opacity-50"
               >
-                {busyId === server.id ? "卸载中" : "卸载"}
+                {busyId === server.id ? "移除中" : "移除"}
               </button>
             ) : null}
           </div>

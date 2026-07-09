@@ -474,7 +474,7 @@ async function executeOne(request, options) {
       searchApiKey: options.searchApiKey
     });
     return resultRecord(request, {
-      status: result.ok ? "completed" : "not_configured",
+      status: result.ok ? "completed" : "failed",
       result
     });
   } catch (error) {

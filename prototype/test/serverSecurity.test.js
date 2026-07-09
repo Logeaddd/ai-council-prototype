@@ -245,7 +245,7 @@ test("server exposes real capability and guarded web tool endpoints", () => {
   assert.match(mcpServerJs, /tools\/call/);
   assert.match(mcpServerJs, /fetchPublicUrl/);
   assert.match(mcpServerJs, /searchWeb/);
-  assert.match(capabilityJs, /needs_config/);
+  assert.match(capabilityJs, /built_in_html/);
   assert.match(webToolsJs, /Blocked unsafe URL/);
   assert.match(webToolsJs, /api\.search\.brave\.com/);
 });

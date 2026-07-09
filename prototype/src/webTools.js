@@ -34,13 +34,7 @@ export async function searchWeb(query, options = {}) {
     searchApiKey: options.searchApiKey
   })).trim();
   if (!apiKey) {
-    return {
-      ok: false,
-      source: "not_configured",
-      provider: "Brave Search",
-      error: "Search is not configured. Set AI_COUNCIL_BRAVE_SEARCH_API_KEY or BRAVE_SEARCH_API_KEY.",
-      results: []
-    };
+    return searchBingHtml(text, options);
   }
 
   const controller = new AbortController();
@@ -90,6 +84,69 @@ export async function searchWeb(query, options = {}) {
     options.signal?.removeEventListener("abort", abortFromParent);
     clearTimeout(timeout);
   }
+}
+
+async function searchBingHtml(query, options = {}) {
+  const controller = new AbortController();
+  const abortFromParent = () => controller.abort();
+  options.signal?.addEventListener("abort", abortFromParent, { once: true });
+  const timeout = setTimeout(() => controller.abort(), normalizeTimeoutMs(options.timeoutMs));
+  try {
+    const url = new URL("https://www.bing.com/search");
+    url.searchParams.set("q", query);
+    url.searchParams.set("count", String(Math.min(MAX_SEARCH_RESULTS, Math.max(1, Number(options.count || 5)))));
+    const response = await fetch(url, {
+      signal: controller.signal,
+      headers: {
+        "Accept": "text/html,application/xhtml+xml",
+        "User-Agent": "Mozilla/5.0 AI-Council/0.2"
+      }
+    });
+    const body = await response.text();
+    if (!response.ok) {
+      return {
+        ok: false,
+        source: "public_html",
+        provider: "Bing Web",
+        status: response.status,
+        error: body.slice(0, 500),
+        results: []
+      };
+    }
+    return {
+      ok: true,
+      source: "public_html",
+      provider: "Bing Web",
+      query,
+      results: parseBingResults(body).slice(0, Math.min(MAX_SEARCH_RESULTS, Math.max(1, Number(options.count || 5))))
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      source: "public_html",
+      provider: "Bing Web",
+      error: error.message || "Built-in web search failed.",
+      results: []
+    };
+  } finally {
+    options.signal?.removeEventListener("abort", abortFromParent);
+    clearTimeout(timeout);
+  }
+}
+
+function parseBingResults(html) {
+  const blocks = String(html || "").match(/<li\b[^>]*class="[^"]*\bb_algo\b[^"]*"[\s\S]*?<\/li>/gi) || [];
+  return blocks
+    .map((block) => {
+      const linkMatch = block.match(/<h2[^>]*>\s*<a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>\s*<\/h2>/i)
+        || block.match(/<a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i);
+      const snippetMatch = block.match(/<p[^>]*>([\s\S]*?)<\/p>/i);
+      const title = htmlToText(linkMatch?.[2] || "");
+      const url = decodeHtml(linkMatch?.[1] || "").trim();
+      const description = htmlToText(snippetMatch?.[1] || "");
+      return { title, url, description };
+    })
+    .filter((item) => (item.title || item.url || item.description) && /^https?:\/\//i.test(item.url));
 }
 
 export async function assertSafePublicUrl(value, options = {}) {
@@ -187,17 +244,31 @@ function isTextLike(contentType) {
 }
 
 function htmlToText(value) {
-  return String(value || "")
+  return decodeHtml(String(value || "")
     .replace(/<script[\s\S]*?<\/script>/gi, " ")
     .replace(/<style[\s\S]*?<\/style>/gi, " ")
     .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " "))
+    .trim();
+}
+
+function decodeHtml(value) {
+  return String(value || "")
     .replace(/&nbsp;/gi, " ")
     .replace(/&amp;/gi, "&")
     .replace(/&lt;/gi, "<")
     .replace(/&gt;/gi, ">")
     .replace(/&quot;/gi, "\"")
-    .replace(/\s+/g, " ")
-    .trim();
+    .replace(/&#39;/gi, "'")
+    .replace(/&#x27;/gi, "'")
+    .replace(/&#(\d+);/g, (_match, code) => {
+      const value = Number(code);
+      return Number.isFinite(value) ? String.fromCodePoint(value) : "";
+    })
+    .replace(/&#x([0-9a-f]+);/gi, (_match, code) => {
+      const value = Number.parseInt(code, 16);
+      return Number.isFinite(value) ? String.fromCodePoint(value) : "";
+    });
 }
 
 function extractTitle(value) {

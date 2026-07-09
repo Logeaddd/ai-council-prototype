@@ -27,23 +27,39 @@ test("MCP server exposes web_search and fetch_url tools", async () => {
   assert.equal(listed.result.tools[1].inputSchema.required[0], "url");
 });
 
-test("MCP web_search reports not_configured without a real key", async () => {
-  const reply = await handleMcpMessage({
-    jsonrpc: "2.0",
-    id: 3,
-    method: "tools/call",
-    params: {
-      name: "web_search",
-      arguments: { query: "AI Council" }
-    }
-  }, {
-    env: {},
-    appSettings: {}
+test("MCP web_search uses built-in search without a key", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(`
+    <html><body>
+      <li class="b_algo">
+        <h2><a href="https://example.com/mcp">MCP Search</a></h2>
+        <p>Built in MCP search result.</p>
+      </li>
+    </body></html>
+  `, {
+    status: 200,
+    headers: { "Content-Type": "text/html" }
   });
+  try {
+    const reply = await handleMcpMessage({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "tools/call",
+      params: {
+        name: "web_search",
+        arguments: { query: "AI Council" }
+      }
+    }, {
+      env: {},
+      appSettings: {}
+    });
 
-  assert.equal(reply.result.isError, true);
-  assert.match(reply.result.content[0].text, /not_configured/);
-  assert.match(reply.result.content[0].text, /Brave Search/);
+    assert.equal(reply.result.isError, false);
+    assert.match(reply.result.content[0].text, /public_html/);
+    assert.match(reply.result.content[0].text, /MCP Search/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("MCP fetch_url keeps the existing public URL guard", async () => {

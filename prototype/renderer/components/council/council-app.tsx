@@ -983,7 +983,8 @@ function errorMessage(error: unknown) {
 function formatSearchKeySource(source?: string) {
   if (source === "configured_local") return "本地设置"
   if (source === "configured_env") return "环境变量"
-  return "未设置"
+  if (source === "built_in_html") return "内置搜索"
+  return "内置搜索"
 }
 
 function formatTime(value?: string) {

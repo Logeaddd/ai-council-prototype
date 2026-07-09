@@ -34,6 +34,16 @@ test("app settings store search key locally but redact it for the client", () =>
   }
 });
 
+test("app settings expose built-in search as available without a key", () => {
+  const client = redactAppSettingsForClient({}, { env: {} });
+
+  assert.equal(client.capabilities.webSearch.configured, true);
+  assert.equal(client.capabilities.webSearch.provider, "Bing Web");
+  assert.equal(client.capabilities.webSearch.source, "built_in_html");
+  assert.equal(client.capabilities.webSearch.storedKeyConfigured, false);
+  assert.equal(client.capabilities.webSearch.envKeyConfigured, false);
+});
+
 test("updating app settings without capabilities preserves stored search key", () => {
   const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-settings-"));
   try {

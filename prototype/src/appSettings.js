@@ -43,11 +43,11 @@ export function redactAppSettingsForClient(settings, options = {}) {
     firstRunComplete: normalized.firstRunComplete,
     capabilities: {
       webSearch: {
-        provider: normalized.capabilities.webSearch.provider,
-        configured: storedKeyConfigured || envKeyConfigured,
+        provider: storedKeyConfigured || envKeyConfigured ? normalized.capabilities.webSearch.provider : "Bing Web",
+        configured: true,
         storedKeyConfigured,
         envKeyConfigured,
-        source: storedKeyConfigured ? "configured_local" : envKeyConfigured ? "configured_env" : "not_configured"
+        source: storedKeyConfigured ? "configured_local" : envKeyConfigured ? "configured_env" : "built_in_html"
       }
     }
   };

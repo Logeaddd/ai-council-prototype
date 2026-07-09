@@ -5,7 +5,7 @@ import { listCapabilities } from "../src/capabilityRegistry.js";
 import { assertSafePublicUrl, fetchPublicUrl, searchWeb } from "../src/webTools.js";
 import { executeToolRequests } from "../src/toolRequests.js";
 
-test("capability registry reports web search as unconfigured without a real key", () => {
+test("capability registry reports built-in web search as ready without a key", () => {
   const capabilities = listCapabilities({ env: {} });
   const search = capabilities.find((item) => item.id === "web-search");
   const fetchUrl = capabilities.find((item) => item.id === "fetch-url");
@@ -21,9 +21,10 @@ test("capability registry reports web search as unconfigured without a real key"
   const mcpWebTools = capabilities.find((item) => item.id === "mcp-web-tools");
   const mcpMarketplace = capabilities.find((item) => item.id === "mcp-marketplace");
 
-  assert.equal(search.status, "needs_config");
-  assert.equal(search.enabled, false);
-  assert.match(search.requirement, /BRAVE_SEARCH_API_KEY/);
+  assert.equal(search.status, "ready");
+  assert.equal(search.enabled, true);
+  assert.equal(search.provider, "Bing Web");
+  assert.equal(search.source, "built_in_html");
   assert.equal(fetchUrl.status, "ready");
   assert.equal(fetchUrl.enabled, true);
   assert.equal(apiRequest.status, "ready");
@@ -55,7 +56,7 @@ test("capability registry reports web search as unconfigured without a real key"
   assert.equal(mcpWebTools.source, "local_stdio");
   assert.equal(mcpWebTools.command, "npm run mcp:web");
   assert.deepEqual(mcpWebTools.tools, ["web_search", "fetch_url"]);
-  assert.match(mcpWebTools.requirement, /Brave Search key/);
+  assert.equal(mcpWebTools.requirement, "内置");
   assert.equal(mcpMarketplace.status, "planned");
   assert.equal(mcpMarketplace.enabled, false);
   assert.match(databaseQuery.requirement, /工具授权/);
@@ -80,12 +81,49 @@ test("capability registry accepts a locally stored search key", () => {
   assert.equal(JSON.stringify(search).includes("local-search-secret"), false);
 });
 
-test("web search returns not_configured instead of fake results without key", async () => {
-  const result = await searchWeb("ai council", { env: {} });
+test("web search uses built-in public HTML search without key", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    assert.match(String(url), /bing\.com\/search/);
+    return new Response(`
+      <html><body>
+        <li class="b_algo">
+          <h2><a href="https://example.com/council">AI &amp; Council</a></h2>
+          <p>Built in search result.</p>
+        </li>
+      </body></html>
+    `, {
+      status: 200,
+      headers: { "Content-Type": "text/html" }
+    });
+  };
+  try {
+    const result = await searchWeb("ai council", { env: {} });
 
-  assert.equal(result.ok, false);
-  assert.equal(result.source, "not_configured");
-  assert.deepEqual(result.results, []);
+    assert.equal(result.ok, true);
+    assert.equal(result.source, "public_html");
+    assert.equal(result.provider, "Bing Web");
+    assert.equal(result.results[0].title, "AI & Council");
+    assert.equal(result.results[0].url, "https://example.com/council");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("web search reports built-in search failure honestly", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response("blocked", { status: 503 });
+  try {
+    const result = await searchWeb("ai council", { env: {} });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.source, "public_html");
+    assert.equal(result.provider, "Bing Web");
+    assert.equal(result.status, 503);
+    assert.deepEqual(result.results, []);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("web search can use an explicit key without leaking it in the result", async () => {
@@ -147,7 +185,19 @@ test("fetchPublicUrl reads real text with explicit unsafe allowance only for tes
   }
 });
 
-test("tool requests require tool permission and report unconfigured search honestly", async () => {
+test("tool requests require tool permission and run built-in search", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(`
+    <html><body>
+      <li class="b_algo">
+        <h2><a href="https://example.com/news">News</a></h2>
+        <p>News result.</p>
+      </li>
+    </body></html>
+  `, {
+    status: 200,
+    headers: { "Content-Type": "text/html" }
+  });
   const textOnly = await executeToolRequests({
     permissionTier: "text",
     agent: { id: "a", name: "A" },
@@ -155,19 +205,23 @@ test("tool requests require tool permission and report unconfigured search hones
     requests: [{ tool: "web_search", query: "news", reason: "Need current info" }],
     env: {}
   });
-  const toolTier = await executeToolRequests({
-    permissionTier: "tool",
-    agent: { id: "a", name: "A" },
-    round: 1,
-    requests: [{ tool: "web_search", query: "news", reason: "Need current info" }],
-    env: {}
-  });
+  try {
+    const toolTier = await executeToolRequests({
+      permissionTier: "tool",
+      agent: { id: "a", name: "A" },
+      round: 1,
+      requests: [{ tool: "web_search", query: "news", reason: "Need current info" }],
+      env: {}
+    });
 
-  assert.equal(textOnly.accepted.length, 0);
-  assert.equal(textOnly.rejected[0].code, "permission_denied");
-  assert.equal(toolTier.accepted.length, 1);
-  assert.equal(toolTier.results[0].status, "not_configured");
-  assert.equal(toolTier.results[0].result.source, "not_configured");
+    assert.equal(textOnly.accepted.length, 0);
+    assert.equal(textOnly.rejected[0].code, "permission_denied");
+    assert.equal(toolTier.accepted.length, 1);
+    assert.equal(toolTier.results[0].status, "completed");
+    assert.equal(toolTier.results[0].result.source, "public_html");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 function listen(server) {

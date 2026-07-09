@@ -1,18 +1,18 @@
 export function listCapabilities(options = {}) {
   const keyInfo = resolveSearchApiKeyInfo(options);
   const searchConfigured = Boolean(keyInfo.apiKey);
+  const searchProvider = searchConfigured ? "Brave Search" : "Bing Web";
+  const searchSource = searchConfigured ? keyInfo.source : "built_in_html";
   return [
     {
       id: "web-search",
       label: "联网搜索",
       kind: "tool",
-      status: searchConfigured ? "ready" : "needs_config",
-      enabled: searchConfigured,
-      provider: "Brave Search",
-      source: keyInfo.source,
-      requirement: searchConfigured
-        ? ""
-        : "请在设置里填写 Brave Search 密钥，或设置 AI_COUNCIL_BRAVE_SEARCH_API_KEY / BRAVE_SEARCH_API_KEY。"
+      status: "ready",
+      enabled: true,
+      provider: searchProvider,
+      source: searchSource,
+      requirement: searchConfigured ? "Brave" : "内置"
     },
     {
       id: "fetch-url",
@@ -144,9 +144,7 @@ export function listCapabilities(options = {}) {
       source: "local_stdio",
       command: "npm run mcp:web",
       tools: ["web_search", "fetch_url"],
-      requirement: searchConfigured
-        ? "web_search and fetch_url are available. fetch_url only reads public HTTPS pages."
-        : "fetch_url is available. web_search needs a Brave Search key."
+      requirement: searchConfigured ? "Brave" : "内置"
     },
     {
       id: "mcp-marketplace",
