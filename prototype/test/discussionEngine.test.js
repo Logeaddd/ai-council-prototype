@@ -615,13 +615,13 @@ test("MCP install follow-up can list and call the installed tool in the same mem
       assert.match(prompt, /MCP tool list is available/);
       assert.match(prompt, /chain-tool:echo/);
       assert.match(prompt, /mcp_call/);
+      assert.match(prompt, /include serverId only when the same tool name appears/);
       writeOpenAiStream(res, JSON.stringify({
         status: "speak",
         argument: "The echo tool is available. I need to call it.",
         tool_requests: [
           {
             tool: "mcp_call",
-            serverId: "chain-tool",
             mcpToolName: "echo",
             arguments: { text: "MCP_CHAIN_FACT" },
             reason: "Call the installed MCP tool."
@@ -783,13 +783,13 @@ test("built-in web MCP can be joined and called from the council loop", async ()
       assert.match(prompt, /MCP tool list is available/);
       assert.match(prompt, /web-tools:web_search/);
       assert.match(prompt, /mcp_call/);
+      assert.match(prompt, /include serverId only when the same tool name appears/);
       writeOpenAiStream(res, JSON.stringify({
         status: "speak",
         argument: "The joined web search tool is available. I need to call it.",
         tool_requests: [
           {
             tool: "mcp_call",
-            serverId: "web-tools",
             mcpToolName: "web_search",
             arguments: { query: "AI Council built-in MCP", count: 1 },
             reason: "Call joined web search."

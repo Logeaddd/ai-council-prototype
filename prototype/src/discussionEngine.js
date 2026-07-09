@@ -969,7 +969,7 @@ function buildToolFollowupInstruction(results = [], rejected = []) {
       .filter((name) => !name.endsWith(":"))
       .slice(0, 8);
     if (toolNames.length) {
-      lines.push(`MCP tool list is available: ${toolNames.join(", ")}. If a listed tool is needed, request mcp_call with serverId, mcpToolName, and arguments.`);
+      lines.push(`MCP tool list is available: ${toolNames.join(", ")}. If a listed tool is needed, request mcp_call with mcpToolName and arguments; include serverId only when the same tool name appears on more than one server or you are choosing a specific server.`);
     }
   }
   for (const item of completed.filter((entry) => entry.tool === "mcp_call")) {
