@@ -35,6 +35,7 @@ import {
   listConfiguredMcpTools,
   readConfiguredMcpResource
 } from "./mcpClient.js";
+import { installMcpNpmServer, listMcpInstallCatalog, uninstallManagedMcpServer } from "./mcpInstall.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const baseDir = path.resolve(__dirname, "..");
@@ -197,6 +198,25 @@ async function handleApi(req, res, url) {
   if (req.method === "POST" && url.pathname === "/api/mcp/servers/delete") {
     const body = await readBody(req);
     sendJson(res, 200, deleteMcpServerConfig(baseDir, body.id));
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/mcp/catalog") {
+    sendJson(res, 200, listMcpInstallCatalog(baseDir));
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/mcp/install") {
+    const body = await readBody(req);
+    sendJson(res, 200, await installMcpNpmServer(baseDir, body.server || body, {
+      timeoutMs: body.timeoutMs
+    }));
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/mcp/uninstall") {
+    const body = await readBody(req);
+    sendJson(res, 200, uninstallManagedMcpServer(baseDir, body.server || body));
     return;
   }
 

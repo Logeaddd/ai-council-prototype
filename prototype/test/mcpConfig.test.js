@@ -55,6 +55,32 @@ test("MCP server configs can be disabled and deleted", () => {
   assert.deepEqual(readMcpServerConfigs(baseDir), []);
 });
 
+test("MCP server configs preserve managed npm install metadata", () => {
+  const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-mcp-managed-"));
+  upsertMcpServerConfig(baseDir, {
+    id: "managed",
+    name: "Managed",
+    command: process.execPath,
+    args: ["server.mjs"],
+    source: "managed_npm",
+    install: {
+      manager: "npm",
+      packageSpec: "file:local",
+      packageName: "local-mcp",
+      packageVersion: "1.0.0",
+      binName: "local-mcp",
+      installDir: path.join(baseDir, "install"),
+      installedAt: "2026-07-10T00:00:00.000Z"
+    }
+  });
+  const raw = readMcpServerConfigs(baseDir)[0];
+  const listed = listMcpServerConfigs(baseDir)[0];
+
+  assert.equal(raw.source, "managed_npm");
+  assert.equal(raw.install.packageName, "local-mcp");
+  assert.equal(listed.install.binName, "local-mcp");
+});
+
 test("MCP config rejects missing commands and non-stdio transports", () => {
   const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-mcp-invalid-"));
 

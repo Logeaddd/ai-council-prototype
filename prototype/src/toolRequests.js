@@ -18,6 +18,7 @@ import {
   listConfiguredMcpTools,
   readConfiguredMcpResource
 } from "./mcpClient.js";
+import { installMcpNpmServer, uninstallManagedMcpServer } from "./mcpInstall.js";
 import { loadSessionContextArchiveItem, searchSessionContextArchive } from "./storage.js";
 import fs from "node:fs";
 import path from "node:path";
@@ -45,7 +46,9 @@ const ALLOWED_TOOLS = new Set([
   "mcp_list_resources",
   "mcp_read_resource",
   "mcp_list_prompts",
-  "mcp_get_prompt"
+  "mcp_get_prompt",
+  "mcp_install_npm",
+  "mcp_uninstall"
 ]);
 const FILE_TOOLS = new Set(["list_directory", "read_file", "search_files", "grep_content"]);
 const CONTEXT_TOOLS = new Set(["search_context", "load_context"]);
@@ -58,8 +61,8 @@ const API_TOOLS = new Set(["api_request"]);
 const GIT_TOOLS = new Set(["git_operation"]);
 const BROWSER_TOOLS = new Set(["browser_control"]);
 const DATABASE_TOOLS = new Set(["database_query"]);
-const MCP_TOOLS = new Set(["mcp_list_tools", "mcp_call", "mcp_list_resources", "mcp_read_resource", "mcp_list_prompts", "mcp_get_prompt"]);
-const FULL_PERMISSION_TOOLS = new Set(["extract_archive", "execute_command", "run_code", "install_package", "run_tests", "git_operation", "browser_control", "mcp_list_tools", "mcp_call", "mcp_list_resources", "mcp_read_resource", "mcp_list_prompts", "mcp_get_prompt"]);
+const MCP_TOOLS = new Set(["mcp_list_tools", "mcp_call", "mcp_list_resources", "mcp_read_resource", "mcp_list_prompts", "mcp_get_prompt", "mcp_install_npm", "mcp_uninstall"]);
+const FULL_PERMISSION_TOOLS = new Set(["extract_archive", "execute_command", "run_code", "install_package", "run_tests", "git_operation", "browser_control", "mcp_list_tools", "mcp_call", "mcp_list_resources", "mcp_read_resource", "mcp_list_prompts", "mcp_get_prompt", "mcp_install_npm", "mcp_uninstall"]);
 
 export function normalizeToolRequests(value) {
   if (!Array.isArray(value)) return [];
@@ -89,7 +92,7 @@ export async function executeToolRequests(options = {}) {
     };
 
     if (!ALLOWED_TOOLS.has(normalized.tool)) {
-      const rejection = reject(base, "invalid_tool", "Tool must be one of web_search, fetch_url, list_directory, read_file, search_files, grep_content, search_context, load_context, extract_archive, execute_command, run_code, install_package, run_tests, api_request, git_operation, browser_control, database_query, mcp_list_tools, mcp_call, mcp_list_resources, mcp_read_resource, mcp_list_prompts, mcp_get_prompt.");
+      const rejection = reject(base, "invalid_tool", "Tool must be one of web_search, fetch_url, list_directory, read_file, search_files, grep_content, search_context, load_context, extract_archive, execute_command, run_code, install_package, run_tests, api_request, git_operation, browser_control, database_query, mcp_list_tools, mcp_call, mcp_list_resources, mcp_read_resource, mcp_list_prompts, mcp_get_prompt, mcp_install_npm, mcp_uninstall.");
       rejected.push(rejection);
       events.push(toolEvent("tool_failure", base, { status: "rejected", code: rejection.code, error: rejection.error }));
       appendToolAuditLog(options.groupPath, "rejected", rejection);
@@ -438,6 +441,30 @@ async function executeOne(request, options) {
         result
       });
     }
+    if (request.tool === "mcp_install_npm") {
+      const result = await installMcpNpmServer(options.baseDir || options.appBaseDir || process.cwd(), {
+        ...request,
+        id: request.serverId || request.catalogId || request.packageSpec,
+        args: request.mcpArgs
+      }, {
+        timeoutMs: request.timeoutMs || options.timeoutMs
+      });
+      return resultRecord(request, {
+        status: result.ok ? "completed" : "failed",
+        code: result.code,
+        error: result.error,
+        result
+      });
+    }
+    if (request.tool === "mcp_uninstall") {
+      const result = uninstallManagedMcpServer(options.baseDir || options.appBaseDir || process.cwd(), request);
+      return resultRecord(request, {
+        status: result.ok ? "completed" : "failed",
+        code: result.code,
+        error: result.error,
+        result
+      });
+    }
     const result = await searchWeb(request.query, {
       timeoutMs: options.timeoutMs,
       count: request.count,
@@ -495,6 +522,10 @@ function normalizeToolRequest(item, index) {
     sql: stringField(item.sql),
     params: arrayOfPrimitive(item.params),
     serverId: stringField(item.serverId || item.server_id || item.mcpServerId || item.mcp_server_id),
+    catalogId: stringField(item.catalogId || item.catalog_id),
+    packageSpec: stringField(item.packageSpec || item.package_spec || item.packageName || item.package_name),
+    binName: stringField(item.binName || item.bin_name),
+    mcpArgs: arrayOfStrings(item.args || item.mcpArgs || item.mcp_args),
     mcpToolName: stringField(item.mcpToolName || item.mcp_tool_name || item.mcpTool || item.mcp_tool || item.toolName || item.tool_name),
     toolArguments: objectField(item.arguments || item.toolArguments || item.tool_arguments || item.input),
     resourceUri: stringField(item.uri || item.resourceUri || item.resource_uri),
@@ -555,6 +586,10 @@ function reject(request, code, reason) {
     sql: request.sql ? summarizeBodyForStorage(request.sql) : undefined,
     params: request.params,
     serverId: request.serverId,
+    catalogId: request.catalogId,
+    packageSpec: safePackageForStorage(request.packageSpec),
+    binName: request.binName,
+    mcpArgs: request.mcpArgs,
     mcpToolName: request.mcpToolName,
     toolArguments: request.toolArguments ? summarizeBodyForStorage(request.toolArguments) : undefined,
     resourceUri: request.resourceUri,
@@ -616,6 +651,10 @@ function resultRecord(request, extra) {
     sql: request.sql ? summarizeBodyForStorage(request.sql) : undefined,
     params: request.params,
     serverId: request.serverId,
+    catalogId: request.catalogId,
+    packageSpec: safePackageForStorage(request.packageSpec),
+    binName: request.binName,
+    mcpArgs: request.mcpArgs,
     mcpToolName: request.mcpToolName,
     toolArguments: request.toolArguments ? summarizeBodyForStorage(request.toolArguments) : undefined,
     resourceUri: request.resourceUri,
@@ -704,6 +743,10 @@ function toolEvent(type, request, extra = {}) {
     sql: request.sql ? summarizeBodyForStorage(request.sql) : undefined,
     params: request.params,
     serverId: request.serverId,
+    catalogId: request.catalogId,
+    packageSpec: safePackageForStorage(request.packageSpec),
+    binName: request.binName,
+    mcpArgs: request.mcpArgs,
     mcpToolName: request.mcpToolName,
     toolArguments: request.toolArguments ? summarizeBodyForStorage(request.toolArguments) : undefined,
     resourceUri: request.resourceUri,
@@ -895,6 +938,22 @@ function summarizeToolResult(record = {}) {
       durationMs: result.durationMs
     };
   }
+  if (record.tool === "mcp_install_npm") {
+    return {
+      serverId: result.id || record.serverId || "",
+      packageName: result.install?.packageName || record.packageSpec || "",
+      packageVersion: result.install?.packageVersion || "",
+      binName: result.install?.binName || record.binName || "",
+      durationMs: result.install?.durationMs || result.durationMs
+    };
+  }
+  if (record.tool === "mcp_uninstall") {
+    return {
+      serverId: result.id || record.serverId || "",
+      removedInstallDir: Boolean(result.removedInstallDir),
+      deletedConfig: Boolean(result.config?.deleted)
+    };
+  }
   if (record.tool === "fetch_url") {
     return { url: safeUrlForEvent(record.url), title: result.title || "", bytes: result.bytes };
   }
@@ -943,6 +1002,10 @@ function appendToolAuditLog(groupPath, action, item) {
       sqlBytes: item.sql ? Buffer.byteLength(item.sql, "utf8") : 0,
       paramsCount: item.params?.length || 0,
       serverId: item.serverId,
+      catalogId: item.catalogId,
+      packageSpec: safePackageForStorage(item.packageSpec),
+      binName: item.binName,
+      mcpArgs: item.mcpArgs,
       mcpToolName: item.mcpToolName,
       toolArguments: item.toolArguments,
       resourceUri: item.resourceUri,
@@ -1234,6 +1297,10 @@ function appendMcpAuditLog(groupPath, action, item) {
       source_agent_name: item.source_agent_name,
       serverId: item.result?.serverId || item.serverId,
       serverName: item.result?.serverName,
+      catalogId: item.catalogId,
+      packageSpec: safePackageForStorage(item.result?.install?.packageSpec || item.packageSpec),
+      binName: item.result?.install?.binName || item.binName,
+      mcpArgs: item.mcpArgs,
       mcpToolName: item.result?.toolName || item.mcpToolName,
       toolArguments: item.toolArguments,
       resourceUri: item.result?.uri || item.resourceUri,
@@ -1284,6 +1351,10 @@ function safeRequestForStorage(request) {
     sql: request.sql ? summarizeBodyForStorage(request.sql) : undefined,
     params: request.params,
     serverId: request.serverId,
+    catalogId: request.catalogId,
+    packageSpec: safePackageForStorage(request.packageSpec),
+    binName: request.binName,
+    mcpArgs: request.mcpArgs,
     mcpToolName: request.mcpToolName,
     toolArguments: request.toolArguments ? summarizeBodyForStorage(request.toolArguments) : undefined,
     resourceUri: request.resourceUri,

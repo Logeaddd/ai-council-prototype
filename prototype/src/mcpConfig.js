@@ -69,7 +69,8 @@ function normalizeServer(value, options = {}) {
     args: normalizeStringArray(value.args),
     cwd: String(value.cwd || "").trim(),
     env: normalizeEnv(value.env),
-    source: "local_config"
+    source: normalizeSource(value.source),
+    install: normalizeInstall(value.install)
   };
 }
 
@@ -85,7 +86,8 @@ function redactServer(server) {
     ...server,
     env,
     status: server.enabled ? "configured" : "disabled",
-    runtime: "not_started"
+    runtime: "not_started",
+    install: server.install
   };
 }
 
@@ -118,4 +120,25 @@ function normalizeEnv(value = {}) {
     output[name] = String(raw || "");
   }
   return output;
+}
+
+function normalizeSource(value) {
+  const text = String(value || "local_config").trim();
+  if (["local_config", "managed_npm"].includes(text)) return text;
+  return "local_config";
+}
+
+function normalizeInstall(value = {}) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const manager = String(value.manager || "").trim();
+  if (manager !== "npm") return undefined;
+  return {
+    manager,
+    packageSpec: String(value.packageSpec || "").trim(),
+    packageName: String(value.packageName || "").trim(),
+    packageVersion: String(value.packageVersion || "").trim(),
+    binName: String(value.binName || "").trim(),
+    installDir: String(value.installDir || "").trim(),
+    installedAt: String(value.installedAt || "").trim()
+  };
 }

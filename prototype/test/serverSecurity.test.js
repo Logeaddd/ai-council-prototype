@@ -256,6 +256,9 @@ test("server exposes local MCP server config APIs without starting fake runtimes
 
   assert.match(serverJs, /\/api\/mcp\/servers/);
   assert.match(serverJs, /\/api\/mcp\/servers\/delete/);
+  assert.match(serverJs, /\/api\/mcp\/catalog/);
+  assert.match(serverJs, /\/api\/mcp\/install/);
+  assert.match(serverJs, /\/api\/mcp\/uninstall/);
   assert.match(serverJs, /\/api\/mcp\/tools\/list/);
   assert.match(serverJs, /\/api\/mcp\/tools\/call/);
   assert.match(serverJs, /\/api\/mcp\/resources\/list/);
@@ -267,6 +270,9 @@ test("server exposes local MCP server config APIs without starting fake runtimes
   assert.match(serverJs, /deleteMcpServerConfig/);
   assert.match(serverJs, /listConfiguredMcpTools/);
   assert.match(serverJs, /callConfiguredMcpTool/);
+  assert.match(serverJs, /listMcpInstallCatalog/);
+  assert.match(serverJs, /installMcpNpmServer/);
+  assert.match(serverJs, /uninstallManagedMcpServer/);
   assert.match(serverJs, /listConfiguredMcpResources/);
   assert.match(serverJs, /readConfiguredMcpResource/);
   assert.match(serverJs, /listConfiguredMcpPrompts/);
