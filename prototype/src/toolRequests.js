@@ -18,7 +18,7 @@ import {
   listConfiguredMcpTools,
   readConfiguredMcpResource
 } from "./mcpClient.js";
-import { installMcpNpmServer, uninstallManagedMcpServer } from "./mcpInstall.js";
+import { installMcpNpmServer, searchMcpNpmPackages, uninstallManagedMcpServer } from "./mcpInstall.js";
 import { loadSessionContextArchiveItem, searchSessionContextArchive } from "./storage.js";
 import fs from "node:fs";
 import path from "node:path";
@@ -47,6 +47,7 @@ const ALLOWED_TOOLS = new Set([
   "mcp_read_resource",
   "mcp_list_prompts",
   "mcp_get_prompt",
+  "mcp_search_npm",
   "mcp_install_npm",
   "mcp_uninstall"
 ]);
@@ -61,8 +62,8 @@ const API_TOOLS = new Set(["api_request"]);
 const GIT_TOOLS = new Set(["git_operation"]);
 const BROWSER_TOOLS = new Set(["browser_control"]);
 const DATABASE_TOOLS = new Set(["database_query"]);
-const MCP_TOOLS = new Set(["mcp_list_tools", "mcp_call", "mcp_list_resources", "mcp_read_resource", "mcp_list_prompts", "mcp_get_prompt", "mcp_install_npm", "mcp_uninstall"]);
-const FULL_PERMISSION_TOOLS = new Set(["extract_archive", "execute_command", "run_code", "install_package", "run_tests", "git_operation", "browser_control", "mcp_list_tools", "mcp_call", "mcp_list_resources", "mcp_read_resource", "mcp_list_prompts", "mcp_get_prompt", "mcp_install_npm", "mcp_uninstall"]);
+const MCP_TOOLS = new Set(["mcp_list_tools", "mcp_call", "mcp_list_resources", "mcp_read_resource", "mcp_list_prompts", "mcp_get_prompt", "mcp_search_npm", "mcp_install_npm", "mcp_uninstall"]);
+const FULL_PERMISSION_TOOLS = new Set(["extract_archive", "execute_command", "run_code", "install_package", "run_tests", "git_operation", "browser_control", "mcp_list_tools", "mcp_call", "mcp_list_resources", "mcp_read_resource", "mcp_list_prompts", "mcp_get_prompt", "mcp_search_npm", "mcp_install_npm", "mcp_uninstall"]);
 
 export function normalizeToolRequests(value) {
   if (!Array.isArray(value)) return [];
@@ -92,7 +93,7 @@ export async function executeToolRequests(options = {}) {
     };
 
     if (!ALLOWED_TOOLS.has(normalized.tool)) {
-      const rejection = reject(base, "invalid_tool", "Tool must be one of web_search, fetch_url, list_directory, read_file, search_files, grep_content, search_context, load_context, extract_archive, execute_command, run_code, install_package, run_tests, api_request, git_operation, browser_control, database_query, mcp_list_tools, mcp_call, mcp_list_resources, mcp_read_resource, mcp_list_prompts, mcp_get_prompt, mcp_install_npm, mcp_uninstall.");
+      const rejection = reject(base, "invalid_tool", "Tool must be one of web_search, fetch_url, list_directory, read_file, search_files, grep_content, search_context, load_context, extract_archive, execute_command, run_code, install_package, run_tests, api_request, git_operation, browser_control, database_query, mcp_list_tools, mcp_call, mcp_list_resources, mcp_read_resource, mcp_list_prompts, mcp_get_prompt, mcp_search_npm, mcp_install_npm, mcp_uninstall.");
       rejected.push(rejection);
       events.push(toolEvent("tool_failure", base, { status: "rejected", code: rejection.code, error: rejection.error }));
       appendToolAuditLog(options.groupPath, "rejected", rejection);
@@ -433,6 +434,18 @@ async function executeOne(request, options) {
         timeoutMs: request.timeoutMs || options.timeoutMs,
         mcpTimeoutMs: options.mcpTimeoutMs,
         maxMcpOutputBytes: options.maxMcpOutputBytes
+      });
+      return resultRecord(request, {
+        status: result.ok ? "completed" : "failed",
+        code: result.code,
+        error: result.error,
+        result
+      });
+    }
+    if (request.tool === "mcp_search_npm") {
+      const result = await searchMcpNpmPackages(request.query || request.packageSpec || request.reason, {
+        count: request.count,
+        timeoutMs: request.timeoutMs || options.timeoutMs
       });
       return resultRecord(request, {
         status: result.ok ? "completed" : "failed",
@@ -938,6 +951,14 @@ function summarizeToolResult(record = {}) {
       durationMs: result.durationMs
     };
   }
+  if (record.tool === "mcp_search_npm") {
+    return {
+      query: result.query || record.query || "",
+      source: result.source,
+      results: result.results?.length || 0,
+      firstPackage: result.results?.[0]?.packageName || ""
+    };
+  }
   if (record.tool === "mcp_install_npm") {
     return {
       serverId: result.id || record.serverId || "",
@@ -1297,6 +1318,7 @@ function appendMcpAuditLog(groupPath, action, item) {
       source_agent_name: item.source_agent_name,
       serverId: item.result?.serverId || item.serverId,
       serverName: item.result?.serverName,
+      query: item.query,
       catalogId: item.catalogId,
       packageSpec: safePackageForStorage(item.result?.install?.packageSpec || item.packageSpec),
       binName: item.result?.install?.binName || item.binName,

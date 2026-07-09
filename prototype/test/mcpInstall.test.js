@@ -67,6 +67,54 @@ test("MCP npm search reports registry failures honestly", async () => {
   }
 });
 
+test("mcp_search_npm tool requires full permission and returns registry results", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    objects: [
+      {
+        package: {
+          name: "agent-mcp-tool",
+          version: "0.1.0",
+          description: "Agent tool"
+        },
+        score: { final: 0.8 }
+      }
+    ]
+  }), {
+    status: 200,
+    headers: { "Content-Type": "application/json" }
+  });
+  const groupPath = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-mcp-search-tool-group-"));
+  try {
+    const denied = await executeToolRequests({
+      permissionTier: "tool",
+      groupPath,
+      agent: { id: "tool", name: "Tool" },
+      round: 1,
+      requests: [
+        { tool: "mcp_search_npm", query: "agent mcp", reason: "Find MCP tools." }
+      ]
+    });
+    const allowed = await executeToolRequests({
+      permissionTier: "full",
+      groupPath,
+      agent: { id: "full", name: "Full" },
+      round: 1,
+      requests: [
+        { tool: "mcp_search_npm", query: "agent mcp", reason: "Find MCP tools." }
+      ]
+    });
+
+    assert.equal(denied.accepted.length, 0);
+    assert.equal(denied.rejected[0].code, "permission_denied");
+    assert.equal(allowed.results[0].status, "completed");
+    assert.equal(allowed.results[0].result.results[0].packageName, "agent-mcp-tool");
+    assert.equal(fs.existsSync(path.join(groupPath, "shared", "logs", "mcp.jsonl")), true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("MCP npm installer installs a local package, registers config, and can call it", async () => {
   const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-mcp-install-"));
   const packageDir = writeFakeMcpPackage(baseDir);
