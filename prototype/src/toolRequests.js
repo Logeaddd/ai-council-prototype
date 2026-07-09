@@ -10,7 +10,14 @@ import { apiRequestTool } from "./apiTools.js";
 import { gitOperationTool } from "./gitTools.js";
 import { browserControlTool } from "./browserTools.js";
 import { databaseQueryTool } from "./databaseTools.js";
-import { callConfiguredMcpTool, listConfiguredMcpTools } from "./mcpClient.js";
+import {
+  callConfiguredMcpTool,
+  getConfiguredMcpPrompt,
+  listConfiguredMcpPrompts,
+  listConfiguredMcpResources,
+  listConfiguredMcpTools,
+  readConfiguredMcpResource
+} from "./mcpClient.js";
 import { loadSessionContextArchiveItem, searchSessionContextArchive } from "./storage.js";
 import fs from "node:fs";
 import path from "node:path";
@@ -34,7 +41,11 @@ const ALLOWED_TOOLS = new Set([
   "browser_control",
   "database_query",
   "mcp_list_tools",
-  "mcp_call"
+  "mcp_call",
+  "mcp_list_resources",
+  "mcp_read_resource",
+  "mcp_list_prompts",
+  "mcp_get_prompt"
 ]);
 const FILE_TOOLS = new Set(["list_directory", "read_file", "search_files", "grep_content"]);
 const CONTEXT_TOOLS = new Set(["search_context", "load_context"]);
@@ -47,8 +58,8 @@ const API_TOOLS = new Set(["api_request"]);
 const GIT_TOOLS = new Set(["git_operation"]);
 const BROWSER_TOOLS = new Set(["browser_control"]);
 const DATABASE_TOOLS = new Set(["database_query"]);
-const MCP_TOOLS = new Set(["mcp_list_tools", "mcp_call"]);
-const FULL_PERMISSION_TOOLS = new Set(["extract_archive", "execute_command", "run_code", "install_package", "run_tests", "git_operation", "browser_control", "mcp_list_tools", "mcp_call"]);
+const MCP_TOOLS = new Set(["mcp_list_tools", "mcp_call", "mcp_list_resources", "mcp_read_resource", "mcp_list_prompts", "mcp_get_prompt"]);
+const FULL_PERMISSION_TOOLS = new Set(["extract_archive", "execute_command", "run_code", "install_package", "run_tests", "git_operation", "browser_control", "mcp_list_tools", "mcp_call", "mcp_list_resources", "mcp_read_resource", "mcp_list_prompts", "mcp_get_prompt"]);
 
 export function normalizeToolRequests(value) {
   if (!Array.isArray(value)) return [];
@@ -78,7 +89,7 @@ export async function executeToolRequests(options = {}) {
     };
 
     if (!ALLOWED_TOOLS.has(normalized.tool)) {
-      const rejection = reject(base, "invalid_tool", "Tool must be one of web_search, fetch_url, list_directory, read_file, search_files, grep_content, search_context, load_context, extract_archive, execute_command, run_code, install_package, run_tests, api_request, git_operation, browser_control, database_query, mcp_list_tools, mcp_call.");
+      const rejection = reject(base, "invalid_tool", "Tool must be one of web_search, fetch_url, list_directory, read_file, search_files, grep_content, search_context, load_context, extract_archive, execute_command, run_code, install_package, run_tests, api_request, git_operation, browser_control, database_query, mcp_list_tools, mcp_call, mcp_list_resources, mcp_read_resource, mcp_list_prompts, mcp_get_prompt.");
       rejected.push(rejection);
       events.push(toolEvent("tool_failure", base, { status: "rejected", code: rejection.code, error: rejection.error }));
       appendToolAuditLog(options.groupPath, "rejected", rejection);
@@ -375,6 +386,58 @@ async function executeOne(request, options) {
         result
       });
     }
+    if (request.tool === "mcp_list_resources") {
+      const result = await listConfiguredMcpResources(options.baseDir || options.appBaseDir || process.cwd(), request, {
+        timeoutMs: request.timeoutMs || options.timeoutMs,
+        mcpTimeoutMs: options.mcpTimeoutMs,
+        maxMcpOutputBytes: options.maxMcpOutputBytes
+      });
+      return resultRecord(request, {
+        status: result.ok ? "completed" : "failed",
+        code: result.code,
+        error: result.error,
+        result
+      });
+    }
+    if (request.tool === "mcp_read_resource") {
+      const result = await readConfiguredMcpResource(options.baseDir || options.appBaseDir || process.cwd(), request, {
+        timeoutMs: request.timeoutMs || options.timeoutMs,
+        mcpTimeoutMs: options.mcpTimeoutMs,
+        maxMcpOutputBytes: options.maxMcpOutputBytes
+      });
+      return resultRecord(request, {
+        status: result.ok ? "completed" : "failed",
+        code: result.code,
+        error: result.error,
+        result
+      });
+    }
+    if (request.tool === "mcp_list_prompts") {
+      const result = await listConfiguredMcpPrompts(options.baseDir || options.appBaseDir || process.cwd(), request, {
+        timeoutMs: request.timeoutMs || options.timeoutMs,
+        mcpTimeoutMs: options.mcpTimeoutMs,
+        maxMcpOutputBytes: options.maxMcpOutputBytes
+      });
+      return resultRecord(request, {
+        status: result.ok ? "completed" : "failed",
+        code: result.code,
+        error: result.error,
+        result
+      });
+    }
+    if (request.tool === "mcp_get_prompt") {
+      const result = await getConfiguredMcpPrompt(options.baseDir || options.appBaseDir || process.cwd(), request, {
+        timeoutMs: request.timeoutMs || options.timeoutMs,
+        mcpTimeoutMs: options.mcpTimeoutMs,
+        maxMcpOutputBytes: options.maxMcpOutputBytes
+      });
+      return resultRecord(request, {
+        status: result.ok ? "completed" : "failed",
+        code: result.code,
+        error: result.error,
+        result
+      });
+    }
     const result = await searchWeb(request.query, {
       timeoutMs: options.timeoutMs,
       count: request.count,
@@ -434,6 +497,9 @@ function normalizeToolRequest(item, index) {
     serverId: stringField(item.serverId || item.server_id || item.mcpServerId || item.mcp_server_id),
     mcpToolName: stringField(item.mcpToolName || item.mcp_tool_name || item.mcpTool || item.mcp_tool || item.toolName || item.tool_name),
     toolArguments: objectField(item.arguments || item.toolArguments || item.tool_arguments || item.input),
+    resourceUri: stringField(item.uri || item.resourceUri || item.resource_uri),
+    promptName: stringField(item.promptName || item.prompt_name || item.prompt || item.name),
+    promptArguments: objectField(item.promptArguments || item.prompt_arguments || item.arguments || item.input),
     mode: stringField(item.mode),
     maxRows: normalizeOptionalNumber(item.maxRows || item.max_rows),
     headers: objectField(item.headers),
@@ -491,6 +557,9 @@ function reject(request, code, reason) {
     serverId: request.serverId,
     mcpToolName: request.mcpToolName,
     toolArguments: request.toolArguments ? summarizeBodyForStorage(request.toolArguments) : undefined,
+    resourceUri: request.resourceUri,
+    promptName: request.promptName,
+    promptArguments: request.promptArguments ? summarizeBodyForStorage(request.promptArguments) : undefined,
     mode: request.mode,
     maxRows: request.maxRows,
     headers: safeHeadersForStorage(request.headers),
@@ -549,6 +618,9 @@ function resultRecord(request, extra) {
     serverId: request.serverId,
     mcpToolName: request.mcpToolName,
     toolArguments: request.toolArguments ? summarizeBodyForStorage(request.toolArguments) : undefined,
+    resourceUri: request.resourceUri,
+    promptName: request.promptName,
+    promptArguments: request.promptArguments ? summarizeBodyForStorage(request.promptArguments) : undefined,
     mode: request.mode,
     maxRows: request.maxRows,
     headers: safeHeadersForStorage(request.headers),
@@ -634,6 +706,9 @@ function toolEvent(type, request, extra = {}) {
     serverId: request.serverId,
     mcpToolName: request.mcpToolName,
     toolArguments: request.toolArguments ? summarizeBodyForStorage(request.toolArguments) : undefined,
+    resourceUri: request.resourceUri,
+    promptName: request.promptName,
+    promptArguments: request.promptArguments ? summarizeBodyForStorage(request.promptArguments) : undefined,
     mode: request.mode,
     maxRows: request.maxRows,
     headers: safeHeadersForStorage(request.headers),
@@ -790,6 +865,36 @@ function summarizeToolResult(record = {}) {
       durationMs: result.durationMs
     };
   }
+  if (record.tool === "mcp_list_resources") {
+    return {
+      serverId: record.serverId || "",
+      servers: result.servers?.length || 0,
+      resources: result.servers?.reduce((sum, item) => sum + (item.resources?.length || 0), 0) || 0
+    };
+  }
+  if (record.tool === "mcp_read_resource") {
+    return {
+      serverId: result.serverId || record.serverId || "",
+      uri: result.uri || record.resourceUri || "",
+      contentItems: result.contents?.length || 0,
+      durationMs: result.durationMs
+    };
+  }
+  if (record.tool === "mcp_list_prompts") {
+    return {
+      serverId: record.serverId || "",
+      servers: result.servers?.length || 0,
+      prompts: result.servers?.reduce((sum, item) => sum + (item.prompts?.length || 0), 0) || 0
+    };
+  }
+  if (record.tool === "mcp_get_prompt") {
+    return {
+      serverId: result.serverId || record.serverId || "",
+      promptName: result.promptName || record.promptName || "",
+      messages: result.messages?.length || 0,
+      durationMs: result.durationMs
+    };
+  }
   if (record.tool === "fetch_url") {
     return { url: safeUrlForEvent(record.url), title: result.title || "", bytes: result.bytes };
   }
@@ -840,6 +945,9 @@ function appendToolAuditLog(groupPath, action, item) {
       serverId: item.serverId,
       mcpToolName: item.mcpToolName,
       toolArguments: item.toolArguments,
+      resourceUri: item.resourceUri,
+      promptName: item.promptName,
+      promptArguments: item.promptArguments,
       mode: item.mode,
       maxRows: item.maxRows,
       create: item.create,
@@ -1128,6 +1236,9 @@ function appendMcpAuditLog(groupPath, action, item) {
       serverName: item.result?.serverName,
       mcpToolName: item.result?.toolName || item.mcpToolName,
       toolArguments: item.toolArguments,
+      resourceUri: item.result?.uri || item.resourceUri,
+      promptName: item.result?.promptName || item.promptName,
+      promptArguments: item.promptArguments,
       isError: Boolean(item.result?.isError),
       durationMs: item.result?.durationMs,
       resultSummary: summarizeToolResult(item),
@@ -1175,6 +1286,9 @@ function safeRequestForStorage(request) {
     serverId: request.serverId,
     mcpToolName: request.mcpToolName,
     toolArguments: request.toolArguments ? summarizeBodyForStorage(request.toolArguments) : undefined,
+    resourceUri: request.resourceUri,
+    promptName: request.promptName,
+    promptArguments: request.promptArguments ? summarizeBodyForStorage(request.promptArguments) : undefined,
     mode: request.mode,
     maxRows: request.maxRows,
     headers: safeHeadersForStorage(request.headers),

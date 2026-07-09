@@ -44,6 +44,77 @@ export async function callConfiguredMcpTool(baseDir, request = {}, options = {})
   }, options);
 }
 
+export async function listConfiguredMcpResources(baseDir, request = {}, options = {}) {
+  const selection = selectMcpServers(baseDir, request.serverId || request.mcpServerId);
+  if (!selection.ok) return selection;
+
+  const servers = [];
+  for (const server of selection.servers) {
+    servers.push(await listOneServerResources(baseDir, server, request, options));
+  }
+  const ok = servers.some((item) => item.ok);
+  return {
+    ok,
+    source: "external_mcp_stdio",
+    code: ok ? undefined : "mcp_list_resources_failed",
+    error: ok ? "" : "No configured external MCP server returned a resource list.",
+    servers
+  };
+}
+
+export async function readConfiguredMcpResource(baseDir, request = {}, options = {}) {
+  const uri = String(request.uri || request.resourceUri || request.resource_uri || "").trim();
+  if (!uri) {
+    return {
+      ok: false,
+      source: "external_mcp_stdio",
+      code: "missing_mcp_resource_uri",
+      error: "mcp_read_resource requires uri."
+    };
+  }
+  const selection = selectMcpServer(baseDir, request.serverId || request.mcpServerId);
+  if (!selection.ok) return selection;
+  return readOneServerResource(baseDir, selection.server, {
+    uri
+  }, options);
+}
+
+export async function listConfiguredMcpPrompts(baseDir, request = {}, options = {}) {
+  const selection = selectMcpServers(baseDir, request.serverId || request.mcpServerId);
+  if (!selection.ok) return selection;
+
+  const servers = [];
+  for (const server of selection.servers) {
+    servers.push(await listOneServerPrompts(baseDir, server, request, options));
+  }
+  const ok = servers.some((item) => item.ok);
+  return {
+    ok,
+    source: "external_mcp_stdio",
+    code: ok ? undefined : "mcp_list_prompts_failed",
+    error: ok ? "" : "No configured external MCP server returned a prompt list.",
+    servers
+  };
+}
+
+export async function getConfiguredMcpPrompt(baseDir, request = {}, options = {}) {
+  const promptName = String(request.promptName || request.prompt_name || request.name || "").trim();
+  if (!promptName) {
+    return {
+      ok: false,
+      source: "external_mcp_stdio",
+      code: "missing_mcp_prompt_name",
+      error: "mcp_get_prompt requires promptName."
+    };
+  }
+  const selection = selectMcpServer(baseDir, request.serverId || request.mcpServerId);
+  if (!selection.ok) return selection;
+  return getOneServerPrompt(baseDir, selection.server, {
+    promptName,
+    arguments: normalizeArguments(request.promptArguments || request.prompt_arguments || request.arguments || request.input)
+  }, options);
+}
+
 async function listOneServerTools(baseDir, server, options) {
   try {
     return await runMcpSession(baseDir, server, async (client) => {
@@ -81,6 +152,86 @@ async function callOneServerTool(baseDir, server, request, options) {
     }, options);
   } catch (error) {
     return mcpFailure(server, error, { toolName: request.toolName });
+  }
+}
+
+async function listOneServerResources(baseDir, server, request, options) {
+  try {
+    return await runMcpSession(baseDir, server, async (client) => {
+      const listed = await client.request("resources/list", cursorParams(request.cursor));
+      return {
+        ok: true,
+        source: "external_mcp_stdio",
+        serverId: server.id,
+        serverName: server.name,
+        resources: Array.isArray(listed?.resources) ? listed.resources : [],
+        nextCursor: listed?.nextCursor || ""
+      };
+    }, options);
+  } catch (error) {
+    return mcpFailure(server, error);
+  }
+}
+
+async function readOneServerResource(baseDir, server, request, options) {
+  try {
+    return await runMcpSession(baseDir, server, async (client) => {
+      const resourceResult = await client.request("resources/read", {
+        uri: request.uri
+      });
+      return {
+        ok: true,
+        source: "external_mcp_stdio",
+        serverId: server.id,
+        serverName: server.name,
+        uri: request.uri,
+        contents: Array.isArray(resourceResult?.contents) ? resourceResult.contents : [],
+        rawResult: resourceResult
+      };
+    }, options);
+  } catch (error) {
+    return mcpFailure(server, error, { uri: request.uri });
+  }
+}
+
+async function listOneServerPrompts(baseDir, server, request, options) {
+  try {
+    return await runMcpSession(baseDir, server, async (client) => {
+      const listed = await client.request("prompts/list", cursorParams(request.cursor));
+      return {
+        ok: true,
+        source: "external_mcp_stdio",
+        serverId: server.id,
+        serverName: server.name,
+        prompts: Array.isArray(listed?.prompts) ? listed.prompts : [],
+        nextCursor: listed?.nextCursor || ""
+      };
+    }, options);
+  } catch (error) {
+    return mcpFailure(server, error);
+  }
+}
+
+async function getOneServerPrompt(baseDir, server, request, options) {
+  try {
+    return await runMcpSession(baseDir, server, async (client) => {
+      const promptResult = await client.request("prompts/get", {
+        name: request.promptName,
+        arguments: request.arguments
+      });
+      return {
+        ok: true,
+        source: "external_mcp_stdio",
+        serverId: server.id,
+        serverName: server.name,
+        promptName: request.promptName,
+        description: promptResult?.description || "",
+        messages: Array.isArray(promptResult?.messages) ? promptResult.messages : [],
+        rawResult: promptResult
+      };
+    }, options);
+  } catch (error) {
+    return mcpFailure(server, error, { promptName: request.promptName });
   }
 }
 
@@ -348,6 +499,11 @@ function resolveServerCwd(baseDir, cwd) {
 function normalizeArguments(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   return value;
+}
+
+function cursorParams(value) {
+  const cursor = String(value || "").trim();
+  return cursor ? { cursor } : {};
 }
 
 function clampNumber(value, fallback, min, max) {

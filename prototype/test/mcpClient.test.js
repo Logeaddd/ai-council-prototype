@@ -3,7 +3,14 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { callConfiguredMcpTool, listConfiguredMcpTools } from "../src/mcpClient.js";
+import {
+  callConfiguredMcpTool,
+  getConfiguredMcpPrompt,
+  listConfiguredMcpPrompts,
+  listConfiguredMcpResources,
+  listConfiguredMcpTools,
+  readConfiguredMcpResource
+} from "../src/mcpClient.js";
 import { upsertMcpServerConfig } from "../src/mcpConfig.js";
 import { executeToolRequests } from "../src/toolRequests.js";
 
@@ -50,6 +57,55 @@ test("external MCP client calls configured tools and returns real content", asyn
   assert.equal(result.serverId, "fake-call");
   assert.equal(result.toolName, "echo");
   assert.match(result.content[0].text, /MCP_CALL_FACT/);
+});
+
+test("external MCP client lists and reads configured resources", async () => {
+  const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-mcp-client-resources-"));
+  const serverScript = writeFakeMcpServer(baseDir);
+  upsertMcpServerConfig(baseDir, {
+    id: "fake-resource",
+    name: "Fake Resource MCP",
+    command: process.execPath,
+    args: [serverScript],
+    cwd: baseDir
+  });
+
+  const listed = await listConfiguredMcpResources(baseDir, { serverId: "fake-resource" });
+  const read = await readConfiguredMcpResource(baseDir, {
+    serverId: "fake-resource",
+    uri: "memo://facts"
+  });
+
+  assert.equal(listed.ok, true);
+  assert.equal(listed.servers[0].resources[0].uri, "memo://facts");
+  assert.equal(read.ok, true);
+  assert.equal(read.uri, "memo://facts");
+  assert.match(read.contents[0].text, /MCP_RESOURCE_FACT/);
+});
+
+test("external MCP client lists and gets configured prompts", async () => {
+  const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-mcp-client-prompts-"));
+  const serverScript = writeFakeMcpServer(baseDir);
+  upsertMcpServerConfig(baseDir, {
+    id: "fake-prompt",
+    name: "Fake Prompt MCP",
+    command: process.execPath,
+    args: [serverScript],
+    cwd: baseDir
+  });
+
+  const listed = await listConfiguredMcpPrompts(baseDir, { serverId: "fake-prompt" });
+  const prompt = await getConfiguredMcpPrompt(baseDir, {
+    serverId: "fake-prompt",
+    promptName: "brief",
+    arguments: { topic: "MCP_PROMPT_FACT" }
+  });
+
+  assert.equal(listed.ok, true);
+  assert.equal(listed.servers[0].prompts[0].name, "brief");
+  assert.equal(prompt.ok, true);
+  assert.equal(prompt.promptName, "brief");
+  assert.match(prompt.messages[0].content.text, /MCP_PROMPT_FACT/);
 });
 
 test("external MCP client reports missing and disabled servers honestly", async () => {
@@ -116,6 +172,49 @@ test("mcp_call tool requires full permission and writes an audit log", async () 
   assert.equal(fs.existsSync(path.join(groupPath, "shared", "logs", "mcp.jsonl")), true);
 });
 
+test("MCP resource and prompt tool requests require full permission", async () => {
+  const groupPath = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-mcp-resource-tool-"));
+  const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-mcp-resource-tool-base-"));
+  const serverScript = writeFakeMcpServer(baseDir);
+  upsertMcpServerConfig(baseDir, {
+    id: "fake-extra",
+    name: "Fake Extra MCP",
+    command: process.execPath,
+    args: [serverScript],
+    cwd: baseDir
+  });
+
+  const denied = await executeToolRequests({
+    baseDir,
+    permissionTier: "tool",
+    groupPath,
+    agent: { id: "tool", name: "Tool" },
+    round: 1,
+    requests: [
+      { tool: "mcp_read_resource", serverId: "fake-extra", uri: "memo://facts", reason: "Try resource." }
+    ]
+  });
+  const allowed = await executeToolRequests({
+    baseDir,
+    permissionTier: "full",
+    groupPath,
+    agent: { id: "full", name: "Full" },
+    round: 1,
+    requests: [
+      { tool: "mcp_read_resource", serverId: "fake-extra", uri: "memo://facts", reason: "Read resource." },
+      { tool: "mcp_get_prompt", serverId: "fake-extra", promptName: "brief", arguments: { topic: "TOOL_PROMPT_FACT" }, reason: "Get prompt." }
+    ]
+  });
+
+  assert.equal(denied.accepted.length, 0);
+  assert.equal(denied.rejected[0].code, "permission_denied");
+  assert.equal(allowed.results.length, 2);
+  assert.deepEqual(allowed.results.map((item) => item.status), ["completed", "completed"]);
+  assert.match(allowed.results[0].result.contents[0].text, /MCP_RESOURCE_FACT/);
+  assert.match(allowed.results[1].result.messages[0].content.text, /TOOL_PROMPT_FACT/);
+  assert.equal(fs.existsSync(path.join(groupPath, "shared", "logs", "mcp.jsonl")), true);
+});
+
 function writeFakeMcpServer(dir) {
   const filePath = path.join(dir, "fake-mcp-server.mjs");
   fs.writeFileSync(filePath, [
@@ -137,6 +236,23 @@ function writeFakeMcpServer(dir) {
     "  if (message.method === 'tools/call') {",
     "    const payload = { name: message.params?.name, arguments: message.params?.arguments || {} };",
     "    write({ jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(payload) }], isError: message.params?.name !== 'echo' } });",
+    "    continue;",
+    "  }",
+    "  if (message.method === 'resources/list') {",
+    "    write({ jsonrpc: '2.0', id: message.id, result: { resources: [{ uri: 'memo://facts', name: 'Facts', mimeType: 'text/plain' }] } });",
+    "    continue;",
+    "  }",
+    "  if (message.method === 'resources/read') {",
+    "    write({ jsonrpc: '2.0', id: message.id, result: { contents: [{ uri: message.params?.uri, mimeType: 'text/plain', text: 'MCP_RESOURCE_FACT from ' + message.params?.uri }] } });",
+    "    continue;",
+    "  }",
+    "  if (message.method === 'prompts/list') {",
+    "    write({ jsonrpc: '2.0', id: message.id, result: { prompts: [{ name: 'brief', description: 'Write a brief', arguments: [{ name: 'topic' }] }] } });",
+    "    continue;",
+    "  }",
+    "  if (message.method === 'prompts/get') {",
+    "    const topic = message.params?.arguments?.topic || 'none';",
+    "    write({ jsonrpc: '2.0', id: message.id, result: { description: 'Brief prompt', messages: [{ role: 'user', content: { type: 'text', text: 'Prompt topic: ' + topic } }] } });",
     "    continue;",
     "  }",
     "  write({ jsonrpc: '2.0', id: message.id, error: { code: -32601, message: 'Unknown method' } });",

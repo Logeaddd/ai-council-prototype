@@ -27,7 +27,14 @@ import { readTaskState } from "./taskState.js";
 import { listCapabilities } from "./capabilityRegistry.js";
 import { fetchPublicUrl, searchWeb } from "./webTools.js";
 import { deleteMcpServerConfig, listMcpServerConfigs, upsertMcpServerConfig } from "./mcpConfig.js";
-import { callConfiguredMcpTool, listConfiguredMcpTools } from "./mcpClient.js";
+import {
+  callConfiguredMcpTool,
+  getConfiguredMcpPrompt,
+  listConfiguredMcpPrompts,
+  listConfiguredMcpResources,
+  listConfiguredMcpTools,
+  readConfiguredMcpResource
+} from "./mcpClient.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const baseDir = path.resolve(__dirname, "..");
@@ -208,6 +215,51 @@ async function handleApi(req, res, url) {
     sendJson(res, 200, await callConfiguredMcpTool(baseDir, {
       serverId: body.serverId || body.id,
       mcpToolName: body.mcpToolName || body.toolName || body.name,
+      arguments: body.arguments || body.input
+    }, {
+      timeoutMs: body.timeoutMs
+    }));
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/mcp/resources/list") {
+    const body = await readBody(req);
+    sendJson(res, 200, await listConfiguredMcpResources(baseDir, {
+      serverId: body.serverId || body.id,
+      cursor: body.cursor
+    }, {
+      timeoutMs: body.timeoutMs
+    }));
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/mcp/resources/read") {
+    const body = await readBody(req);
+    sendJson(res, 200, await readConfiguredMcpResource(baseDir, {
+      serverId: body.serverId || body.id,
+      uri: body.uri || body.resourceUri
+    }, {
+      timeoutMs: body.timeoutMs
+    }));
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/mcp/prompts/list") {
+    const body = await readBody(req);
+    sendJson(res, 200, await listConfiguredMcpPrompts(baseDir, {
+      serverId: body.serverId || body.id,
+      cursor: body.cursor
+    }, {
+      timeoutMs: body.timeoutMs
+    }));
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/mcp/prompts/get") {
+    const body = await readBody(req);
+    sendJson(res, 200, await getConfiguredMcpPrompt(baseDir, {
+      serverId: body.serverId || body.id,
+      promptName: body.promptName || body.name,
       arguments: body.arguments || body.input
     }, {
       timeoutMs: body.timeoutMs
