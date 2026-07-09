@@ -960,7 +960,7 @@ function buildToolFollowupInstruction(results = [], rejected = []) {
   for (const item of completed.filter((entry) => entry.tool === "mcp_install_npm")) {
     const serverId = item.result?.id || item.serverId || item.catalogId || item.packageSpec;
     if (serverId) {
-      lines.push(`MCP install completed for serverId "${serverId}". Next, request mcp_list_tools with that serverId before trying to call the new tool.`);
+      lines.push(`MCP install completed for serverId "${serverId}". Next, request mcp_list_tools, mcp_list_resources, or mcp_list_prompts with that serverId depending on the task before trying to use the new MCP server.`);
     }
   }
   for (const item of completed.filter((entry) => entry.tool === "mcp_list_tools")) {

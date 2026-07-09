@@ -595,6 +595,8 @@ test("MCP install follow-up can list and call the installed tool in the same mem
       assert.match(prompt, /MCP install completed/);
       assert.match(prompt, /chain-tool/);
       assert.match(prompt, /mcp_list_tools/);
+      assert.match(prompt, /mcp_list_resources/);
+      assert.match(prompt, /mcp_list_prompts/);
       writeOpenAiStream(res, JSON.stringify({
         status: "speak",
         argument: "The MCP server is installed. I need its tool list.",
@@ -750,6 +752,8 @@ test("MCP resource and prompt follow-up can read and get unique entries without 
     if (nonFinalPrompts.length === 2) {
       assert.match(prompt, /MCP install completed/);
       assert.match(prompt, /mcp_list_tools/);
+      assert.match(prompt, /mcp_list_resources/);
+      assert.match(prompt, /mcp_list_prompts/);
       writeOpenAiStream(res, JSON.stringify({
         status: "speak",
         argument: "The MCP package is installed. I need the resource list.",
@@ -965,6 +969,8 @@ test("built-in web MCP can be joined and called from the council loop", async ()
       assert.match(prompt, /MCP install completed/);
       assert.match(prompt, /web-tools/);
       assert.match(prompt, /mcp_list_tools/);
+      assert.match(prompt, /mcp_list_resources/);
+      assert.match(prompt, /mcp_list_prompts/);
       writeOpenAiStream(res, JSON.stringify({
         status: "speak",
         argument: "The web MCP server is joined. I need its tool list.",
