@@ -694,6 +694,208 @@ test("MCP install follow-up can list and call the installed tool in the same mem
   }
 });
 
+test("MCP resource and prompt follow-up can read and get unique entries without serverId", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-mcp-resource-prompt-chain-"));
+  const groupPath = path.join(tmp, "group");
+  fs.mkdirSync(groupPath, { recursive: true });
+  fs.writeFileSync(path.join(groupPath, "group.json"), JSON.stringify({
+    permissions: {
+      defaultTier: "full",
+      seatTiers: { researcher: "full" }
+    }
+  }), "utf8");
+  const packageDir = writeDiscussionFakeMcpPackage(tmp);
+  const baseDir = path.join(tmp, "base");
+  fs.mkdirSync(baseDir, { recursive: true });
+
+  const nonFinalPrompts = [];
+  const server = http.createServer(async (req, res) => {
+    const body = JSON.parse(await readRequestBody(req));
+    const prompt = JSON.stringify(body.messages || []);
+    if (prompt.includes("FinalDecision JSON object")) {
+      writeOpenAiStream(res, JSON.stringify({
+        answer: "The MCP resource and prompt returned MCP_RESOURCE_CHAIN_FACT and MCP_PROMPT_CHAIN_FACT.",
+        consensus_score: 1,
+        supporting_agents: ["Researcher"],
+        dissenting_agents: [],
+        minority_report: "",
+        risks: [],
+        next_actions: [],
+        selected_file_operation_ids: [],
+        memory_candidates: []
+      }));
+      return;
+    }
+
+    nonFinalPrompts.push(prompt);
+    if (nonFinalPrompts.length === 1) {
+      writeOpenAiStream(res, JSON.stringify({
+        status: "speak",
+        argument: "I need to install a local MCP package before reading its resource and prompt.",
+        tool_requests: [
+          {
+            tool: "mcp_install_npm",
+            serverId: "resource-prompt-tool",
+            packageSpec: packageDir,
+            binName: "fake-mcp",
+            reason: "Install the MCP package."
+          }
+        ],
+        objections: [],
+        confidence: 0.5,
+        memory_candidates: []
+      }));
+      return;
+    }
+    if (nonFinalPrompts.length === 2) {
+      assert.match(prompt, /MCP install completed/);
+      assert.match(prompt, /mcp_list_tools/);
+      writeOpenAiStream(res, JSON.stringify({
+        status: "speak",
+        argument: "The MCP package is installed. I need the resource list.",
+        tool_requests: [
+          {
+            tool: "mcp_list_resources",
+            serverId: "resource-prompt-tool",
+            reason: "List MCP resources."
+          }
+        ],
+        objections: [],
+        confidence: 0.6,
+        memory_candidates: []
+      }));
+      return;
+    }
+    if (nonFinalPrompts.length === 3) {
+      assert.match(prompt, /MCP resource list is available/);
+      assert.match(prompt, /resource-prompt-tool:memo:\/\/chain/);
+      assert.match(prompt, /mcp_read_resource/);
+      assert.match(prompt, /include serverId only when the same URI appears/);
+      writeOpenAiStream(res, JSON.stringify({
+        status: "speak",
+        argument: "The resource is available. I need to read it.",
+        tool_requests: [
+          {
+            tool: "mcp_read_resource",
+            uri: "memo://chain",
+            reason: "Read the MCP resource."
+          }
+        ],
+        objections: [],
+        confidence: 0.65,
+        memory_candidates: []
+      }));
+      return;
+    }
+    if (nonFinalPrompts.length === 4) {
+      assert.match(prompt, /MCP resource.*memo:\/\/chain.*returned real content/);
+      assert.match(prompt, /MCP_RESOURCE_CHAIN_FACT/);
+      writeOpenAiStream(res, JSON.stringify({
+        status: "speak",
+        argument: "The resource is read. I need the prompt list.",
+        tool_requests: [
+          {
+            tool: "mcp_list_prompts",
+            serverId: "resource-prompt-tool",
+            reason: "List MCP prompts."
+          }
+        ],
+        objections: [],
+        confidence: 0.7,
+        memory_candidates: []
+      }));
+      return;
+    }
+    if (nonFinalPrompts.length === 5) {
+      assert.match(prompt, /MCP prompt list is available/);
+      assert.match(prompt, /resource-prompt-tool:brief/);
+      assert.match(prompt, /mcp_get_prompt/);
+      assert.match(prompt, /include serverId only when the same prompt name appears/);
+      writeOpenAiStream(res, JSON.stringify({
+        status: "speak",
+        argument: "The prompt is available. I need to get it.",
+        tool_requests: [
+          {
+            tool: "mcp_get_prompt",
+            promptName: "brief",
+            arguments: { topic: "MCP_PROMPT_CHAIN_FACT" },
+            reason: "Get the MCP prompt."
+          }
+        ],
+        objections: [],
+        confidence: 0.75,
+        memory_candidates: []
+      }));
+      return;
+    }
+
+    assert.match(prompt, /MCP prompt.*brief.*returned real prompt messages/);
+    assert.match(prompt, /MCP_PROMPT_CHAIN_FACT/);
+    writeOpenAiStream(res, JSON.stringify({
+      status: "speak",
+      argument: "The MCP resource returned MCP_RESOURCE_CHAIN_FACT and the MCP prompt returned MCP_PROMPT_CHAIN_FACT.",
+      objections: [],
+      confidence: 0.9,
+      memory_candidates: []
+    }));
+  });
+  await listen(server);
+  const address = server.address();
+
+  try {
+    const group = validateGroupConfig({
+      id: "mcp-resource-prompt-chain",
+      name: "MCP Resource Prompt Chain",
+      settings: {
+        maxRounds: 1,
+        maxToolIterations: 6,
+        minConsensusWeight: 1,
+        stopWhenAllSkip: true,
+        agentTimeoutMs: 5000,
+        toolTimeoutMs: 30000,
+        allowSoloCouncil: true
+      },
+      agents: [
+        {
+          id: "researcher",
+          name: "Researcher",
+          role: "Researcher",
+          provider: "openai-compatible",
+          apiBaseUrl: `http://127.0.0.1:${address.port}/v1`,
+          allowUnsafePrivateNetwork: true,
+          apiKey: "secret-runtime-key",
+          model: "mcp-resource-prompt-chain-model",
+          weight: 1,
+          enabled: true
+        }
+      ]
+    });
+    const result = await runCouncil("Use MCP resource and prompt.", group, baseDir, { groupPath });
+
+    assert.deepEqual(result.session.toolExecutionResults.map((item) => item.tool), [
+      "mcp_install_npm",
+      "mcp_list_resources",
+      "mcp_read_resource",
+      "mcp_list_prompts",
+      "mcp_get_prompt"
+    ]);
+    assert.deepEqual(result.session.toolExecutionResults.map((item) => item.status), [
+      "completed",
+      "completed",
+      "completed",
+      "completed",
+      "completed"
+    ]);
+    assert.equal(result.session.toolExecutionResults[2].result.serverId, "resource-prompt-tool");
+    assert.equal(result.session.toolExecutionResults[4].result.serverId, "resource-prompt-tool");
+    assert.match(result.session.messages[0].response.argument, /MCP_RESOURCE_CHAIN_FACT/);
+    assert.match(result.session.messages[0].response.argument, /MCP_PROMPT_CHAIN_FACT/);
+    assert.equal(nonFinalPrompts.length, 6);
+  } finally {
+    await close(server);
+  }
+});
+
 test("built-in web MCP can be joined and called from the council loop", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-built-in-web-mcp-"));
   const groupPath = path.join(tmp, "group");
@@ -4606,7 +4808,7 @@ function writeDiscussionFakeMcpPackage(root) {
     "  const message = JSON.parse(line);",
     "  if (message.method === 'notifications/initialized') continue;",
     "  if (message.method === 'initialize') {",
-    "    write({ jsonrpc: '2.0', id: message.id, result: { protocolVersion: '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: 'fake-chain', version: '1.0.0' } } });",
+    "    write({ jsonrpc: '2.0', id: message.id, result: { protocolVersion: '2025-06-18', capabilities: { tools: {}, resources: {}, prompts: {} }, serverInfo: { name: 'fake-chain', version: '1.0.0' } } });",
     "    continue;",
     "  }",
     "  if (message.method === 'tools/list') {",
@@ -4615,6 +4817,23 @@ function writeDiscussionFakeMcpPackage(root) {
     "  }",
     "  if (message.method === 'tools/call') {",
     "    write({ jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(message.params?.arguments || {}) }], isError: false } });",
+    "    continue;",
+    "  }",
+    "  if (message.method === 'resources/list') {",
+    "    write({ jsonrpc: '2.0', id: message.id, result: { resources: [{ uri: 'memo://chain', name: 'Chain Memo', mimeType: 'text/plain' }] } });",
+    "    continue;",
+    "  }",
+    "  if (message.method === 'resources/read') {",
+    "    write({ jsonrpc: '2.0', id: message.id, result: { contents: [{ uri: message.params?.uri, mimeType: 'text/plain', text: 'MCP_RESOURCE_CHAIN_FACT from ' + message.params?.uri }] } });",
+    "    continue;",
+    "  }",
+    "  if (message.method === 'prompts/list') {",
+    "    write({ jsonrpc: '2.0', id: message.id, result: { prompts: [{ name: 'brief', description: 'Chain prompt', arguments: [{ name: 'topic' }] }] } });",
+    "    continue;",
+    "  }",
+    "  if (message.method === 'prompts/get') {",
+    "    const topic = message.params?.arguments?.topic || 'none';",
+    "    write({ jsonrpc: '2.0', id: message.id, result: { description: 'Chain prompt', messages: [{ role: 'user', content: { type: 'text', text: 'Prompt topic: ' + topic } }] } });",
     "    continue;",
     "  }",
     "  write({ jsonrpc: '2.0', id: message.id, error: { code: -32601, message: 'Unknown method' } });",

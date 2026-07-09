@@ -976,6 +976,32 @@ function buildToolFollowupInstruction(results = [], rejected = []) {
     const toolName = item.result?.toolName || item.mcpToolName;
     lines.push(`MCP call${toolName ? ` "${toolName}"` : ""} returned real content. Use that result directly; do not call the same tool again unless another real input is missing.`);
   }
+  for (const item of completed.filter((entry) => entry.tool === "mcp_list_resources")) {
+    const resourceUris = (item.result?.servers || [])
+      .flatMap((server) => (server.resources || []).map((resource) => `${server.serverId || item.serverId || ""}:${resource.uri || ""}`))
+      .filter((uri) => !uri.endsWith(":"))
+      .slice(0, 8);
+    if (resourceUris.length) {
+      lines.push(`MCP resource list is available: ${resourceUris.join(", ")}. If a listed resource is needed, request mcp_read_resource with uri; include serverId only when the same URI appears on more than one server or you are choosing a specific server.`);
+    }
+  }
+  for (const item of completed.filter((entry) => entry.tool === "mcp_read_resource")) {
+    const uri = item.result?.uri || item.uri;
+    lines.push(`MCP resource${uri ? ` "${uri}"` : ""} returned real content. Use that result directly; do not read the same resource again unless another real input is missing.`);
+  }
+  for (const item of completed.filter((entry) => entry.tool === "mcp_list_prompts")) {
+    const promptNames = (item.result?.servers || [])
+      .flatMap((server) => (server.prompts || []).map((prompt) => `${server.serverId || item.serverId || ""}:${prompt.name || ""}`))
+      .filter((name) => !name.endsWith(":"))
+      .slice(0, 8);
+    if (promptNames.length) {
+      lines.push(`MCP prompt list is available: ${promptNames.join(", ")}. If a listed prompt is needed, request mcp_get_prompt with promptName and any required arguments; include serverId only when the same prompt name appears on more than one server or you are choosing a specific server.`);
+    }
+  }
+  for (const item of completed.filter((entry) => entry.tool === "mcp_get_prompt")) {
+    const promptName = item.result?.promptName || item.promptName;
+    lines.push(`MCP prompt${promptName ? ` "${promptName}"` : ""} returned real prompt messages. Use that result directly; do not get the same prompt again unless another real input is missing.`);
+  }
   if ((Array.isArray(rejected) ? rejected : []).length) {
     lines.push("Some tool requests were rejected. Read the rejected tool request reasons in context before choosing the next step.");
   }
