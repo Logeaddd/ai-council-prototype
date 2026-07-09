@@ -217,7 +217,8 @@ async function handleApi(req, res, url) {
   if (req.method === "POST" && url.pathname === "/api/mcp/install") {
     const body = await readBody(req);
     sendJson(res, 200, await installMcpNpmServer(baseDir, body.server || body, {
-      timeoutMs: body.timeoutMs
+      timeoutMs: body.timeoutMs,
+      workspaceRoot: defaultGroupsRoot
     }));
     return;
   }

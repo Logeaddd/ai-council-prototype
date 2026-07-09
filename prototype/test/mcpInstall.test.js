@@ -87,6 +87,53 @@ test("MCP npm search reports registry failures honestly", async () => {
   }
 });
 
+test("filesystem catalog install receives a real allowed workspace argument", async () => {
+  const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-mcp-filesystem-default-"));
+  const groupPath = path.join(baseDir, "group-workspace");
+  const packageDir = writeFakeMcpPackage(baseDir);
+
+  const installed = await installMcpNpmServer(baseDir, {
+    id: "filesystem",
+    packageSpec: packageDir,
+    installedPackageName: "fake-mcp-package",
+    binName: "fake-mcp"
+  }, {
+    groupPath
+  });
+
+  assert.equal(installed.ok, true);
+  assert.equal(installed.server.args.at(-1), path.resolve(groupPath));
+  assert.equal(fs.existsSync(groupPath), true);
+});
+
+test("mcp_install_npm tool uses the group workspace for filesystem catalog defaults", async () => {
+  const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-mcp-filesystem-tool-default-"));
+  const groupPath = path.join(baseDir, "group-workspace");
+  const packageDir = writeFakeMcpPackage(baseDir);
+
+  const result = await executeToolRequests({
+    baseDir,
+    permissionTier: "full",
+    groupPath,
+    agent: { id: "full", name: "Full" },
+    round: 1,
+    requests: [
+      {
+        tool: "mcp_install_npm",
+        catalogId: "filesystem",
+        packageSpec: packageDir,
+        packageName: "fake-mcp-package",
+        binName: "fake-mcp",
+        reason: "Install filesystem MCP with the group workspace."
+      }
+    ]
+  });
+
+  assert.equal(result.results[0].status, "completed");
+  assert.equal(result.results[0].result.server.args.at(-1), path.resolve(groupPath));
+  assert.equal(fs.existsSync(groupPath), true);
+});
+
 test("mcp_search_npm tool requires full permission and returns registry results", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => new Response(JSON.stringify({

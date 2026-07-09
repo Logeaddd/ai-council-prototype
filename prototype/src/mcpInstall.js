@@ -143,7 +143,7 @@ export async function installMcpNpmServer(baseDir, input = {}, options = {}) {
   const id = normalizeManagedId(input.serverId || input.id || catalogItem?.id || packageSpec);
   const name = String(input.name || catalogItem?.name || id).trim();
   const binName = String(input.binName || catalogItem?.binName || "").trim();
-  const args = normalizeStringArray(input.args !== undefined ? input.args : catalogItem?.defaultArgs);
+  const args = normalizeStringArray(input.args !== undefined ? input.args : defaultArgsForCatalog(catalogItem, baseDir, input, options));
   const env = normalizeEnv(input.env);
   const timeoutMs = clampNumber(input.timeoutMs || options.timeoutMs, DEFAULT_TIMEOUT_MS, 1000, DEFAULT_TIMEOUT_MS);
   const installDir = resolveInstallDir(baseDir, id);
@@ -167,7 +167,7 @@ export async function installMcpNpmServer(baseDir, input = {}, options = {}) {
     });
     stdout = result.stdout || "";
     stderr = result.stderr || "";
-    const packageName = resolvePackageName(packageSpec, input.installedPackageName || catalogItem?.packageName);
+    const packageName = resolvePackageName(packageSpec, input.installedPackageName || input.packageName || catalogItem?.packageName);
     packageDir = resolveInstalledPackageDir(installDir, packageName);
     packageJson = readJson(path.join(packageDir, "package.json"));
     selectedBin = selectPackageBin(packageJson, binName);
@@ -283,6 +283,21 @@ function installBuiltInMcpServer(baseDir, catalogItem, input = {}) {
     id,
     server
   };
+}
+
+function defaultArgsForCatalog(catalogItem, baseDir, input = {}, options = {}) {
+  if (catalogItem?.id === "filesystem") {
+    const workspaceRoot = String(
+      input.workspaceRoot ||
+      options.workspaceRoot ||
+      options.groupPath ||
+      path.join(userDataDir(baseDir), "workspace-ui")
+    ).trim();
+    const resolved = path.resolve(workspaceRoot);
+    fs.mkdirSync(resolved, { recursive: true });
+    return [resolved];
+  }
+  return catalogItem?.defaultArgs;
 }
 
 export function uninstallManagedMcpServer(baseDir, input = {}) {

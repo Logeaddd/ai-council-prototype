@@ -458,9 +458,10 @@ async function executeOne(request, options) {
       const result = await installMcpNpmServer(options.baseDir || options.appBaseDir || process.cwd(), {
         ...request,
         id: request.serverId || request.catalogId || request.packageSpec,
-        args: request.mcpArgs
+        args: request.mcpArgs?.length ? request.mcpArgs : undefined
       }, {
-        timeoutMs: request.timeoutMs || options.timeoutMs
+        timeoutMs: request.timeoutMs || options.timeoutMs,
+        groupPath: options.groupPath
       });
       return resultRecord(request, {
         status: result.ok ? "completed" : "failed",
