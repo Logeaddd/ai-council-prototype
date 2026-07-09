@@ -444,6 +444,53 @@ export interface AppSettings {
   }
 }
 
+export interface CapabilityRecord {
+  id: string
+  label: string
+  kind: string
+  status: string
+  enabled?: boolean
+  provider?: string
+  source?: string
+  requirement?: string
+  command?: string
+  tools?: string[]
+}
+
+export interface McpInstallCatalogItem {
+  id: string
+  name: string
+  manager: string
+  packageName: string
+  binName: string
+  defaultArgs?: string[]
+  verifiedSource?: string
+  verifiedAt?: string
+  installed?: boolean
+  installedVersion?: string
+  serverConfigured?: boolean
+  serverEnabled?: boolean
+}
+
+export interface McpServerRecord {
+  id: string
+  name?: string
+  enabled?: boolean
+  transport?: string
+  command?: string
+  args?: string[]
+  cwd?: string
+  source?: string
+  runtime?: string
+  install?: {
+    manager?: string
+    packageName?: string
+    packageVersion?: string
+    binName?: string
+    installedAt?: string
+  }
+}
+
 export interface FolderPickerResult {
   supported: boolean
   path: string
@@ -532,6 +579,26 @@ function subtractUsageTotals(
 
 export async function fetchProviderPresets() {
   return api<{ providers: ProviderPresetRecord[] }>("/api/providers")
+}
+
+export async function fetchCapabilities() {
+  return api<{ capabilities: CapabilityRecord[] }>("/api/capabilities")
+}
+
+export async function fetchMcpServers() {
+  return api<{ servers: McpServerRecord[] }>("/api/mcp/servers")
+}
+
+export async function fetchMcpCatalog() {
+  return api<{ catalog: McpInstallCatalogItem[] }>("/api/mcp/catalog")
+}
+
+export async function installMcpCatalogItem(catalogId: string) {
+  return api<{ ok: boolean; error?: string; code?: string }>("/api/mcp/install", { catalogId })
+}
+
+export async function uninstallMcpServer(serverId: string) {
+  return api<{ ok: boolean; error?: string; code?: string }>("/api/mcp/uninstall", { serverId })
 }
 
 export async function discoverModels(body: {

@@ -375,6 +375,7 @@ export function CouncilApp() {
     globalRequirement: string
     totalRounds: number
     agentTimeoutMinutes: number
+    groupsRoot?: string
     webSearchApiKey?: string
     clearWebSearchKey?: boolean
   }) {
@@ -383,12 +384,14 @@ export function CouncilApp() {
     setMaxRounds(values.totalRounds)
     setAgentTimeoutMinutes(values.agentTimeoutMinutes)
     const shouldUpdateWebSearchKey = Boolean(values.webSearchApiKey) || Boolean(values.clearWebSearchKey)
-    if (shouldUpdateWebSearchKey) {
+    const shouldUpdateGroupsRoot = values.groupsRoot !== undefined && values.groupsRoot !== (appSettings?.groupsRoot || "")
+    if (shouldUpdateWebSearchKey || shouldUpdateGroupsRoot) {
       try {
         const nextSettings = await saveAppSettings({
+          ...(shouldUpdateGroupsRoot ? { groupsRoot: values.groupsRoot || "" } : {}),
           capabilities: {
             webSearch: {
-              apiKey: values.clearWebSearchKey ? "" : values.webSearchApiKey || "",
+              ...(shouldUpdateWebSearchKey ? { apiKey: values.clearWebSearchKey ? "" : values.webSearchApiKey || "" } : {}),
             },
           },
         })
@@ -912,6 +915,7 @@ export function CouncilApp() {
         onTotalRoundsChange={setMaxRounds}
         agentTimeoutMinutes={agentTimeoutMinutes}
         onAgentTimeoutMinutesChange={setAgentTimeoutMinutes}
+        groupsRoot={appSettings?.groupsRoot || ""}
         webSearchConfigured={appSettings?.capabilities?.webSearch?.configured}
         webSearchSource={formatSearchKeySource(appSettings?.capabilities?.webSearch?.source)}
         onSave={handleSaveSettings}

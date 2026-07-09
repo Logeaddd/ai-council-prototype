@@ -250,16 +250,34 @@ test("preferences wording is removed while group pin and delete actions are wire
 test("settings page is category-first and avoids explanatory filler text", () => {
   const settings = read("renderer/components/council/settings-sheet.tsx");
   const sidebar = read("renderer/components/council/groups-sidebar.tsx");
+  const live = read("renderer/lib/council-live.ts");
 
   for (const label of [
     "议会规则",
+    "模型服务",
     "网络搜索",
     "MCP 服务器",
     "技能",
     "插件",
+    "公共记忆",
+    "数据设置",
+    "权限安全",
   ]) {
     assert.match(settings, new RegExp(label));
   }
+
+  assert.doesNotMatch(settings, /disabled:\s*true/);
+  assert.doesNotMatch(settings, /未接入/);
+  assert.match(settings, /fetchProviderPresets/);
+  assert.match(settings, /fetchCapabilities/);
+  assert.match(settings, /fetchMcpCatalog/);
+  assert.match(settings, /fetchMcpServers/);
+  assert.match(settings, /installMcpCatalogItem/);
+  assert.match(settings, /uninstallMcpServer/);
+  assert.match(live, /\/api\/capabilities/);
+  assert.match(live, /\/api\/mcp\/catalog/);
+  assert.match(live, /\/api\/mcp\/install/);
+  assert.match(live, /\/api\/mcp\/uninstall/);
 
   for (const text of [
     "议会规则应用",

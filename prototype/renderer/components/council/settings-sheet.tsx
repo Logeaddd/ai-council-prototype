@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState, type ComponentType, type ReactNode } from "react"
+import { useCallback, useEffect, useState, type ComponentType, type ReactNode } from "react"
 import {
   Brain,
   Database,
@@ -19,7 +19,19 @@ import {
   WORK_MODE_LABEL,
   type WorkMode,
 } from "@/lib/council-data"
-import { Badge, Sheet, inputClass } from "./primitives"
+import {
+  fetchCapabilities,
+  fetchMcpCatalog,
+  fetchMcpServers,
+  fetchProviderPresets,
+  installMcpCatalogItem,
+  uninstallMcpServer,
+  type CapabilityRecord,
+  type McpInstallCatalogItem,
+  type McpServerRecord,
+  type ProviderPresetRecord,
+} from "@/lib/council-live"
+import { Badge, Sheet, inputClass, type Tone } from "./primitives"
 
 type SettingsTab =
   | "rules"
@@ -36,17 +48,16 @@ const SETTINGS_TABS: Array<{
   id: SettingsTab
   label: string
   icon: ComponentType<{ className?: string }>
-  disabled?: boolean
 }> = [
   { id: "rules", label: "议会规则", icon: ScrollText },
-  { id: "models", label: "模型服务", icon: Brain, disabled: true },
+  { id: "models", label: "模型服务", icon: Brain },
   { id: "search", label: "网络搜索", icon: Globe },
-  { id: "mcp", label: "MCP 服务器", icon: Plug, disabled: true },
-  { id: "skills", label: "技能", icon: Sparkles, disabled: true },
-  { id: "plugins", label: "插件", icon: Puzzle, disabled: true },
-  { id: "memory", label: "全局记忆", icon: Layers, disabled: true },
-  { id: "data", label: "数据设置", icon: Database, disabled: true },
-  { id: "security", label: "权限安全", icon: Shield, disabled: true },
+  { id: "mcp", label: "MCP 服务器", icon: Plug },
+  { id: "skills", label: "技能", icon: Sparkles },
+  { id: "plugins", label: "插件", icon: Puzzle },
+  { id: "memory", label: "公共记忆", icon: Layers },
+  { id: "data", label: "数据设置", icon: Database },
+  { id: "security", label: "权限安全", icon: Shield },
 ]
 
 export function SettingsSheet({
@@ -60,6 +71,7 @@ export function SettingsSheet({
   onTotalRoundsChange,
   agentTimeoutMinutes,
   onAgentTimeoutMinutesChange,
+  groupsRoot,
   webSearchConfigured,
   webSearchSource,
   onSave,
@@ -74,6 +86,7 @@ export function SettingsSheet({
   onTotalRoundsChange: (value: number) => void
   agentTimeoutMinutes: number
   onAgentTimeoutMinutesChange: (value: number) => void
+  groupsRoot?: string
   webSearchConfigured?: boolean
   webSearchSource?: string
   onSave: (values: {
@@ -81,19 +94,58 @@ export function SettingsSheet({
     globalRequirement: string
     totalRounds: number
     agentTimeoutMinutes: number
+    groupsRoot?: string
     webSearchApiKey?: string
     clearWebSearchKey?: boolean
   }) => Promise<void> | void
 }) {
   const [activeTab, setActiveTab] = useState<SettingsTab>("rules")
   const [text, setText] = useState(globalRequirement)
+  const [dataRoot, setDataRoot] = useState(groupsRoot || "")
   const [webSearchApiKey, setWebSearchApiKey] = useState("")
   const [clearWebSearchKey, setClearWebSearchKey] = useState(false)
   const [saving, setSaving] = useState(false)
+  const [loadingFacts, setLoadingFacts] = useState(false)
+  const [settingsError, setSettingsError] = useState("")
+  const [providers, setProviders] = useState<ProviderPresetRecord[]>([])
+  const [capabilities, setCapabilities] = useState<CapabilityRecord[]>([])
+  const [mcpCatalog, setMcpCatalog] = useState<McpInstallCatalogItem[]>([])
+  const [mcpServers, setMcpServers] = useState<McpServerRecord[]>([])
+  const [busyMcpId, setBusyMcpId] = useState("")
 
   useEffect(() => {
     setText(globalRequirement)
   }, [globalRequirement])
+
+  useEffect(() => {
+    setDataRoot(groupsRoot || "")
+  }, [groupsRoot])
+
+  const reloadFacts = useCallback(async () => {
+    setLoadingFacts(true)
+    setSettingsError("")
+    try {
+      const [providerResult, capabilityResult, catalogResult, serverResult] = await Promise.all([
+        fetchProviderPresets(),
+        fetchCapabilities(),
+        fetchMcpCatalog(),
+        fetchMcpServers(),
+      ])
+      setProviders(providerResult.providers || [])
+      setCapabilities(capabilityResult.capabilities || [])
+      setMcpCatalog(catalogResult.catalog || [])
+      setMcpServers(serverResult.servers || [])
+    } catch (error) {
+      setSettingsError(errorMessage(error))
+    } finally {
+      setLoadingFacts(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!open) return
+    void reloadFacts()
+  }, [open, reloadFacts])
 
   async function save() {
     if (saving) return
@@ -104,6 +156,7 @@ export function SettingsSheet({
         globalRequirement: text,
         totalRounds,
         agentTimeoutMinutes,
+        groupsRoot: dataRoot.trim(),
         webSearchApiKey: webSearchApiKey.trim(),
         clearWebSearchKey,
       })
@@ -116,12 +169,43 @@ export function SettingsSheet({
     }
   }
 
+  async function installMcp(item: McpInstallCatalogItem) {
+    if (busyMcpId) return
+    setBusyMcpId(item.id)
+    setSettingsError("")
+    try {
+      const result = await installMcpCatalogItem(item.id)
+      if (!result.ok) throw new Error(result.error || result.code || "安装失败")
+      await reloadFacts()
+    } catch (error) {
+      setSettingsError(errorMessage(error))
+    } finally {
+      setBusyMcpId("")
+    }
+  }
+
+  async function uninstallMcp(item: McpInstallCatalogItem | McpServerRecord) {
+    const id = item.id
+    if (!id || busyMcpId) return
+    setBusyMcpId(id)
+    setSettingsError("")
+    try {
+      const result = await uninstallMcpServer(id)
+      if (!result.ok) throw new Error(result.error || result.code || "卸载失败")
+      await reloadFacts()
+    } catch (error) {
+      setSettingsError(errorMessage(error))
+    } finally {
+      setBusyMcpId("")
+    }
+  }
+
   return (
     <Sheet
       open={open}
       onClose={onClose}
       title="设置"
-      width="max-w-4xl"
+      width="max-w-5xl"
       footer={
         <div className="flex items-center justify-end gap-2">
           <button
@@ -148,15 +232,19 @@ export function SettingsSheet({
                 key={item.id}
                 item={item}
                 active={activeTab === item.id}
-                onClick={() => {
-                  if (!item.disabled) setActiveTab(item.id)
-                }}
+                onClick={() => setActiveTab(item.id)}
               />
             ))}
           </div>
         </nav>
 
         <div className="min-w-0">
+          {settingsError ? (
+            <div className="mb-4 rounded-md border border-danger/30 bg-danger/10 px-3 py-2 text-[13px] text-danger">
+              {settingsError}
+            </div>
+          ) : null}
+
           {activeTab === "rules" ? (
             <RulesPanel
               mode={mode}
@@ -169,6 +257,8 @@ export function SettingsSheet({
               onAgentTimeoutMinutesChange={onAgentTimeoutMinutesChange}
             />
           ) : null}
+
+          {activeTab === "models" ? <ModelsPanel providers={providers} loading={loadingFacts} /> : null}
 
           {activeTab === "search" ? (
             <SearchPanel
@@ -186,6 +276,24 @@ export function SettingsSheet({
               }}
             />
           ) : null}
+
+          {activeTab === "mcp" ? (
+            <McpPanel
+              catalog={mcpCatalog}
+              servers={mcpServers}
+              loading={loadingFacts}
+              busyId={busyMcpId}
+              onRefresh={reloadFacts}
+              onInstall={installMcp}
+              onUninstall={uninstallMcp}
+            />
+          ) : null}
+
+          {activeTab === "skills" ? <SkillsPanel capabilities={capabilities} loading={loadingFacts} /> : null}
+          {activeTab === "plugins" ? <PluginsPanel servers={mcpServers} loading={loadingFacts} /> : null}
+          {activeTab === "memory" ? <MemoryPanel capabilities={capabilities} loading={loadingFacts} /> : null}
+          {activeTab === "data" ? <DataPanel value={dataRoot} onChange={setDataRoot} /> : null}
+          {activeTab === "security" ? <SecurityPanel capabilities={capabilities} loading={loadingFacts} /> : null}
         </div>
       </div>
     </Sheet>
@@ -205,14 +313,12 @@ function SettingsNavItem({
   return (
     <button
       type="button"
-      disabled={item.disabled}
       onClick={onClick}
       className={cn(
         "flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-[13px] transition-colors",
         active
           ? "bg-accent text-foreground"
           : "text-muted-foreground hover:bg-accent/70 hover:text-foreground",
-        item.disabled && "cursor-not-allowed opacity-55 hover:bg-transparent hover:text-muted-foreground",
       )}
     >
       <Icon className="size-4 shrink-0" />
@@ -277,7 +383,7 @@ function RulesPanel({
         />
       </SettingRow>
 
-      <SettingRow label="最大讨论轮数">
+      <SettingRow label="最大轮数">
         <RangeControl
           min={1}
           max={100}
@@ -296,6 +402,30 @@ function RulesPanel({
           onChange={onAgentTimeoutMinutesChange}
         />
       </SettingRow>
+    </div>
+  )
+}
+
+function ModelsPanel({
+  providers,
+  loading,
+}: {
+  providers: ProviderPresetRecord[]
+  loading: boolean
+}) {
+  return (
+    <div className="space-y-4">
+      <PanelTitle title="模型服务" />
+      <FactGrid
+        rows={providers.map((provider) => ({
+          key: provider.id,
+          name: provider.label || provider.name || provider.id,
+          meta: provider.defaultModel || provider.baseUrl || provider.officialBaseUrl || "自定义模型",
+          tone: "success",
+          status: "已内置",
+        }))}
+        loading={loading}
+      />
     </div>
   )
 }
@@ -320,12 +450,12 @@ function SearchPanel({
       <PanelTitle title="网络搜索" />
 
       <SettingRow label="状态">
-        <Badge tone={configured ? "success" : "neutral"}>
-          {configured ? `已设置 · ${source || "本地"}` : "未设置"}
+        <Badge tone={configured ? "success" : "warning"}>
+          {configured ? `可用 · ${source || "本地"}` : "需密钥"}
         </Badge>
       </SettingRow>
 
-      <SettingRow label="API 密钥">
+      <SettingRow label="Brave Search">
         <div className="flex items-center gap-2">
           <input
             type="password"
@@ -346,9 +476,307 @@ function SearchPanel({
 
       {clearKey ? (
         <SettingRow label="保存后">
-          <span className="text-[13px] text-danger">清空</span>
+          <span className="text-[13px] text-danger">清空密钥</span>
         </SettingRow>
       ) : null}
+    </div>
+  )
+}
+
+function McpPanel({
+  catalog,
+  servers,
+  loading,
+  busyId,
+  onRefresh,
+  onInstall,
+  onUninstall,
+}: {
+  catalog: McpInstallCatalogItem[]
+  servers: McpServerRecord[]
+  loading: boolean
+  busyId: string
+  onRefresh: () => Promise<void>
+  onInstall: (item: McpInstallCatalogItem) => Promise<void>
+  onUninstall: (item: McpInstallCatalogItem | McpServerRecord) => Promise<void>
+}) {
+  return (
+    <div className="space-y-5">
+      <div className="flex items-center justify-between border-b border-border pb-3">
+        <h3 className="text-sm font-semibold text-foreground">MCP 服务器</h3>
+        <button
+          type="button"
+          onClick={() => void onRefresh()}
+          className="rounded-md border border-border px-3 py-1.5 text-[13px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+        >
+          刷新
+        </button>
+      </div>
+
+      <div className="space-y-2">
+        {loading ? <EmptyLine text="读取中" /> : null}
+        {!loading && !catalog.length ? <EmptyLine text="暂无可安装项" /> : null}
+        {catalog.map((item) => (
+          <div
+            key={item.id}
+            className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 rounded-md border border-border px-3 py-2"
+          >
+            <div className="min-w-0">
+              <div className="flex items-center gap-2">
+                <span className="truncate text-[13px] font-medium text-foreground">{item.name}</span>
+                <Badge tone={item.installed ? "success" : "neutral"}>
+                  {item.installed ? "已安装" : "可安装"}
+                </Badge>
+              </div>
+              <div className="mt-1 truncate font-mono text-[11px] text-muted-foreground">
+                {item.packageName}
+              </div>
+            </div>
+            {item.installed ? (
+              <button
+                type="button"
+                disabled={busyId === item.id}
+                onClick={() => void onUninstall(item)}
+                className="rounded-md border border-border px-3 py-1.5 text-[13px] text-danger transition-colors hover:bg-danger/10 disabled:opacity-50"
+              >
+                {busyId === item.id ? "卸载中" : "卸载"}
+              </button>
+            ) : (
+              <button
+                type="button"
+                disabled={Boolean(busyId)}
+                onClick={() => void onInstall(item)}
+                className="rounded-md bg-primary px-3 py-1.5 text-[13px] font-semibold text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
+              >
+                {busyId === item.id ? "安装中" : "安装"}
+              </button>
+            )}
+          </div>
+        ))}
+      </div>
+
+      <div className="space-y-2">
+        <div className="text-[13px] font-medium text-foreground">已配置</div>
+        {!servers.length ? <EmptyLine text="暂无" /> : null}
+        {servers.map((server) => (
+          <div
+            key={server.id}
+            className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 rounded-md border border-border px-3 py-2"
+          >
+            <div className="min-w-0">
+              <div className="flex items-center gap-2">
+                <span className="truncate text-[13px] font-medium text-foreground">{server.name || server.id}</span>
+                <Badge tone={server.enabled === false ? "neutral" : "success"}>
+                  {server.enabled === false ? "停用" : "启用"}
+                </Badge>
+                {server.source === "managed_npm" ? <Badge>npm</Badge> : null}
+              </div>
+              <div className="mt-1 truncate font-mono text-[11px] text-muted-foreground">
+                {server.install?.packageName || server.command || server.id}
+              </div>
+            </div>
+            {server.source === "managed_npm" ? (
+              <button
+                type="button"
+                disabled={busyId === server.id}
+                onClick={() => void onUninstall(server)}
+                className="rounded-md border border-border px-3 py-1.5 text-[13px] text-danger transition-colors hover:bg-danger/10 disabled:opacity-50"
+              >
+                {busyId === server.id ? "卸载中" : "卸载"}
+              </button>
+            ) : null}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function SkillsPanel({
+  capabilities,
+  loading,
+}: {
+  capabilities: CapabilityRecord[]
+  loading: boolean
+}) {
+  const rows = capabilities
+    .filter((item) => item.kind === "tool" || item.kind === "memory" || item.kind === "mcp_server")
+    .map((item) => ({
+      key: item.id,
+      name: item.label,
+      meta: item.provider || item.source || item.kind,
+      tone: capabilityTone(item),
+      status: capabilityStatus(item),
+    }))
+
+  return (
+    <div className="space-y-4">
+      <PanelTitle title="技能" />
+      <FactGrid rows={rows} loading={loading} />
+    </div>
+  )
+}
+
+function PluginsPanel({
+  servers,
+  loading,
+}: {
+  servers: McpServerRecord[]
+  loading: boolean
+}) {
+  return (
+    <div className="space-y-4">
+      <PanelTitle title="插件" />
+      <FactGrid
+        rows={servers.map((server) => ({
+          key: server.id,
+          name: server.name || server.id,
+          meta: server.install?.packageName || server.command || server.transport || "stdio",
+          tone: server.enabled === false ? "neutral" : "success",
+          status: server.enabled === false ? "停用" : "启用",
+        }))}
+        loading={loading}
+        emptyText="暂无"
+      />
+    </div>
+  )
+}
+
+function MemoryPanel({
+  capabilities,
+  loading,
+}: {
+  capabilities: CapabilityRecord[]
+  loading: boolean
+}) {
+  const rows = capabilities
+    .filter((item) => item.kind === "memory")
+    .map((item) => ({
+      key: item.id,
+      name: item.label,
+      meta: item.source || item.provider || "local_server",
+      tone: capabilityTone(item),
+      status: capabilityStatus(item),
+    }))
+
+  return (
+    <div className="space-y-4">
+      <PanelTitle title="公共记忆" />
+      <FactGrid rows={rows} loading={loading} />
+    </div>
+  )
+}
+
+function DataPanel({
+  value,
+  onChange,
+}: {
+  value: string
+  onChange: (value: string) => void
+}) {
+  return (
+    <div className="space-y-6">
+      <PanelTitle title="数据设置" />
+      <SettingRow label="保存位置">
+        <input
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          className={cn(inputClass, "font-mono text-[12px]")}
+        />
+      </SettingRow>
+    </div>
+  )
+}
+
+function SecurityPanel({
+  capabilities,
+  loading,
+}: {
+  capabilities: CapabilityRecord[]
+  loading: boolean
+}) {
+  const fullTools = capabilities.filter((item) =>
+    ["execute-command", "run-code", "install-package", "run-tests", "git-operation", "browser-control"].includes(item.id) ||
+    item.id.startsWith("mcp-")
+  )
+
+  return (
+    <div className="space-y-5">
+      <PanelTitle title="权限安全" />
+      <div className="grid grid-cols-3 gap-2">
+        <PermissionBlock title="文本" items={["发言"]} />
+        <PermissionBlock title="工具" items={["网页", "文件", "数据库读取"]} />
+        <PermissionBlock title="完全" items={["终端", "代码", "安装", "Git", "浏览器", "MCP"]} />
+      </div>
+      <FactGrid
+        rows={fullTools.map((item) => ({
+          key: item.id,
+          name: item.label,
+          meta: item.provider || item.source || item.kind,
+          tone: capabilityTone(item),
+          status: capabilityStatus(item),
+        }))}
+        loading={loading}
+      />
+    </div>
+  )
+}
+
+function FactGrid({
+  rows,
+  loading,
+  emptyText = "暂无",
+}: {
+  rows: Array<{
+    key: string
+    name: string
+    meta?: string
+    status: string
+    tone?: Tone
+  }>
+  loading: boolean
+  emptyText?: string
+}) {
+  if (loading) return <EmptyLine text="读取中" />
+  if (!rows.length) return <EmptyLine text={emptyText} />
+
+  return (
+    <div className="grid gap-2">
+      {rows.map((row) => (
+        <div
+          key={row.key}
+          className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 rounded-md border border-border px-3 py-2"
+        >
+          <div className="min-w-0">
+            <div className="truncate text-[13px] font-medium text-foreground">{row.name}</div>
+            {row.meta ? (
+              <div className="mt-1 truncate font-mono text-[11px] text-muted-foreground">{row.meta}</div>
+            ) : null}
+          </div>
+          <Badge tone={row.tone || "neutral"}>{row.status}</Badge>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function PermissionBlock({ title, items }: { title: string; items: string[] }) {
+  return (
+    <div className="rounded-md border border-border px-3 py-2">
+      <div className="text-[13px] font-medium text-foreground">{title}</div>
+      <div className="mt-2 flex flex-wrap gap-1.5">
+        {items.map((item) => (
+          <Badge key={item}>{item}</Badge>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function EmptyLine({ text }: { text: string }) {
+  return (
+    <div className="rounded-md border border-dashed border-border px-3 py-4 text-center text-[13px] text-muted-foreground">
+      {text}
     </div>
   )
 }
@@ -404,4 +832,21 @@ function RangeControl({
       </span>
     </div>
   )
+}
+
+function capabilityStatus(item: CapabilityRecord) {
+  if (item.status === "needs_config") return "需配置"
+  if (item.status === "planned") return "未安装"
+  if (item.enabled === false) return "停用"
+  return "可用"
+}
+
+function capabilityTone(item: CapabilityRecord): Tone {
+  if (item.status === "needs_config") return "warning"
+  if (item.status === "planned" || item.enabled === false) return "neutral"
+  return "success"
+}
+
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error || "操作失败")
 }
