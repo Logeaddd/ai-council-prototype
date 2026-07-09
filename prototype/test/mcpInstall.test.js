@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { callConfiguredMcpTool } from "../src/mcpClient.js";
+import { callConfiguredMcpTool, listConfiguredMcpTools } from "../src/mcpClient.js";
 import { installMcpNpmServer, listMcpInstallCatalog, mcpInstallRoot, searchMcpNpmPackages, uninstallManagedMcpServer } from "../src/mcpInstall.js";
 import { readMcpServerConfigs } from "../src/mcpConfig.js";
 import { executeToolRequests } from "../src/toolRequests.js";
@@ -13,8 +13,28 @@ test("MCP install catalog reports presets without pretending they are installed"
   const catalog = listMcpInstallCatalog(baseDir);
 
   assert.equal(catalog.catalog.some((item) => item.id === "filesystem"), true);
+  assert.equal(catalog.catalog.some((item) => item.id === "web-tools"), true);
   assert.equal(catalog.catalog.find((item) => item.id === "filesystem").installed, false);
   assert.equal(catalog.catalog.find((item) => item.id === "memory").serverConfigured, false);
+});
+
+test("built-in web MCP tools can be joined without npm install", async () => {
+  const userDataBase = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-built-in-mcp-"));
+  const installed = await installMcpNpmServer(userDataBase, {
+    catalogId: "web-tools"
+  });
+  const listed = await listConfiguredMcpTools(userDataBase, {
+    serverId: "web-tools"
+  });
+  const catalog = listMcpInstallCatalog(userDataBase);
+  const server = readMcpServerConfigs(userDataBase).find((item) => item.id === "web-tools");
+
+  assert.equal(installed.ok, true);
+  assert.equal(installed.source, "built_in_mcp");
+  assert.equal(server.source, "built_in");
+  assert.deepEqual(listed.servers[0].tools.map((tool) => tool.name), ["web_search", "fetch_url"]);
+  assert.equal(catalog.catalog.find((item) => item.id === "web-tools").installed, true);
+  assert.match(installed.server.args[0], /mcpServer\.js/);
 });
 
 test("MCP npm search reads real registry payloads without fake installed state", async () => {

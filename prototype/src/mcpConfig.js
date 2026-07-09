@@ -124,7 +124,7 @@ function normalizeEnv(value = {}) {
 
 function normalizeSource(value) {
   const text = String(value || "local_config").trim();
-  if (["local_config", "managed_npm"].includes(text)) return text;
+  if (["local_config", "managed_npm", "built_in"].includes(text)) return text;
   return "local_config";
 }
 

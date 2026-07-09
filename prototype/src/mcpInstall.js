@@ -1,17 +1,30 @@
 import { execFile } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { userDataDir } from "./appSettings.js";
 import { deleteMcpServerConfig, readMcpServerConfigs, upsertMcpServerConfig } from "./mcpConfig.js";
 
 const execFileAsync = promisify(execFile);
+const SOURCE_DIR = path.dirname(fileURLToPath(import.meta.url));
+const APP_ROOT = path.resolve(SOURCE_DIR, "..");
 const DEFAULT_TIMEOUT_MS = 10 * 60_000;
 const DEFAULT_SEARCH_TIMEOUT_MS = 15_000;
 const MAX_OUTPUT_BYTES = 256 * 1024;
 const MAX_SEARCH_RESULTS = 12;
 
 const CATALOG = [
+  {
+    id: "web-tools",
+    name: "联网搜索",
+    manager: "builtin",
+    packageName: "内置",
+    binName: "",
+    defaultArgs: [],
+    verifiedSource: "src/mcpServer.js",
+    verifiedAt: "2026-07-10"
+  },
   {
     id: "filesystem",
     name: "Filesystem",
@@ -50,9 +63,10 @@ export function listMcpInstallCatalog(baseDir) {
     catalog: CATALOG.map((item) => {
       const record = readInstallRecord(baseDir, item.id);
       const server = configs.find((config) => config.id === item.id);
+      const builtIn = item.manager === "builtin";
       return {
         ...item,
-        installed: Boolean(record?.installedAt && fs.existsSync(record.installDir || "")),
+        installed: builtIn ? Boolean(server) : Boolean(record?.installedAt && fs.existsSync(record.installDir || "")),
         installedVersion: record?.packageVersion || "",
         serverConfigured: Boolean(server),
         serverEnabled: server ? server.enabled !== false : false
@@ -122,6 +136,9 @@ export async function searchMcpNpmPackages(query, options = {}) {
 
 export async function installMcpNpmServer(baseDir, input = {}, options = {}) {
   const catalogItem = findCatalogItem(input.catalogId || input.id);
+  if (catalogItem?.manager === "builtin") {
+    return installBuiltInMcpServer(baseDir, catalogItem, input);
+  }
   const packageSpec = requiredText(input.packageSpec || input.packageName || catalogItem?.packageName, "packageSpec");
   const id = normalizeManagedId(input.serverId || input.id || catalogItem?.id || packageSpec);
   const name = String(input.name || catalogItem?.name || id).trim();
@@ -232,6 +249,39 @@ export async function installMcpNpmServer(baseDir, input = {}, options = {}) {
     id,
     server,
     install: record
+  };
+}
+
+function installBuiltInMcpServer(baseDir, catalogItem, input = {}) {
+  const id = normalizeManagedId(input.serverId || input.id || catalogItem.id);
+  const name = String(input.name || catalogItem.name || id).trim();
+  const scriptPath = path.join(SOURCE_DIR, "mcpServer.js");
+  if (!fs.existsSync(scriptPath)) {
+    return {
+      ok: false,
+      source: "built_in_mcp",
+      code: "built_in_mcp_missing",
+      error: "Built-in MCP server file was not found.",
+      id,
+      scriptPath
+    };
+  }
+  const server = upsertMcpServerConfig(baseDir, {
+    id,
+    name,
+    enabled: input.enabled !== false,
+    transport: "stdio",
+    command: process.execPath,
+    args: [scriptPath],
+    cwd: APP_ROOT,
+    env: normalizeEnv(input.env),
+    source: "built_in"
+  });
+  return {
+    ok: true,
+    source: "built_in_mcp",
+    id,
+    server
   };
 }
 
