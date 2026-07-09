@@ -539,6 +539,161 @@ test("MCP search follow-up prompt suggests install and next tool step", async ()
   }
 });
 
+test("MCP install follow-up can list and call the installed tool in the same member loop", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-mcp-chain-"));
+  const groupPath = path.join(tmp, "group");
+  const baseDir = path.join(tmp, "base");
+  fs.mkdirSync(groupPath, { recursive: true });
+  fs.mkdirSync(baseDir, { recursive: true });
+  fs.writeFileSync(path.join(groupPath, "group.json"), JSON.stringify({
+    permissions: {
+      defaultTier: "full",
+      seatTiers: { researcher: "full" }
+    }
+  }), "utf8");
+  const packageDir = writeDiscussionFakeMcpPackage(baseDir);
+  const nonFinalPrompts = [];
+  const server = http.createServer(async (req, res) => {
+    const body = JSON.parse(await readRequestBody(req));
+    const prompt = JSON.stringify(body.messages || []);
+    if (prompt.includes("FinalDecision JSON object")) {
+      writeOpenAiStream(res, JSON.stringify({
+        answer: "The installed MCP tool returned MCP_CHAIN_FACT.",
+        consensus_score: 1,
+        supporting_agents: ["Researcher"],
+        dissenting_agents: [],
+        minority_report: "",
+        risks: [],
+        next_actions: [],
+        selected_file_operation_ids: [],
+        memory_candidates: []
+      }));
+      return;
+    }
+
+    nonFinalPrompts.push(prompt);
+    if (nonFinalPrompts.length === 1) {
+      writeOpenAiStream(res, JSON.stringify({
+        status: "speak",
+        argument: "I need to install a local MCP tool before answering.",
+        tool_requests: [
+          {
+            tool: "mcp_install_npm",
+            serverId: "chain-tool",
+            packageSpec: packageDir,
+            binName: "fake-mcp",
+            reason: "Install the MCP tool for this task."
+          }
+        ],
+        objections: [],
+        confidence: 0.5,
+        memory_candidates: []
+      }));
+      return;
+    }
+    if (nonFinalPrompts.length === 2) {
+      assert.match(prompt, /MCP install completed/);
+      assert.match(prompt, /chain-tool/);
+      assert.match(prompt, /mcp_list_tools/);
+      writeOpenAiStream(res, JSON.stringify({
+        status: "speak",
+        argument: "The MCP server is installed. I need its tool list.",
+        tool_requests: [
+          {
+            tool: "mcp_list_tools",
+            serverId: "chain-tool",
+            reason: "List tools from the installed MCP server."
+          }
+        ],
+        objections: [],
+        confidence: 0.6,
+        memory_candidates: []
+      }));
+      return;
+    }
+    if (nonFinalPrompts.length === 3) {
+      assert.match(prompt, /MCP tool list is available/);
+      assert.match(prompt, /chain-tool:echo/);
+      assert.match(prompt, /mcp_call/);
+      writeOpenAiStream(res, JSON.stringify({
+        status: "speak",
+        argument: "The echo tool is available. I need to call it.",
+        tool_requests: [
+          {
+            tool: "mcp_call",
+            serverId: "chain-tool",
+            mcpToolName: "echo",
+            arguments: { text: "MCP_CHAIN_FACT" },
+            reason: "Call the installed MCP tool."
+          }
+        ],
+        objections: [],
+        confidence: 0.7,
+        memory_candidates: []
+      }));
+      return;
+    }
+
+    assert.match(prompt, /MCP call.*echo.*returned real content/);
+    assert.match(prompt, /MCP_CHAIN_FACT/);
+    writeOpenAiStream(res, JSON.stringify({
+      status: "speak",
+      argument: "The installed MCP echo tool returned MCP_CHAIN_FACT.",
+      objections: [],
+      confidence: 0.9,
+      memory_candidates: []
+    }));
+  });
+  await listen(server);
+  const address = server.address();
+
+  try {
+    const group = validateGroupConfig({
+      id: "mcp-chain",
+      name: "MCP Chain",
+      settings: {
+        maxRounds: 1,
+        maxToolIterations: 4,
+        minConsensusWeight: 1,
+        stopWhenAllSkip: true,
+        agentTimeoutMs: 5000,
+        toolTimeoutMs: 30000,
+        allowSoloCouncil: true
+      },
+      agents: [
+        {
+          id: "researcher",
+          name: "Researcher",
+          role: "Researcher",
+          provider: "openai-compatible",
+          apiBaseUrl: `http://127.0.0.1:${address.port}/v1`,
+          allowUnsafePrivateNetwork: true,
+          apiKey: "secret-runtime-key",
+          model: "mcp-chain-model",
+          weight: 1,
+          enabled: true
+        }
+      ]
+    });
+    const result = await runCouncil("Install and use an MCP tool.", group, baseDir, { groupPath });
+
+    assert.deepEqual(result.session.toolExecutionResults.map((item) => item.tool), [
+      "mcp_install_npm",
+      "mcp_list_tools",
+      "mcp_call"
+    ]);
+    assert.deepEqual(result.session.toolExecutionResults.map((item) => item.status), [
+      "completed",
+      "completed",
+      "completed"
+    ]);
+    assert.match(result.session.messages[0].response.argument, /MCP_CHAIN_FACT/);
+    assert.equal(nonFinalPrompts.length, 4);
+  } finally {
+    await close(server);
+  }
+});
+
 test("repeated tool requests stop at the configured iteration limit without fake success", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-tool-loop-limit-"));
   fs.writeFileSync(path.join(tmp, "group.json"), JSON.stringify({
@@ -4262,6 +4417,45 @@ test("read/list file operations are executed and returned in later model context
     await close(server);
   }
 });
+
+function writeDiscussionFakeMcpPackage(root) {
+  const packageDir = path.join(root, `fake-mcp-chain-package-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+  fs.mkdirSync(packageDir, { recursive: true });
+  fs.writeFileSync(path.join(packageDir, "package.json"), JSON.stringify({
+    name: "fake-mcp-chain-package",
+    version: "1.0.0",
+    type: "module",
+    bin: {
+      "fake-mcp": "server.mjs"
+    }
+  }, null, 2), "utf8");
+  fs.writeFileSync(path.join(packageDir, "server.mjs"), [
+    "#!/usr/bin/env node",
+    "import readline from 'node:readline';",
+    "const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });",
+    "for await (const line of rl) {",
+    "  if (!line.trim()) continue;",
+    "  const message = JSON.parse(line);",
+    "  if (message.method === 'notifications/initialized') continue;",
+    "  if (message.method === 'initialize') {",
+    "    write({ jsonrpc: '2.0', id: message.id, result: { protocolVersion: '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: 'fake-chain', version: '1.0.0' } } });",
+    "    continue;",
+    "  }",
+    "  if (message.method === 'tools/list') {",
+    "    write({ jsonrpc: '2.0', id: message.id, result: { tools: [{ name: 'echo', inputSchema: { type: 'object' } }] } });",
+    "    continue;",
+    "  }",
+    "  if (message.method === 'tools/call') {",
+    "    write({ jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(message.params?.arguments || {}) }], isError: false } });",
+    "    continue;",
+    "  }",
+    "  write({ jsonrpc: '2.0', id: message.id, error: { code: -32601, message: 'Unknown method' } });",
+    "}",
+    "function write(message) { process.stdout.write(`${JSON.stringify(message)}\\n`); }",
+    ""
+  ].join("\n"), "utf8");
+  return packageDir;
+}
 
 function git(cwd, args) {
   return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
