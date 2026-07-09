@@ -7,7 +7,9 @@ import { deleteMcpServerConfig, readMcpServerConfigs, upsertMcpServerConfig } fr
 
 const execFileAsync = promisify(execFile);
 const DEFAULT_TIMEOUT_MS = 10 * 60_000;
+const DEFAULT_SEARCH_TIMEOUT_MS = 15_000;
 const MAX_OUTPUT_BYTES = 256 * 1024;
+const MAX_SEARCH_RESULTS = 12;
 
 const CATALOG = [
   {
@@ -57,6 +59,65 @@ export function listMcpInstallCatalog(baseDir) {
       };
     })
   };
+}
+
+export async function searchMcpNpmPackages(query, options = {}) {
+  const text = String(query || "").trim();
+  if (!text) {
+    return {
+      ok: false,
+      source: "npm_registry_search",
+      code: "missing_query",
+      error: "Missing search query.",
+      results: []
+    };
+  }
+  const count = clampNumber(options.count, 8, 1, MAX_SEARCH_RESULTS);
+  const timeoutMs = clampNumber(options.timeoutMs, DEFAULT_SEARCH_TIMEOUT_MS, 1000, DEFAULT_SEARCH_TIMEOUT_MS);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const url = new URL("https://registry.npmjs.org/-/v1/search");
+    url.searchParams.set("text", text);
+    url.searchParams.set("size", String(count));
+    const response = await fetch(url, {
+      signal: controller.signal,
+      headers: {
+        "Accept": "application/json",
+        "User-Agent": "AI-Council/0.2"
+      }
+    });
+    const body = await response.text();
+    if (!response.ok) {
+      return {
+        ok: false,
+        source: "npm_registry_search",
+        status: response.status,
+        error: body.slice(0, 500),
+        results: []
+      };
+    }
+    const parsed = JSON.parse(body);
+    return {
+      ok: true,
+      source: "npm_registry_search",
+      query: text,
+      results: (parsed.objects || [])
+        .map((item) => normalizeNpmSearchResult(item))
+        .filter(Boolean)
+        .slice(0, count)
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      source: "npm_registry_search",
+      code: error.name === "AbortError" ? "npm_search_timeout" : "npm_search_failed",
+      error: error.message || "npm search failed.",
+      results: []
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 export async function installMcpNpmServer(baseDir, input = {}, options = {}) {
@@ -200,6 +261,21 @@ function findCatalogItem(id) {
   const target = String(id || "").trim();
   if (!target) return null;
   return CATALOG.find((item) => item.id === target) || null;
+}
+
+function normalizeNpmSearchResult(item) {
+  const pkg = item?.package;
+  if (!pkg?.name) return null;
+  return {
+    id: normalizeManagedId(pkg.name),
+    name: String(pkg.name || "").trim(),
+    packageName: String(pkg.name || "").trim(),
+    version: String(pkg.version || "").trim(),
+    description: String(pkg.description || "").slice(0, 240),
+    keywords: normalizeStringArray(pkg.keywords).slice(0, 12),
+    date: String(pkg.date || "").trim(),
+    score: Number(item.score?.final || 0)
+  };
 }
 
 function resolveInstallDir(baseDir, id) {

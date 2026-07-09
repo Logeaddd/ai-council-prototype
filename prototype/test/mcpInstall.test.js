@@ -4,7 +4,7 @@ import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { callConfiguredMcpTool } from "../src/mcpClient.js";
-import { installMcpNpmServer, listMcpInstallCatalog, mcpInstallRoot, uninstallManagedMcpServer } from "../src/mcpInstall.js";
+import { installMcpNpmServer, listMcpInstallCatalog, mcpInstallRoot, searchMcpNpmPackages, uninstallManagedMcpServer } from "../src/mcpInstall.js";
 import { readMcpServerConfigs } from "../src/mcpConfig.js";
 import { executeToolRequests } from "../src/toolRequests.js";
 
@@ -15,6 +15,56 @@ test("MCP install catalog reports presets without pretending they are installed"
   assert.equal(catalog.catalog.some((item) => item.id === "filesystem"), true);
   assert.equal(catalog.catalog.find((item) => item.id === "filesystem").installed, false);
   assert.equal(catalog.catalog.find((item) => item.id === "memory").serverConfigured, false);
+});
+
+test("MCP npm search reads real registry payloads without fake installed state", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    assert.match(String(url), /registry\.npmjs\.org\/-\/v1\/search/);
+    return new Response(JSON.stringify({
+      objects: [
+        {
+          package: {
+            name: "@scope/mcp-search-tool",
+            version: "1.2.3",
+            description: "Search tool",
+            keywords: ["mcp", "search"],
+            date: "2026-07-10T00:00:00.000Z"
+          },
+          score: { final: 0.9 }
+        }
+      ]
+    }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" }
+    });
+  };
+  try {
+    const result = await searchMcpNpmPackages("mcp search", { count: 3 });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.source, "npm_registry_search");
+    assert.equal(result.results[0].packageName, "@scope/mcp-search-tool");
+    assert.equal(result.results[0].version, "1.2.3");
+    assert.equal(result.results[0].installed, undefined);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("MCP npm search reports registry failures honestly", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response("registry down", { status: 503 });
+  try {
+    const result = await searchMcpNpmPackages("mcp search");
+
+    assert.equal(result.ok, false);
+    assert.equal(result.source, "npm_registry_search");
+    assert.equal(result.status, 503);
+    assert.deepEqual(result.results, []);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("MCP npm installer installs a local package, registers config, and can call it", async () => {

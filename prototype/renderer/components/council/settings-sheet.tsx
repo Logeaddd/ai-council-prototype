@@ -25,9 +25,12 @@ import {
   fetchMcpServers,
   fetchProviderPresets,
   installMcpCatalogItem,
+  installMcpPackage,
+  searchMcpPackages,
   uninstallMcpServer,
   type CapabilityRecord,
   type McpInstallCatalogItem,
+  type McpSearchResult,
   type McpServerRecord,
   type ProviderPresetRecord,
 } from "@/lib/council-live"
@@ -110,6 +113,9 @@ export function SettingsSheet({
   const [providers, setProviders] = useState<ProviderPresetRecord[]>([])
   const [capabilities, setCapabilities] = useState<CapabilityRecord[]>([])
   const [mcpCatalog, setMcpCatalog] = useState<McpInstallCatalogItem[]>([])
+  const [mcpSearchQuery, setMcpSearchQuery] = useState("")
+  const [mcpSearchResults, setMcpSearchResults] = useState<McpSearchResult[]>([])
+  const [searchingMcp, setSearchingMcp] = useState(false)
   const [mcpServers, setMcpServers] = useState<McpServerRecord[]>([])
   const [busyMcpId, setBusyMcpId] = useState("")
 
@@ -176,6 +182,61 @@ export function SettingsSheet({
     try {
       const result = await installMcpCatalogItem(item.id)
       if (!result.ok) throw new Error(result.error || result.code || "加入失败")
+      await reloadFacts()
+    } catch (error) {
+      setSettingsError(errorMessage(error))
+    } finally {
+      setBusyMcpId("")
+    }
+  }
+
+  async function searchMcp() {
+    const query = mcpSearchQuery.trim()
+    if (!query || searchingMcp) return
+    setSearchingMcp(true)
+    setSettingsError("")
+    try {
+      const result = await searchMcpPackages(query)
+      if (!result.ok) throw new Error(result.error || result.code || "搜索失败")
+      setMcpSearchResults(result.results || [])
+    } catch (error) {
+      setSettingsError(errorMessage(error))
+    } finally {
+      setSearchingMcp(false)
+    }
+  }
+
+  async function installMcpSearchResult(item: McpSearchResult) {
+    const packageName = item.packageName || item.name
+    if (!packageName || busyMcpId) return
+    const serverId = item.id || packageName
+    setBusyMcpId(serverId)
+    setSettingsError("")
+    try {
+      const result = await installMcpPackage({
+        packageSpec: packageName,
+        serverId,
+        name: item.name || packageName,
+      })
+      if (!result.ok) throw new Error(result.error || result.code || "加入失败")
+      await reloadFacts()
+    } catch (error) {
+      setSettingsError(errorMessage(error))
+    } finally {
+      setBusyMcpId("")
+    }
+  }
+
+  async function installCustomMcpPackage(packageSpec: string) {
+    const text = packageSpec.trim()
+    if (!text || busyMcpId) return
+    setBusyMcpId(text)
+    setSettingsError("")
+    try {
+      const result = await installMcpPackage({ packageSpec: text })
+      if (!result.ok) throw new Error(result.error || result.code || "加入失败")
+      setMcpSearchQuery("")
+      setMcpSearchResults([])
       await reloadFacts()
     } catch (error) {
       setSettingsError(errorMessage(error))
@@ -283,8 +344,15 @@ export function SettingsSheet({
               servers={mcpServers}
               loading={loadingFacts}
               busyId={busyMcpId}
+              searchQuery={mcpSearchQuery}
+              searchResults={mcpSearchResults}
+              searching={searchingMcp}
+              onSearchQueryChange={setMcpSearchQuery}
+              onSearch={searchMcp}
               onRefresh={reloadFacts}
               onInstall={installMcp}
+              onInstallSearchResult={installMcpSearchResult}
+              onInstallCustom={installCustomMcpPackage}
               onUninstall={uninstallMcp}
             />
           ) : null}
@@ -488,16 +556,30 @@ function McpPanel({
   servers,
   loading,
   busyId,
+  searchQuery,
+  searchResults,
+  searching,
+  onSearchQueryChange,
+  onSearch,
   onRefresh,
   onInstall,
+  onInstallSearchResult,
+  onInstallCustom,
   onUninstall,
 }: {
   catalog: McpInstallCatalogItem[]
   servers: McpServerRecord[]
   loading: boolean
   busyId: string
+  searchQuery: string
+  searchResults: McpSearchResult[]
+  searching: boolean
+  onSearchQueryChange: (value: string) => void
+  onSearch: () => Promise<void>
   onRefresh: () => Promise<void>
   onInstall: (item: McpInstallCatalogItem) => Promise<void>
+  onInstallSearchResult: (item: McpSearchResult) => Promise<void>
+  onInstallCustom: (packageSpec: string) => Promise<void>
   onUninstall: (item: McpInstallCatalogItem | McpServerRecord) => Promise<void>
 }) {
   return (
@@ -511,6 +593,64 @@ function McpPanel({
         >
           刷新
         </button>
+      </div>
+
+      <div className="space-y-2">
+        <div className="flex items-center gap-2">
+          <input
+            value={searchQuery}
+            onChange={(event) => onSearchQueryChange(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") void onSearch()
+            }}
+            className={cn(inputClass, "flex-1 font-mono text-[12px]")}
+            placeholder="npm 包名或关键词"
+          />
+          <button
+            type="button"
+            disabled={searching || !searchQuery.trim()}
+            onClick={() => void onSearch()}
+            className="rounded-md border border-border px-3 py-1.5 text-[13px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-50"
+          >
+            {searching ? "搜索中" : "搜索"}
+          </button>
+          <button
+            type="button"
+            disabled={Boolean(busyId) || !searchQuery.trim()}
+            onClick={() => void onInstallCustom(searchQuery)}
+            className="rounded-md bg-primary px-3 py-1.5 text-[13px] font-semibold text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
+          >
+            加入
+          </button>
+        </div>
+        {searchResults.length ? (
+          <div className="space-y-2">
+            {searchResults.map((item) => (
+              <div
+                key={item.packageName || item.name}
+                className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 rounded-md border border-border px-3 py-2"
+              >
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="truncate text-[13px] font-medium text-foreground">{item.name}</span>
+                    {item.version ? <Badge>{item.version}</Badge> : null}
+                  </div>
+                  <div className="mt-1 truncate font-mono text-[11px] text-muted-foreground">
+                    {item.packageName}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  disabled={Boolean(busyId)}
+                  onClick={() => void onInstallSearchResult(item)}
+                  className="rounded-md bg-primary px-3 py-1.5 text-[13px] font-semibold text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
+                >
+                  {busyId === item.id ? "加入中" : "加入"}
+                </button>
+              </div>
+            ))}
+          </div>
+        ) : null}
       </div>
 
       <div className="space-y-2">

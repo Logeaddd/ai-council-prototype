@@ -472,6 +472,17 @@ export interface McpInstallCatalogItem {
   serverEnabled?: boolean
 }
 
+export interface McpSearchResult {
+  id: string
+  name: string
+  packageName: string
+  version?: string
+  description?: string
+  keywords?: string[]
+  date?: string
+  score?: number
+}
+
 export interface McpServerRecord {
   id: string
   name?: string
@@ -593,8 +604,22 @@ export async function fetchMcpCatalog() {
   return api<{ catalog: McpInstallCatalogItem[] }>("/api/mcp/catalog")
 }
 
+export async function searchMcpPackages(query: string) {
+  const params = new URLSearchParams({ q: query })
+  return api<{ ok: boolean; error?: string; code?: string; results: McpSearchResult[] }>(`/api/mcp/search?${params}`)
+}
+
 export async function installMcpCatalogItem(catalogId: string) {
   return api<{ ok: boolean; error?: string; code?: string }>("/api/mcp/install", { catalogId })
+}
+
+export async function installMcpPackage(body: {
+  packageSpec: string
+  serverId?: string
+  name?: string
+  binName?: string
+}) {
+  return api<{ ok: boolean; error?: string; code?: string }>("/api/mcp/install", body)
 }
 
 export async function uninstallMcpServer(serverId: string) {

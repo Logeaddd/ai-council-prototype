@@ -272,10 +272,13 @@ test("settings page is category-first and avoids explanatory filler text", () =>
   assert.match(settings, /fetchCapabilities/);
   assert.match(settings, /fetchMcpCatalog/);
   assert.match(settings, /fetchMcpServers/);
+  assert.match(settings, /searchMcpPackages/);
   assert.match(settings, /installMcpCatalogItem/);
+  assert.match(settings, /installMcpPackage/);
   assert.match(settings, /uninstallMcpServer/);
   assert.match(live, /\/api\/capabilities/);
   assert.match(live, /\/api\/mcp\/catalog/);
+  assert.match(live, /\/api\/mcp\/search/);
   assert.match(live, /\/api\/mcp\/install/);
   assert.match(live, /\/api\/mcp\/uninstall/);
 

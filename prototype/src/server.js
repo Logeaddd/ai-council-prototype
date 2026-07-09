@@ -35,7 +35,7 @@ import {
   listConfiguredMcpTools,
   readConfiguredMcpResource
 } from "./mcpClient.js";
-import { installMcpNpmServer, listMcpInstallCatalog, uninstallManagedMcpServer } from "./mcpInstall.js";
+import { installMcpNpmServer, listMcpInstallCatalog, searchMcpNpmPackages, uninstallManagedMcpServer } from "./mcpInstall.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const baseDir = path.resolve(__dirname, "..");
@@ -203,6 +203,14 @@ async function handleApi(req, res, url) {
 
   if (req.method === "GET" && url.pathname === "/api/mcp/catalog") {
     sendJson(res, 200, listMcpInstallCatalog(baseDir));
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/mcp/search") {
+    sendJson(res, 200, await searchMcpNpmPackages(url.searchParams.get("q") || url.searchParams.get("query") || "", {
+      count: url.searchParams.get("count"),
+      timeoutMs: url.searchParams.get("timeoutMs")
+    }));
     return;
   }
 
