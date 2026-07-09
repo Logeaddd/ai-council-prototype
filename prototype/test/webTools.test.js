@@ -110,6 +110,36 @@ test("web search uses built-in public HTML search without key", async () => {
   }
 });
 
+test("web search can use a configured built-in HTML search endpoint", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    assert.match(String(url), /127\.0\.0\.1:47899\/search/);
+    assert.match(String(url), /q=ai\+council/);
+    return new Response(`
+      <html><body>
+        <li class="b_algo">
+          <h2><a href="https://example.com/custom-search">Custom Search</a></h2>
+          <p>Configured built-in endpoint result.</p>
+        </li>
+      </body></html>
+    `, {
+      status: 200,
+      headers: { "Content-Type": "text/html" }
+    });
+  };
+  try {
+    const result = await searchWeb("ai council", {
+      env: { AI_COUNCIL_BUILTIN_SEARCH_URL: "http://127.0.0.1:47899/search" }
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.source, "public_html");
+    assert.equal(result.results[0].title, "Custom Search");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("web search reports built-in search failure honestly", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => new Response("blocked", { status: 503 });

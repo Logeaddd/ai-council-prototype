@@ -694,6 +694,174 @@ test("MCP install follow-up can list and call the installed tool in the same mem
   }
 });
 
+test("built-in web MCP can be joined and called from the council loop", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-built-in-web-mcp-"));
+  const groupPath = path.join(tmp, "group");
+  const baseDir = path.join(tmp, "base");
+  fs.mkdirSync(groupPath, { recursive: true });
+  fs.mkdirSync(baseDir, { recursive: true });
+  fs.writeFileSync(path.join(groupPath, "group.json"), JSON.stringify({
+    permissions: {
+      defaultTier: "full",
+      seatTiers: { researcher: "full" }
+    }
+  }), "utf8");
+
+  const searchServer = http.createServer((req, res) => {
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+    res.end(`
+      <html><body>
+        <li class="b_algo">
+          <h2><a href="https://example.com/builtin-mcp">Built-in MCP Search Result</a></h2>
+          <p>BUILTIN_MCP_SEARCH_FACT from the joined web MCP server.</p>
+        </li>
+      </body></html>
+    `);
+  });
+  await listen(searchServer);
+  const originalSearchUrl = process.env.AI_COUNCIL_BUILTIN_SEARCH_URL;
+  process.env.AI_COUNCIL_BUILTIN_SEARCH_URL = `http://127.0.0.1:${searchServer.address().port}/search`;
+
+  const nonFinalPrompts = [];
+  const modelServer = http.createServer(async (req, res) => {
+    const body = JSON.parse(await readRequestBody(req));
+    const prompt = JSON.stringify(body.messages || []);
+    if (prompt.includes("FinalDecision JSON object")) {
+      writeOpenAiStream(res, JSON.stringify({
+        answer: "The built-in web MCP returned BUILTIN_MCP_SEARCH_FACT.",
+        consensus_score: 1,
+        supporting_agents: ["Researcher"],
+        dissenting_agents: [],
+        minority_report: "",
+        risks: [],
+        next_actions: [],
+        selected_file_operation_ids: [],
+        memory_candidates: []
+      }));
+      return;
+    }
+
+    nonFinalPrompts.push(prompt);
+    if (nonFinalPrompts.length === 1) {
+      writeOpenAiStream(res, JSON.stringify({
+        status: "speak",
+        argument: "I need to join the built-in web MCP tools.",
+        tool_requests: [
+          {
+            tool: "mcp_install_npm",
+            catalogId: "web-tools",
+            reason: "Join the built-in web MCP tools."
+          }
+        ],
+        objections: [],
+        confidence: 0.5,
+        memory_candidates: []
+      }));
+      return;
+    }
+    if (nonFinalPrompts.length === 2) {
+      assert.match(prompt, /MCP install completed/);
+      assert.match(prompt, /web-tools/);
+      assert.match(prompt, /mcp_list_tools/);
+      writeOpenAiStream(res, JSON.stringify({
+        status: "speak",
+        argument: "The web MCP server is joined. I need its tool list.",
+        tool_requests: [
+          {
+            tool: "mcp_list_tools",
+            serverId: "web-tools",
+            reason: "List joined web MCP tools."
+          }
+        ],
+        objections: [],
+        confidence: 0.6,
+        memory_candidates: []
+      }));
+      return;
+    }
+    if (nonFinalPrompts.length === 3) {
+      assert.match(prompt, /MCP tool list is available/);
+      assert.match(prompt, /web-tools:web_search/);
+      assert.match(prompt, /mcp_call/);
+      writeOpenAiStream(res, JSON.stringify({
+        status: "speak",
+        argument: "The joined web search tool is available. I need to call it.",
+        tool_requests: [
+          {
+            tool: "mcp_call",
+            serverId: "web-tools",
+            mcpToolName: "web_search",
+            arguments: { query: "AI Council built-in MCP", count: 1 },
+            reason: "Call joined web search."
+          }
+        ],
+        objections: [],
+        confidence: 0.7,
+        memory_candidates: []
+      }));
+      return;
+    }
+
+    assert.match(prompt, /MCP call.*web_search.*returned real content/);
+    assert.match(prompt, /BUILTIN_MCP_SEARCH_FACT/);
+    writeOpenAiStream(res, JSON.stringify({
+      status: "speak",
+      argument: "The joined web MCP search returned BUILTIN_MCP_SEARCH_FACT.",
+      objections: [],
+      confidence: 0.9,
+      memory_candidates: []
+    }));
+  });
+  await listen(modelServer);
+  const modelAddress = modelServer.address();
+
+  try {
+    const group = validateGroupConfig({
+      id: "built-in-web-mcp-chain",
+      name: "Built-in Web MCP Chain",
+      settings: {
+        maxRounds: 1,
+        maxToolIterations: 4,
+        minConsensusWeight: 1,
+        stopWhenAllSkip: true,
+        agentTimeoutMs: 5000,
+        toolTimeoutMs: 30000,
+        allowSoloCouncil: true
+      },
+      agents: [
+        {
+          id: "researcher",
+          name: "Researcher",
+          role: "Researcher",
+          provider: "openai-compatible",
+          apiBaseUrl: `http://127.0.0.1:${modelAddress.port}/v1`,
+          allowUnsafePrivateNetwork: true,
+          apiKey: "secret-runtime-key",
+          model: "built-in-web-mcp-model",
+          weight: 1,
+          enabled: true
+        }
+      ]
+    });
+    const result = await runCouncil("Join and use web search.", group, baseDir, { groupPath });
+
+    assert.deepEqual(result.session.toolExecutionResults.map((item) => item.tool), [
+      "mcp_install_npm",
+      "mcp_list_tools",
+      "mcp_call"
+    ]);
+    assert.equal(result.session.toolExecutionResults[0].result.source, "built_in_mcp");
+    assert.equal(result.session.toolExecutionResults[2].result.toolName, "web_search");
+    assert.match(result.session.messages[0].response.argument, /BUILTIN_MCP_SEARCH_FACT/);
+    assert.equal(nonFinalPrompts.length, 4);
+  } finally {
+    if (originalSearchUrl === undefined) delete process.env.AI_COUNCIL_BUILTIN_SEARCH_URL;
+    else process.env.AI_COUNCIL_BUILTIN_SEARCH_URL = originalSearchUrl;
+    await close(modelServer);
+    await close(searchServer);
+  }
+});
+
 test("repeated tool requests stop at the configured iteration limit without fake success", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-tool-loop-limit-"));
   fs.writeFileSync(path.join(tmp, "group.json"), JSON.stringify({

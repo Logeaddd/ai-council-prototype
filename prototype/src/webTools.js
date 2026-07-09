@@ -92,7 +92,7 @@ async function searchBingHtml(query, options = {}) {
   options.signal?.addEventListener("abort", abortFromParent, { once: true });
   const timeout = setTimeout(() => controller.abort(), normalizeTimeoutMs(options.timeoutMs));
   try {
-    const url = new URL("https://www.bing.com/search");
+    const url = new URL(resolveBuiltInSearchUrl(options));
     url.searchParams.set("q", query);
     url.searchParams.set("count", String(Math.min(MAX_SEARCH_RESULTS, Math.max(1, Number(options.count || 5)))));
     const response = await fetch(url, {
@@ -132,6 +132,11 @@ async function searchBingHtml(query, options = {}) {
     options.signal?.removeEventListener("abort", abortFromParent);
     clearTimeout(timeout);
   }
+}
+
+function resolveBuiltInSearchUrl(options = {}) {
+  const env = options.env || process.env;
+  return String(env.AI_COUNCIL_BUILTIN_SEARCH_URL || "https://www.bing.com/search").trim();
 }
 
 function parseBingResults(html) {
