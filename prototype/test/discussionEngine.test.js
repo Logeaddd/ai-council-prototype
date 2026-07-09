@@ -424,6 +424,121 @@ test("tool requests can run in multiple real iterations before the member answer
   }
 });
 
+test("MCP search follow-up prompt suggests install and next tool step", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-mcp-followup-"));
+  fs.writeFileSync(path.join(tmp, "group.json"), JSON.stringify({
+    permissions: {
+      defaultTier: "full",
+      seatTiers: { researcher: "full" }
+    }
+  }), "utf8");
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    if (!String(url).includes("registry.npmjs.org")) return originalFetch(url, options);
+    return new Response(JSON.stringify({
+      objects: [
+        {
+          package: {
+            name: "agent-mcp-tool",
+            version: "0.1.0",
+            description: "Agent MCP tool"
+          },
+          score: { final: 0.8 }
+        }
+      ]
+    }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" }
+    });
+  };
+  const requestBodies = [];
+  const server = http.createServer(async (req, res) => {
+    const body = JSON.parse(await readRequestBody(req));
+    requestBodies.push(body);
+    const prompt = JSON.stringify(body.messages || []);
+    if (prompt.includes("FinalDecision JSON object")) {
+      writeOpenAiStream(res, JSON.stringify({
+        answer: "MCP search guidance was used.",
+        consensus_score: 1,
+        supporting_agents: ["Researcher"],
+        dissenting_agents: [],
+        minority_report: "",
+        risks: [],
+        next_actions: [],
+        selected_file_operation_ids: [],
+        memory_candidates: []
+      }));
+      return;
+    }
+    if (requestBodies.length === 1) {
+      writeOpenAiStream(res, JSON.stringify({
+        status: "speak",
+        argument: "I need to find an MCP tool.",
+        tool_requests: [
+          {
+            tool: "mcp_search_npm",
+            query: "agent mcp",
+            reason: "Find installable MCP tools."
+          }
+        ],
+        objections: [],
+        confidence: 0.5,
+        memory_candidates: []
+      }));
+      return;
+    }
+    assert.match(prompt, /MCP tool search found installable npm packages/);
+    assert.match(prompt, /agent-mcp-tool/);
+    assert.match(prompt, /mcp_install_npm/);
+    writeOpenAiStream(res, JSON.stringify({
+      status: "speak",
+      argument: "I found agent-mcp-tool and would install it if it fits the task.",
+      objections: [],
+      confidence: 0.8,
+      memory_candidates: []
+    }));
+  });
+  await listen(server);
+  const address = server.address();
+
+  try {
+    const group = validateGroupConfig({
+      id: "mcp-followup",
+      name: "MCP Followup",
+      settings: {
+        maxRounds: 1,
+        maxToolIterations: 3,
+        minConsensusWeight: 1,
+        stopWhenAllSkip: true,
+        agentTimeoutMs: 3000,
+        allowSoloCouncil: true
+      },
+      agents: [
+        {
+          id: "researcher",
+          name: "Researcher",
+          role: "Researcher",
+          provider: "openai-compatible",
+          apiBaseUrl: `http://127.0.0.1:${address.port}/v1`,
+          allowUnsafePrivateNetwork: true,
+          apiKey: "secret-runtime-key",
+          model: "mcp-followup-model",
+          weight: 1,
+          enabled: true
+        }
+      ]
+    });
+    const result = await runCouncil("Find a tool if needed.", group, tmp, { groupPath: tmp });
+
+    assert.equal(result.session.toolExecutionResults[0].tool, "mcp_search_npm");
+    assert.equal(result.session.toolExecutionResults[0].status, "completed");
+    assert.match(result.session.messages[0].response.argument, /agent-mcp-tool/);
+  } finally {
+    globalThis.fetch = originalFetch;
+    await close(server);
+  }
+});
+
 test("repeated tool requests stop at the configured iteration limit without fake success", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-tool-loop-limit-"));
   fs.writeFileSync(path.join(tmp, "group.json"), JSON.stringify({

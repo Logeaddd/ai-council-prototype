@@ -210,13 +210,14 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
 
         if (!toolResult.results.length && !toolResult.rejected.length) break;
 
+        const toolFollowupInstruction = buildToolFollowupInstruction(toolResult.results, toolResult.rejected);
         const followupContext = buildMemberContext(agent, session, {
           question,
           groupSettings: group.settings,
           globalRequirement,
           continuationContext,
           transcriptVisibility,
-          latestBossInstruction: "Tool results from your previous request are now available in context. Use the real tool results to continue this round. Request another tool only when a real next step still requires it; otherwise finish with speak or skip JSON.",
+          latestBossInstruction: toolFollowupInstruction,
           attachments,
           taskState,
           retrievedContext,
@@ -225,7 +226,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
         });
         const followupMessages = buildRoundPrompt(agent, question, session, round, {
           ...promptOptions,
-          resumeInstruction: "Tool results have been returned by the app. Continue if another real tool step is needed; otherwise finish this round with speak or skip JSON.",
+          resumeInstruction: toolFollowupInstruction,
           contextSections: buildContextPromptSections(followupContext),
         });
         callOutcome = yield* callRoundModel({
@@ -939,6 +940,46 @@ function formatCompressedTranscriptChunks(chunks = []) {
     .slice(-3)
     .map((chunk) => `Compressed rounds ${chunk.fromRound ?? "?"}-${chunk.toRound ?? "?"}: ${chunk.summary}`);
   return summaries.join("\n");
+}
+
+function buildToolFollowupInstruction(results = [], rejected = []) {
+  const lines = [
+    "Tool results from your previous request are now available in context. Use the real tool results to continue this round. Request another tool only when a real next step still requires it; otherwise finish with speak or skip JSON."
+  ];
+  const completed = (Array.isArray(results) ? results : []).filter((item) => item?.status === "completed" && item.result?.ok !== false);
+  const searchResults = completed.filter((item) => item.tool === "mcp_search_npm");
+  for (const item of searchResults) {
+    const packages = (item.result?.results || [])
+      .map((result) => result.packageName || result.name)
+      .filter(Boolean)
+      .slice(0, 3);
+    if (packages.length) {
+      lines.push(`MCP tool search found installable npm packages: ${packages.join(", ")}. If one fits the task, request mcp_install_npm with packageSpec set to the chosen package name; otherwise explain why none fit.`);
+    }
+  }
+  for (const item of completed.filter((entry) => entry.tool === "mcp_install_npm")) {
+    const serverId = item.result?.id || item.serverId || item.catalogId || item.packageSpec;
+    if (serverId) {
+      lines.push(`MCP install completed for serverId "${serverId}". Next, request mcp_list_tools with that serverId before trying to call the new tool.`);
+    }
+  }
+  for (const item of completed.filter((entry) => entry.tool === "mcp_list_tools")) {
+    const toolNames = (item.result?.servers || [])
+      .flatMap((server) => (server.tools || []).map((tool) => `${server.serverId || item.serverId || ""}:${tool.name || ""}`))
+      .filter((name) => !name.endsWith(":"))
+      .slice(0, 8);
+    if (toolNames.length) {
+      lines.push(`MCP tool list is available: ${toolNames.join(", ")}. If a listed tool is needed, request mcp_call with serverId, mcpToolName, and arguments.`);
+    }
+  }
+  for (const item of completed.filter((entry) => entry.tool === "mcp_call")) {
+    const toolName = item.result?.toolName || item.mcpToolName;
+    lines.push(`MCP call${toolName ? ` "${toolName}"` : ""} returned real content. Use that result directly; do not call the same tool again unless another real input is missing.`);
+  }
+  if ((Array.isArray(rejected) ? rejected : []).length) {
+    lines.push("Some tool requests were rejected. Read the rejected tool request reasons in context before choosing the next step.");
+  }
+  return lines.join("\n");
 }
 
 function buildUnavailableMessage(agent, round, reason, contextStatus, timing = {}) {
