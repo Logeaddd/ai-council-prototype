@@ -146,6 +146,93 @@ test("external MCP client reports missing tool names across multiple servers", a
   assert.equal(result.toolName, "missing_tool");
 });
 
+test("external MCP client infers the server for unique resource URIs", async () => {
+  const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-mcp-client-resource-infer-"));
+  const firstScript = writeFakeMcpServer(baseDir, { fileName: "fake-first.mjs", resourceUri: "memo://alpha" });
+  const secondScript = writeFakeMcpServer(baseDir, { fileName: "fake-second.mjs", resourceUri: "memo://beta" });
+  upsertMcpServerConfig(baseDir, {
+    id: "fake-alpha",
+    name: "Fake Alpha MCP",
+    command: process.execPath,
+    args: [firstScript],
+    cwd: baseDir
+  });
+  upsertMcpServerConfig(baseDir, {
+    id: "fake-beta",
+    name: "Fake Beta MCP",
+    command: process.execPath,
+    args: [secondScript],
+    cwd: baseDir
+  });
+
+  const result = await readConfiguredMcpResource(baseDir, {
+    uri: "memo://beta"
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.serverId, "fake-beta");
+  assert.equal(result.uri, "memo://beta");
+  assert.match(result.contents[0].text, /MCP_RESOURCE_FACT/);
+});
+
+test("external MCP client reports ambiguous resources instead of guessing", async () => {
+  const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-mcp-client-resource-ambiguous-"));
+  const firstScript = writeFakeMcpServer(baseDir, { fileName: "fake-first.mjs", resourceUri: "memo://same" });
+  const secondScript = writeFakeMcpServer(baseDir, { fileName: "fake-second.mjs", resourceUri: "memo://same" });
+  upsertMcpServerConfig(baseDir, {
+    id: "fake-first",
+    name: "Fake First MCP",
+    command: process.execPath,
+    args: [firstScript],
+    cwd: baseDir
+  });
+  upsertMcpServerConfig(baseDir, {
+    id: "fake-second",
+    name: "Fake Second MCP",
+    command: process.execPath,
+    args: [secondScript],
+    cwd: baseDir
+  });
+
+  const result = await readConfiguredMcpResource(baseDir, {
+    uri: "memo://same"
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.code, "ambiguous_mcp_resource");
+  assert.deepEqual(result.matchingServers.map((item) => item.id), ["fake-first", "fake-second"]);
+});
+
+test("external MCP client infers the server for unique prompt names", async () => {
+  const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-mcp-client-prompt-infer-"));
+  const firstScript = writeFakeMcpServer(baseDir, { fileName: "fake-first.mjs", promptName: "brief" });
+  const secondScript = writeFakeMcpServer(baseDir, { fileName: "fake-second.mjs", promptName: "review" });
+  upsertMcpServerConfig(baseDir, {
+    id: "fake-brief",
+    name: "Fake Brief MCP",
+    command: process.execPath,
+    args: [firstScript],
+    cwd: baseDir
+  });
+  upsertMcpServerConfig(baseDir, {
+    id: "fake-review",
+    name: "Fake Review MCP",
+    command: process.execPath,
+    args: [secondScript],
+    cwd: baseDir
+  });
+
+  const result = await getConfiguredMcpPrompt(baseDir, {
+    promptName: "review",
+    arguments: { topic: "PROMPT_INFER_FACT" }
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.serverId, "fake-review");
+  assert.equal(result.promptName, "review");
+  assert.match(result.messages[0].content.text, /PROMPT_INFER_FACT/);
+});
+
 test("external MCP client lists and reads configured resources", async () => {
   const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-mcp-client-resources-"));
   const serverScript = writeFakeMcpServer(baseDir);
@@ -304,11 +391,15 @@ test("MCP resource and prompt tool requests require full permission", async () =
 
 function writeFakeMcpServer(dir, options = {}) {
   const toolName = String(options.toolName || "echo");
+  const resourceUri = String(options.resourceUri || "memo://facts");
+  const promptName = String(options.promptName || "brief");
   const filePath = path.join(dir, options.fileName || "fake-mcp-server.mjs");
   fs.writeFileSync(filePath, [
     "import readline from 'node:readline';",
     "if (process.env.MCP_SECRET) process.stderr.write(`secret=${process.env.MCP_SECRET}\\n`);",
     `const toolName = ${JSON.stringify(toolName)};`,
+    `const resourceUri = ${JSON.stringify(resourceUri)};`,
+    `const promptName = ${JSON.stringify(promptName)};`,
     "const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });",
     "for await (const line of rl) {",
     "  if (!line.trim()) continue;",
@@ -328,7 +419,7 @@ function writeFakeMcpServer(dir, options = {}) {
     "    continue;",
     "  }",
     "  if (message.method === 'resources/list') {",
-    "    write({ jsonrpc: '2.0', id: message.id, result: { resources: [{ uri: 'memo://facts', name: 'Facts', mimeType: 'text/plain' }] } });",
+    "    write({ jsonrpc: '2.0', id: message.id, result: { resources: [{ uri: resourceUri, name: 'Facts', mimeType: 'text/plain' }] } });",
     "    continue;",
     "  }",
     "  if (message.method === 'resources/read') {",
@@ -336,7 +427,7 @@ function writeFakeMcpServer(dir, options = {}) {
     "    continue;",
     "  }",
     "  if (message.method === 'prompts/list') {",
-    "    write({ jsonrpc: '2.0', id: message.id, result: { prompts: [{ name: 'brief', description: 'Write a brief', arguments: [{ name: 'topic' }] }] } });",
+    "    write({ jsonrpc: '2.0', id: message.id, result: { prompts: [{ name: promptName, description: 'Write a brief', arguments: [{ name: 'topic' }] }] } });",
     "    continue;",
     "  }",
     "  if (message.method === 'prompts/get') {",

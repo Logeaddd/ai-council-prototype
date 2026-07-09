@@ -72,7 +72,7 @@ export async function readConfiguredMcpResource(baseDir, request = {}, options =
       error: "mcp_read_resource requires uri."
     };
   }
-  const selection = selectMcpServer(baseDir, request.serverId || request.mcpServerId);
+  const selection = await selectMcpServerForResource(baseDir, request.serverId || request.mcpServerId, uri, options);
   if (!selection.ok) return selection;
   return readOneServerResource(baseDir, selection.server, {
     uri
@@ -107,7 +107,7 @@ export async function getConfiguredMcpPrompt(baseDir, request = {}, options = {}
       error: "mcp_get_prompt requires promptName."
     };
   }
-  const selection = selectMcpServer(baseDir, request.serverId || request.mcpServerId);
+  const selection = await selectMcpServerForPrompt(baseDir, request.serverId || request.mcpServerId, promptName, options);
   if (!selection.ok) return selection;
   return getOneServerPrompt(baseDir, selection.server, {
     promptName,
@@ -408,6 +408,45 @@ function selectMcpServer(baseDir, id) {
 }
 
 async function selectMcpServerForTool(baseDir, id, toolName, options) {
+  return selectMcpServerForListedItem(baseDir, id, toolName, options, {
+    valueKey: "toolName",
+    valueLabel: "tool",
+    lookupFailedCode: "mcp_tool_lookup_failed",
+    notFoundCode: "mcp_tool_not_found",
+    ambiguousCode: "ambiguous_mcp_tool",
+    list: (server) => listOneServerTools(baseDir, server, options),
+    getItems: (result) => result.tools,
+    matches: (item, value) => item?.name === value
+  });
+}
+
+async function selectMcpServerForResource(baseDir, id, uri, options) {
+  return selectMcpServerForListedItem(baseDir, id, uri, options, {
+    valueKey: "uri",
+    valueLabel: "resource",
+    lookupFailedCode: "mcp_resource_lookup_failed",
+    notFoundCode: "mcp_resource_not_found",
+    ambiguousCode: "ambiguous_mcp_resource",
+    list: (server) => listOneServerResources(baseDir, server, {}, options),
+    getItems: (result) => result.resources,
+    matches: (item, value) => item?.uri === value
+  });
+}
+
+async function selectMcpServerForPrompt(baseDir, id, promptName, options) {
+  return selectMcpServerForListedItem(baseDir, id, promptName, options, {
+    valueKey: "promptName",
+    valueLabel: "prompt",
+    lookupFailedCode: "mcp_prompt_lookup_failed",
+    notFoundCode: "mcp_prompt_not_found",
+    ambiguousCode: "ambiguous_mcp_prompt",
+    list: (server) => listOneServerPrompts(baseDir, server, {}, options),
+    getItems: (result) => result.prompts,
+    matches: (item, value) => item?.name === value
+  });
+}
+
+async function selectMcpServerForListedItem(baseDir, id, value, options, config) {
   const target = String(id || "").trim();
   if (target) return selectMcpServer(baseDir, target);
 
@@ -426,7 +465,7 @@ async function selectMcpServerForTool(baseDir, id, toolName, options) {
   for (const server of servers) {
     inspected.push({
       server,
-      result: await listOneServerTools(baseDir, server, options)
+      result: await config.list(server)
     });
   }
 
@@ -435,33 +474,33 @@ async function selectMcpServerForTool(baseDir, id, toolName, options) {
     return {
       ok: false,
       source: "external_mcp_stdio",
-      code: "mcp_tool_lookup_failed",
-      error: `Could not inspect tools for ${failed.length} enabled MCP server(s); provide serverId.`,
-      toolName,
+      code: config.lookupFailedCode,
+      error: `Could not inspect ${config.valueLabel}s for ${failed.length} enabled MCP server(s); provide serverId.`,
+      [config.valueKey]: value,
       servers: inspected.map((item) => item.result)
     };
   }
 
   const matches = inspected.filter((item) =>
-    Array.isArray(item.result.tools) && item.result.tools.some((tool) => tool?.name === toolName)
+    Array.isArray(config.getItems(item.result)) && config.getItems(item.result).some((listed) => config.matches(listed, value))
   );
   if (matches.length === 1) return { ok: true, server: matches[0].server };
   if (!matches.length) {
     return {
       ok: false,
       source: "external_mcp_stdio",
-      code: "mcp_tool_not_found",
-      error: `No enabled external MCP server exposes tool ${toolName}.`,
-      toolName,
+      code: config.notFoundCode,
+      error: `No enabled external MCP server exposes ${config.valueLabel} ${value}.`,
+      [config.valueKey]: value,
       servers: inspected.map((item) => item.result)
     };
   }
   return {
     ok: false,
     source: "external_mcp_stdio",
-    code: "ambiguous_mcp_tool",
-    error: `More than one enabled MCP server exposes tool ${toolName}; provide serverId.`,
-    toolName,
+    code: config.ambiguousCode,
+    error: `More than one enabled MCP server exposes ${config.valueLabel} ${value}; provide serverId.`,
+    [config.valueKey]: value,
     matchingServers: matches.map((item) => ({ id: item.server.id, name: item.server.name })),
     servers: inspected.map((item) => item.result)
   };
