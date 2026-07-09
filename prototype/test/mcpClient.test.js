@@ -59,6 +59,93 @@ test("external MCP client calls configured tools and returns real content", asyn
   assert.match(result.content[0].text, /MCP_CALL_FACT/);
 });
 
+test("external MCP client infers the server when a tool name is unique", async () => {
+  const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-mcp-client-infer-"));
+  const echoScript = writeFakeMcpServer(baseDir, { fileName: "fake-echo.mjs", toolName: "echo" });
+  const searchScript = writeFakeMcpServer(baseDir, { fileName: "fake-search.mjs", toolName: "web_search" });
+  upsertMcpServerConfig(baseDir, {
+    id: "fake-echo",
+    name: "Fake Echo MCP",
+    command: process.execPath,
+    args: [echoScript],
+    cwd: baseDir
+  });
+  upsertMcpServerConfig(baseDir, {
+    id: "fake-search",
+    name: "Fake Search MCP",
+    command: process.execPath,
+    args: [searchScript],
+    cwd: baseDir
+  });
+
+  const result = await callConfiguredMcpTool(baseDir, {
+    mcpToolName: "web_search",
+    arguments: { text: "UNIQUE_MCP_TOOL_FACT" }
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.serverId, "fake-search");
+  assert.equal(result.toolName, "web_search");
+  assert.match(result.content[0].text, /UNIQUE_MCP_TOOL_FACT/);
+});
+
+test("external MCP client reports ambiguous tool names instead of guessing", async () => {
+  const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-mcp-client-ambiguous-"));
+  const firstScript = writeFakeMcpServer(baseDir, { fileName: "fake-first.mjs", toolName: "echo" });
+  const secondScript = writeFakeMcpServer(baseDir, { fileName: "fake-second.mjs", toolName: "echo" });
+  upsertMcpServerConfig(baseDir, {
+    id: "fake-first",
+    name: "Fake First MCP",
+    command: process.execPath,
+    args: [firstScript],
+    cwd: baseDir
+  });
+  upsertMcpServerConfig(baseDir, {
+    id: "fake-second",
+    name: "Fake Second MCP",
+    command: process.execPath,
+    args: [secondScript],
+    cwd: baseDir
+  });
+
+  const result = await callConfiguredMcpTool(baseDir, {
+    mcpToolName: "echo",
+    arguments: { text: "SHOULD_NOT_CALL" }
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.code, "ambiguous_mcp_tool");
+  assert.deepEqual(result.matchingServers.map((item) => item.id), ["fake-first", "fake-second"]);
+});
+
+test("external MCP client reports missing tool names across multiple servers", async () => {
+  const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-mcp-client-not-found-"));
+  const firstScript = writeFakeMcpServer(baseDir, { fileName: "fake-first.mjs", toolName: "echo" });
+  const secondScript = writeFakeMcpServer(baseDir, { fileName: "fake-second.mjs", toolName: "web_search" });
+  upsertMcpServerConfig(baseDir, {
+    id: "fake-first",
+    name: "Fake First MCP",
+    command: process.execPath,
+    args: [firstScript],
+    cwd: baseDir
+  });
+  upsertMcpServerConfig(baseDir, {
+    id: "fake-second",
+    name: "Fake Second MCP",
+    command: process.execPath,
+    args: [secondScript],
+    cwd: baseDir
+  });
+
+  const result = await callConfiguredMcpTool(baseDir, {
+    mcpToolName: "missing_tool"
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.code, "mcp_tool_not_found");
+  assert.equal(result.toolName, "missing_tool");
+});
+
 test("external MCP client lists and reads configured resources", async () => {
   const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-mcp-client-resources-"));
   const serverScript = writeFakeMcpServer(baseDir);
@@ -215,11 +302,13 @@ test("MCP resource and prompt tool requests require full permission", async () =
   assert.equal(fs.existsSync(path.join(groupPath, "shared", "logs", "mcp.jsonl")), true);
 });
 
-function writeFakeMcpServer(dir) {
-  const filePath = path.join(dir, "fake-mcp-server.mjs");
+function writeFakeMcpServer(dir, options = {}) {
+  const toolName = String(options.toolName || "echo");
+  const filePath = path.join(dir, options.fileName || "fake-mcp-server.mjs");
   fs.writeFileSync(filePath, [
     "import readline from 'node:readline';",
     "if (process.env.MCP_SECRET) process.stderr.write(`secret=${process.env.MCP_SECRET}\\n`);",
+    `const toolName = ${JSON.stringify(toolName)};`,
     "const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });",
     "for await (const line of rl) {",
     "  if (!line.trim()) continue;",
@@ -230,12 +319,12 @@ function writeFakeMcpServer(dir) {
     "    continue;",
     "  }",
     "  if (message.method === 'tools/list') {",
-    "    write({ jsonrpc: '2.0', id: message.id, result: { tools: [{ name: 'echo', description: 'Echo arguments', inputSchema: { type: 'object' } }] } });",
+    "    write({ jsonrpc: '2.0', id: message.id, result: { tools: [{ name: toolName, description: 'Echo arguments', inputSchema: { type: 'object' } }] } });",
     "    continue;",
     "  }",
     "  if (message.method === 'tools/call') {",
     "    const payload = { name: message.params?.name, arguments: message.params?.arguments || {} };",
-    "    write({ jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(payload) }], isError: message.params?.name !== 'echo' } });",
+    "    write({ jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(payload) }], isError: message.params?.name !== toolName } });",
     "    continue;",
     "  }",
     "  if (message.method === 'resources/list') {",

@@ -36,7 +36,7 @@ export async function callConfiguredMcpTool(baseDir, request = {}, options = {})
       error: "mcp_call requires mcpToolName."
     };
   }
-  const selection = selectMcpServer(baseDir, request.serverId || request.mcpServerId);
+  const selection = await selectMcpServerForTool(baseDir, request.serverId || request.mcpServerId, toolName, options);
   if (!selection.ok) return selection;
   return callOneServerTool(baseDir, selection.server, {
     toolName,
@@ -405,6 +405,66 @@ function selectMcpServer(baseDir, id) {
     };
   }
   return { ok: true, server };
+}
+
+async function selectMcpServerForTool(baseDir, id, toolName, options) {
+  const target = String(id || "").trim();
+  if (target) return selectMcpServer(baseDir, target);
+
+  const servers = enabledMcpServers(baseDir);
+  if (!servers.length) {
+    return {
+      ok: false,
+      source: "external_mcp_stdio",
+      code: "mcp_server_not_configured",
+      error: "No enabled external MCP server is configured."
+    };
+  }
+  if (servers.length === 1) return { ok: true, server: servers[0] };
+
+  const inspected = [];
+  for (const server of servers) {
+    inspected.push({
+      server,
+      result: await listOneServerTools(baseDir, server, options)
+    });
+  }
+
+  const failed = inspected.filter((item) => !item.result.ok);
+  if (failed.length) {
+    return {
+      ok: false,
+      source: "external_mcp_stdio",
+      code: "mcp_tool_lookup_failed",
+      error: `Could not inspect tools for ${failed.length} enabled MCP server(s); provide serverId.`,
+      toolName,
+      servers: inspected.map((item) => item.result)
+    };
+  }
+
+  const matches = inspected.filter((item) =>
+    Array.isArray(item.result.tools) && item.result.tools.some((tool) => tool?.name === toolName)
+  );
+  if (matches.length === 1) return { ok: true, server: matches[0].server };
+  if (!matches.length) {
+    return {
+      ok: false,
+      source: "external_mcp_stdio",
+      code: "mcp_tool_not_found",
+      error: `No enabled external MCP server exposes tool ${toolName}.`,
+      toolName,
+      servers: inspected.map((item) => item.result)
+    };
+  }
+  return {
+    ok: false,
+    source: "external_mcp_stdio",
+    code: "ambiguous_mcp_tool",
+    error: `More than one enabled MCP server exposes tool ${toolName}; provide serverId.`,
+    toolName,
+    matchingServers: matches.map((item) => ({ id: item.server.id, name: item.server.name })),
+    servers: inspected.map((item) => item.result)
+  };
 }
 
 function selectMcpServers(baseDir, id) {
