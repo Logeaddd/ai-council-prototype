@@ -217,7 +217,6 @@ function SettingsNavItem({
     >
       <Icon className="size-4 shrink-0" />
       <span className="min-w-0 flex-1 truncate">{item.label}</span>
-      {item.disabled ? <span className="text-[10px]">未接入</span> : null}
     </button>
   )
 }
