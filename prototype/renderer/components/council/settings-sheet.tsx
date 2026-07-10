@@ -997,7 +997,7 @@ function mcpCatalogDisplay(item: McpInstallCatalogItem): {
   if (item.runtimeStatus === "disabled" || (item.serverConfigured && item.serverEnabled === false)) {
     return { label: "已停用", action: "重新加入", tone: "neutral", joined: true }
   }
-  if (item.runtimeStatus === "files_missing" || (item.serverConfigured && item.packageInstalled === false)) {
+  if (item.runtimeStatus === "files_missing") {
     return { label: "文件缺失", action: "重新加入", tone: "danger", joined: false }
   }
   if (item.runtimeStatus === "package_only" || (item.packageInstalled && !item.serverConfigured)) {
