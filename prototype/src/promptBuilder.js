@@ -73,6 +73,7 @@ export function buildFinalPrompt(judge, session, consensus, options = {}) {
         "[Software protocol]",
         "Return only a FinalDecision JSON object.",
         "Required keys: answer, consensus_score, supporting_agents, dissenting_agents, minority_report, risks, next_actions, selected_file_operation_ids, memory_candidates.",
+        "If answer claims that any workspace file or directory exists, was created, built, generated, packaged, or exported, also include deliverables. Each deliverables item must have path (relative to the group workspace), claim (created or existing), and evidence_ids (successful current-session tool result ids or file-operation proposal ids). Do not claim successful creation from failed, timed-out, or background tool calls.",
         "The answer field must be a substantive final summary. Never set answer to skip, and never output a round-style skip response in the final call.",
         "Use answer for a user-facing synthesis. Do not treat answer as the executable source of truth.",
         "If session artifacts contain runnable code, plans, or durable deliverables, reference the latest relevant artifacts in answer instead of rewriting or inventing them.",

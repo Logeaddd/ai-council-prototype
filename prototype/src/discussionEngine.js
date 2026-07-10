@@ -21,6 +21,7 @@ import { readPrivateContextMessages } from "./privateChat.js";
 import { normalizeFileAttachments } from "./attachments.js";
 import { readTaskState, updateTaskStateFromSession } from "./taskState.js";
 import { discoverRuntimeEnvironment, formatRuntimeEnvironment } from "./runtimeEnvironment.js";
+import { applyDeliverableVerification, verifyFinalDeliverables } from "./deliverableVerification.js";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -427,6 +428,10 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
     });
     session.finalDecision.file_execution_state = fileExecution.state;
     session.finalDecision.file_execution_results = fileExecution.results;
+    applyDeliverableVerification(session, verifyFinalDeliverables({
+      groupPath: options.groupPath,
+      session
+    }));
   }
   session.finalDecision.memory_candidates = limitMemoryCandidates(session.finalDecision.memory_candidates);
   session.completedAt = nowIso();

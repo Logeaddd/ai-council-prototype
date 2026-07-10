@@ -317,6 +317,24 @@ test("workspace round prompt requires file_operations for file-writing tasks", (
   assert.match(messages[0].content, /file_operations\.content/);
 });
 
+test("final prompt requires evidence ids for workspace deliverable claims", () => {
+  const messages = buildFinalPrompt({
+    id: "judge",
+    name: "Judge",
+    role: "Finalizer",
+    judge: true
+  }, {
+    question: "Build a package.",
+    messages: [],
+    artifacts: [],
+    unresolvedObjections: {}
+  }, { score: 1, supportingAgents: [], dissentingAgents: [] });
+
+  assert.match(messages[0].content, /also include deliverables/);
+  assert.match(messages[0].content, /evidence_ids/);
+  assert.match(messages[0].content, /failed, timed-out, or background tool calls/);
+});
+
 test("text-only workspace round prompt does not ask the member to propose file_operations", () => {
   const messages = buildRoundPrompt({
     id: "architect",

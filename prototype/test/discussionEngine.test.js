@@ -527,6 +527,195 @@ test("finalizer is still called after a large real tool-result batch is budgeted
   }
 });
 
+test("successful current-session command verifies a claimed deliverable before session save", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-deliverable-engine-ok-"));
+  fs.writeFileSync(path.join(tmp, "group.json"), JSON.stringify({
+    permissions: {
+      defaultTier: "full",
+      seatTiers: { builder: "full", judge: "text" }
+    }
+  }), "utf8");
+  fs.writeFileSync(path.join(tmp, "package.json"), JSON.stringify({
+    name: "deliverable-engine-test",
+    private: true,
+    scripts: { build: "node build-script.js" }
+  }), "utf8");
+  fs.writeFileSync(path.join(tmp, "build-script.js"), "const fs=require('fs');fs.mkdirSync('dist',{recursive:true});fs.writeFileSync('dist/app.bin','REAL_ENGINE_DELIVERABLE');\n", "utf8");
+  const command = "npm run build";
+  const requestBodies = [];
+  const server = http.createServer(async (req, res) => {
+    const body = JSON.parse(await readRequestBody(req));
+    requestBodies.push(body);
+    const prompt = JSON.stringify(body.messages || []);
+    if (prompt.includes("FinalDecision JSON object")) {
+      writeOpenAiStream(res, JSON.stringify({
+        answer: "Built `dist/app.bin` successfully.",
+        consensus_score: 1,
+        supporting_agents: ["Builder"],
+        dissenting_agents: [],
+        minority_report: "",
+        risks: [],
+        next_actions: [],
+        selected_file_operation_ids: [],
+        deliverables: [{ path: "dist/app.bin", claim: "created", evidence_ids: ["tool-build"] }],
+        memory_candidates: []
+      }));
+      return;
+    }
+    if (requestBodies.length === 1) {
+      writeOpenAiStream(res, JSON.stringify({
+        status: "speak",
+        argument: "Create the requested deliverable with a real command.",
+        tool_requests: [{
+          id: "tool-build",
+          tool: "execute_command",
+          command,
+          shell: "system",
+          reason: "Create the real deliverable."
+        }],
+        objections: [],
+        confidence: 0.7,
+        memory_candidates: []
+      }));
+      return;
+    }
+    writeOpenAiStream(res, JSON.stringify({
+      status: "speak",
+      argument: "The command completed and its evidence id is tool-build.",
+      objections: [],
+      confidence: 0.95,
+      memory_candidates: []
+    }));
+  });
+  await listen(server);
+  const address = server.address();
+  const baseAgent = {
+    provider: "openai-compatible",
+    apiBaseUrl: `http://127.0.0.1:${address.port}/v1`,
+    allowUnsafePrivateNetwork: true,
+    apiKey: "secret-runtime-key",
+    model: "deliverable-model",
+    providerLimits: { contextWindow: 12000, maxOutputTokens: 1000 },
+    weight: 1,
+    enabled: true
+  };
+
+  try {
+    const group = validateGroupConfig({
+      id: "deliverable-engine-ok",
+      name: "Deliverable Engine OK",
+      settings: {
+        maxRounds: 1,
+        minConsensusWeight: 1,
+        stopWhenAllSkip: true,
+        agentTimeoutMs: 3000
+      },
+      agents: [
+        { ...baseAgent, id: "builder", name: "Builder", role: "Builder" },
+        { ...baseAgent, id: "judge", name: "Judge", role: "Finalizer", judge: true }
+      ]
+    });
+    const result = await runCouncil("Create a deliverable.", group, tmp, { groupPath: tmp });
+    const verification = result.session.finalDecision.deliverable_verification;
+    const saved = JSON.parse(fs.readFileSync(result.sessionPath, "utf8"));
+
+    assert.equal(requestBodies.length, 3);
+    assert.equal(result.session.toolExecutionResults[0].id, "tool-build");
+    assert.equal(result.session.toolExecutionResults[0].status, "completed");
+    assert.equal(verification.status, "verified");
+    assert.equal(verification.claims[0].status, "verified_built");
+    assert.deepEqual(verification.claims[0].evidence_ids, ["tool-build"]);
+    assert.match(verification.claims[0].sha256, /^[0-9a-f]{64}$/);
+    assert.equal(result.session.finalDecision.final_state, "ready_to_execute");
+    assert.match(result.session.finalDecision.answer, /已验证为本轮构建/);
+    assert.equal(saved.finalDecision.deliverable_verification.claims[0].sha256, verification.claims[0].sha256);
+  } finally {
+    await close(server);
+  }
+});
+
+test("pre-existing file without current-session evidence cannot stay ready", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-deliverable-engine-old-"));
+  fs.mkdirSync(path.join(tmp, "build"), { recursive: true });
+  const oldFile = path.join(tmp, "build", "old.jar");
+  fs.writeFileSync(oldFile, "PREVIOUS_SESSION_ARTIFACT", "utf8");
+  const oldTime = new Date(Date.now() - 60 * 60 * 1000);
+  fs.utimesSync(oldFile, oldTime, oldTime);
+  fs.writeFileSync(path.join(tmp, "group.json"), JSON.stringify({
+    permissions: { defaultTier: "text", seatTiers: { builder: "text", judge: "text" } }
+  }), "utf8");
+  const requestBodies = [];
+  const server = http.createServer(async (req, res) => {
+    const body = JSON.parse(await readRequestBody(req));
+    requestBodies.push(body);
+    const prompt = JSON.stringify(body.messages || []);
+    if (prompt.includes("FinalDecision JSON object")) {
+      writeOpenAiStream(res, JSON.stringify({
+        answer: "Build completed at `build/old.jar`.",
+        consensus_score: 1,
+        supporting_agents: ["Builder"],
+        dissenting_agents: [],
+        minority_report: "",
+        risks: [],
+        next_actions: [],
+        selected_file_operation_ids: [],
+        memory_candidates: []
+      }));
+      return;
+    }
+    writeOpenAiStream(res, JSON.stringify({
+      status: "speak",
+      argument: "I did not run a build in this session.",
+      objections: [],
+      confidence: 0.2,
+      memory_candidates: []
+    }));
+  });
+  await listen(server);
+  const address = server.address();
+  const baseAgent = {
+    provider: "openai-compatible",
+    apiBaseUrl: `http://127.0.0.1:${address.port}/v1`,
+    allowUnsafePrivateNetwork: true,
+    apiKey: "secret-runtime-key",
+    model: "deliverable-model",
+    providerLimits: { contextWindow: 12000, maxOutputTokens: 1000 },
+    weight: 1,
+    enabled: true
+  };
+
+  try {
+    const group = validateGroupConfig({
+      id: "deliverable-engine-old",
+      name: "Deliverable Engine Old",
+      settings: {
+        maxRounds: 1,
+        minConsensusWeight: 1,
+        stopWhenAllSkip: true,
+        agentTimeoutMs: 3000
+      },
+      agents: [
+        { ...baseAgent, id: "builder", name: "Builder", role: "Builder" },
+        { ...baseAgent, id: "judge", name: "Judge", role: "Finalizer", judge: true }
+      ]
+    });
+    const result = await runCouncil("Build a deliverable.", group, tmp, { groupPath: tmp });
+    const verification = result.session.finalDecision.deliverable_verification;
+    const saved = JSON.parse(fs.readFileSync(result.sessionPath, "utf8"));
+
+    assert.equal(requestBodies.length, 2);
+    assert.equal(result.session.toolExecutionResults.length, 0);
+    assert.equal(verification.status, "needs_revision");
+    assert.equal(verification.claims[0].status, "exists_unverified");
+    assert.equal(result.session.finalDecision.final_state, "needs_revision");
+    assert.match(result.session.finalDecision.risks.join("\n"), /not verified by successful current-session evidence/);
+    assert.equal(saved.finalDecision.final_state, "needs_revision");
+    assert.equal(saved.finalDecision.deliverable_verification.claims[0].status, "exists_unverified");
+  } finally {
+    await close(server);
+  }
+});
+
 test("tool loop blocks an identical failed command and keeps the failure available for recovery", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-tool-repeat-"));
   fs.writeFileSync(path.join(tmp, "group.json"), JSON.stringify({

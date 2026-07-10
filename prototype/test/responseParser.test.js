@@ -204,3 +204,23 @@ test("final parser leaves absent selected file operation ids undefined", () => {
 
   assert.equal(parsed.selected_file_operation_ids, undefined);
 });
+
+test("final parser preserves structured deliverable claims and evidence ids", () => {
+  const parsed = parseFinalDecision(JSON.stringify({
+    answer: "Built the artifact.",
+    consensus_score: 1,
+    supporting_agents: ["Builder"],
+    dissenting_agents: [],
+    minority_report: "None.",
+    risks: [],
+    next_actions: [],
+    deliverables: [
+      { path: "dist/app.jar", claim: "built", evidence_ids: ["tool-build"] }
+    ],
+    memory_candidates: []
+  }), { answer: "Fallback.", consensus_score: 0, minority_report: "Fallback." });
+
+  assert.deepEqual(parsed.deliverables, [
+    { path: "dist/app.jar", claim: "built", evidence_ids: ["tool-build"] }
+  ]);
+});

@@ -1,6 +1,7 @@
 import { ROUND_STATUSES } from "./types.js";
 import { normalizeObjectionItems, normalizeResolvedIds } from "./objectionLedger.js";
 import { normalizeToolRequests } from "./toolRequests.js";
+import { normalizeDeliverableClaims } from "./deliverableVerification.js";
 
 export function parseRoundResponse(rawText) {
   const parsed = parseJsonLike(rawText);
@@ -54,6 +55,9 @@ export function parseFinalDecision(rawText, fallback) {
       unresolved_risks: normalizeIssueArray(parsed.unresolved_risks),
       selected_file_operation_ids: Array.isArray(parsed.selected_file_operation_ids)
         ? normalizeStringArray(parsed.selected_file_operation_ids)
+        : undefined,
+      deliverables: Array.isArray(parsed.deliverables)
+        ? normalizeDeliverableClaims(parsed.deliverables)
         : undefined,
       memory_candidates: normalizeStringArray(parsed.memory_candidates)
     };
