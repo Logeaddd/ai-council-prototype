@@ -150,6 +150,52 @@ test("remote skill install reads a real bounded HTTP response and stores source 
   }
 });
 
+test("remote skill source facts omit signed query parameters and fragments", async () => {
+  const { baseDir, dataDir } = makeRoots();
+  const previous = process.env.AI_COUNCIL_DATA_DIR;
+  process.env.AI_COUNCIL_DATA_DIR = dataDir;
+  try {
+    const result = await installRemoteSkillPack(baseDir, {
+      url: "https://example.com/SKILL.md?token=SECRET_QUERY_VALUE#fragment"
+    }, {
+      fetchText: async (url) => ({ ok: true, url, text: markdown("signed-skill"), truncated: false })
+    });
+    assert.equal(result.skill.sourceUrl, "https://example.com/SKILL.md");
+    assert.doesNotMatch(JSON.stringify(result), /SECRET_QUERY_VALUE|fragment/);
+  } finally {
+    if (previous === undefined) delete process.env.AI_COUNCIL_DATA_DIR;
+    else process.env.AI_COUNCIL_DATA_DIR = previous;
+  }
+});
+
+test("skill tool records omit signed URL queries even when installation is rejected", async () => {
+  const { baseDir, dataDir, groupPath } = makeRoots();
+  const previous = process.env.AI_COUNCIL_DATA_DIR;
+  process.env.AI_COUNCIL_DATA_DIR = dataDir;
+  try {
+    const result = await executeToolRequests({
+      baseDir,
+      groupPath,
+      permissionTier: "tool",
+      agent: { id: "tool", name: "Tool" },
+      round: 1,
+      requests: [{
+        tool: "skill_install",
+        skillUrl: "https://example.com/SKILL.md?token=SECRET_QUERY_VALUE#fragment",
+        reason: "Install remote instructions."
+      }]
+    });
+    const serialized = JSON.stringify(result);
+    assert.equal(result.rejected[0].skillUrl, "https://example.com/SKILL.md");
+    assert.doesNotMatch(serialized, /SECRET_QUERY_VALUE|fragment/);
+    assert.doesNotMatch(fs.readFileSync(path.join(groupPath, "shared", "logs", "tools.jsonl"), "utf8"), /SECRET_QUERY_VALUE|fragment/);
+    assert.doesNotMatch(fs.readFileSync(path.join(groupPath, "shared", "logs", "skills.jsonl"), "utf8"), /SECRET_QUERY_VALUE|fragment/);
+  } finally {
+    if (previous === undefined) delete process.env.AI_COUNCIL_DATA_DIR;
+    else process.env.AI_COUNCIL_DATA_DIR = previous;
+  }
+});
+
 test("skill search labels GitHub results as unverified repository candidates", async () => {
   const response = await searchSkillCandidates("deploy", {
     endpoint: "http://127.0.0.1/search",

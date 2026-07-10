@@ -753,7 +753,7 @@ function reject(request, code, reason) {
     promptName: request.promptName,
     promptArguments: request.promptArguments ? summarizeBodyForStorage(request.promptArguments) : undefined,
     skillId: request.skillId,
-    skillUrl: request.skillUrl,
+    skillUrl: safeSkillUrlForStorage(request.skillUrl),
     skillMarkdown: request.skillMarkdown ? summarizeBodyForStorage(request.skillMarkdown) : undefined,
     mode: request.mode,
     maxRows: request.maxRows,
@@ -824,7 +824,7 @@ function resultRecord(request, extra) {
     promptName: request.promptName,
     promptArguments: request.promptArguments ? summarizeBodyForStorage(request.promptArguments) : undefined,
     skillId: request.skillId,
-    skillUrl: request.skillUrl,
+    skillUrl: safeSkillUrlForStorage(request.skillUrl),
     skillMarkdown: request.skillMarkdown ? summarizeBodyForStorage(request.skillMarkdown) : undefined,
     mode: request.mode,
     maxRows: request.maxRows,
@@ -923,7 +923,7 @@ function toolEvent(type, request, extra = {}) {
     promptName: request.promptName,
     promptArguments: request.promptArguments ? summarizeBodyForStorage(request.promptArguments) : undefined,
     skillId: request.skillId,
-    skillUrl: request.skillUrl,
+    skillUrl: safeSkillUrlForStorage(request.skillUrl),
     skillMarkdown: request.skillMarkdown ? summarizeBodyForStorage(request.skillMarkdown) : undefined,
     mode: request.mode,
     maxRows: request.maxRows,
@@ -1284,7 +1284,7 @@ function appendSkillToolAuditLog(groupPath, action, item) {
       source_agent_id: item.source_agent_id,
       source_agent_name: item.source_agent_name,
       skillId: item.result?.skill?.id || item.result?.id || item.skillId,
-      skillUrl: safeUrlForEvent(item.skillUrl),
+      skillUrl: safeSkillUrlForStorage(item.skillUrl),
       query: item.query,
       resultSummary: summarizeToolResult(item),
       createdAt: nowIso()
@@ -1660,7 +1660,7 @@ function safeRequestForStorage(request) {
     promptName: request.promptName,
     promptArguments: request.promptArguments ? summarizeBodyForStorage(request.promptArguments) : undefined,
     skillId: request.skillId,
-    skillUrl: safeUrlForEvent(request.skillUrl),
+    skillUrl: safeSkillUrlForStorage(request.skillUrl),
     skillMarkdown: request.skillMarkdown ? summarizeBodyForStorage(request.skillMarkdown) : undefined,
     mode: request.mode,
     maxRows: request.maxRows,
@@ -1684,6 +1684,15 @@ function safeUrlForEvent(value) {
   } catch {
     return "";
   }
+}
+
+function safeSkillUrlForStorage(value) {
+  const safe = safeUrlForEvent(value);
+  if (!safe) return "";
+  const url = new URL(safe);
+  url.search = "";
+  url.hash = "";
+  return url.toString();
 }
 
 function safeCommandForStorage(value) {

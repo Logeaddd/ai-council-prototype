@@ -227,8 +227,8 @@ export async function installRemoteSkillPack(baseDir, input = {}, options = {}) 
     id: input.skillId || input.id,
     overwrite: Boolean(input.overwrite),
     sourceType: "remote_url",
-    source: response.url || sourceUrl,
-    sourceUrl: response.url || sourceUrl
+    source: skillSourceUrlForStorage(response.url || sourceUrl),
+    sourceUrl: skillSourceUrlForStorage(response.url || sourceUrl)
   });
 }
 
@@ -419,6 +419,15 @@ function normalizeSkillSourceUrl(value) {
       return `https://raw.githubusercontent.com/${parts[0]}/${parts[1]}/${parts.slice(3).join("/")}`;
     }
   }
+  return url.toString();
+}
+
+function skillSourceUrlForStorage(value) {
+  const url = new URL(String(value || ""));
+  url.username = "";
+  url.password = "";
+  url.search = "";
+  url.hash = "";
   return url.toString();
 }
 
