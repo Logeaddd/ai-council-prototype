@@ -467,9 +467,11 @@ export interface McpInstallCatalogItem {
   verifiedSource?: string
   verifiedAt?: string
   installed?: boolean
+  packageInstalled?: boolean
   installedVersion?: string
   serverConfigured?: boolean
   serverEnabled?: boolean
+  runtimeStatus?: string
 }
 
 export interface McpSearchResult {

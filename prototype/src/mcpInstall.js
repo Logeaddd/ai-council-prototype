@@ -64,12 +64,18 @@ export function listMcpInstallCatalog(baseDir) {
       const record = readInstallRecord(baseDir, item.id);
       const server = configs.find((config) => config.id === item.id);
       const builtIn = item.manager === "builtin";
+      const serverConfigured = Boolean(server);
+      const serverEnabled = server ? server.enabled !== false : false;
+      const packageInstalled = builtIn ? false : Boolean(record?.installedAt && fs.existsSync(record.installDir || ""));
+      const installed = builtIn ? serverConfigured : serverConfigured && packageInstalled;
       return {
         ...item,
-        installed: builtIn ? Boolean(server) : Boolean(record?.installedAt && fs.existsSync(record.installDir || "")),
+        installed,
+        packageInstalled,
         installedVersion: record?.packageVersion || "",
-        serverConfigured: Boolean(server),
-        serverEnabled: server ? server.enabled !== false : false
+        serverConfigured,
+        serverEnabled,
+        runtimeStatus: catalogRuntimeStatus({ builtIn, packageInstalled, serverConfigured, serverEnabled })
       };
     })
   };
@@ -298,6 +304,14 @@ function defaultArgsForCatalog(catalogItem, baseDir, input = {}, options = {}) {
     return [resolved];
   }
   return catalogItem?.defaultArgs;
+}
+
+function catalogRuntimeStatus({ builtIn, packageInstalled, serverConfigured, serverEnabled }) {
+  if (!serverConfigured && !packageInstalled) return "not_installed";
+  if (!serverConfigured && packageInstalled) return "package_only";
+  if (serverConfigured && !serverEnabled) return "disabled";
+  if (!builtIn && serverConfigured && !packageInstalled) return "files_missing";
+  return "ready";
 }
 
 export function uninstallManagedMcpServer(baseDir, input = {}) {

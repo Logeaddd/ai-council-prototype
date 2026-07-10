@@ -5,7 +5,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { callConfiguredMcpTool, listConfiguredMcpTools } from "../src/mcpClient.js";
 import { installMcpNpmServer, listMcpInstallCatalog, mcpInstallRoot, searchMcpNpmPackages, uninstallManagedMcpServer } from "../src/mcpInstall.js";
-import { readMcpServerConfigs } from "../src/mcpConfig.js";
+import { deleteMcpServerConfig, readMcpServerConfigs } from "../src/mcpConfig.js";
 import { executeToolRequests } from "../src/toolRequests.js";
 
 test("MCP install catalog reports presets without pretending they are installed", () => {
@@ -15,6 +15,8 @@ test("MCP install catalog reports presets without pretending they are installed"
   assert.equal(catalog.catalog.some((item) => item.id === "filesystem"), true);
   assert.equal(catalog.catalog.some((item) => item.id === "web-tools"), true);
   assert.equal(catalog.catalog.find((item) => item.id === "filesystem").installed, false);
+  assert.equal(catalog.catalog.find((item) => item.id === "filesystem").packageInstalled, false);
+  assert.equal(catalog.catalog.find((item) => item.id === "filesystem").runtimeStatus, "not_installed");
   assert.equal(catalog.catalog.find((item) => item.id === "memory").serverConfigured, false);
 });
 
@@ -34,7 +36,33 @@ test("built-in web MCP tools can be joined without npm install", async () => {
   assert.equal(server.source, "built_in");
   assert.deepEqual(listed.servers[0].tools.map((tool) => tool.name), ["web_search", "fetch_url"]);
   assert.equal(catalog.catalog.find((item) => item.id === "web-tools").installed, true);
+  assert.equal(catalog.catalog.find((item) => item.id === "web-tools").runtimeStatus, "ready");
   assert.match(installed.server.args[0], /mcpServer\.js/);
+});
+
+test("MCP catalog separates package files from joined server config", async () => {
+  const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-mcp-catalog-state-"));
+  const packageDir = writeFakeMcpPackage(baseDir);
+
+  const installed = await installMcpNpmServer(baseDir, {
+    id: "filesystem",
+    packageSpec: packageDir,
+    installedPackageName: "fake-mcp-package",
+    binName: "fake-mcp"
+  });
+  const ready = listMcpInstallCatalog(baseDir).catalog.find((item) => item.id === "filesystem");
+  deleteMcpServerConfig(baseDir, "filesystem");
+  const packageOnly = listMcpInstallCatalog(baseDir).catalog.find((item) => item.id === "filesystem");
+
+  assert.equal(installed.ok, true);
+  assert.equal(ready.packageInstalled, true);
+  assert.equal(ready.serverConfigured, true);
+  assert.equal(ready.installed, true);
+  assert.equal(ready.runtimeStatus, "ready");
+  assert.equal(packageOnly.packageInstalled, true);
+  assert.equal(packageOnly.serverConfigured, false);
+  assert.equal(packageOnly.installed, false);
+  assert.equal(packageOnly.runtimeStatus, "package_only");
 });
 
 test("MCP npm search reads real registry payloads without fake installed state", async () => {
