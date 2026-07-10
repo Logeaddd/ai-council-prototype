@@ -11,7 +11,7 @@ import { appendCompressedTranscriptChunk, readSummaryCache, writeGroupSharedSumm
 import { appendSessionUsage, readGroupUsage } from "../src/usageStats.js";
 import { approveExecutionStandards, prepareExecutionStandards } from "../src/executionStandards.js";
 import { appendPrivateChatMessage } from "../src/privateChat.js";
-import { upsertPublicMemory } from "../src/publicMemory.js";
+import { listPublicMemories, upsertPublicMemory } from "../src/publicMemory.js";
 import { writeContextArchive } from "../src/storage.js";
 import { enableSkillForGroup, installSkillMarkdown } from "../src/skillPacks.js";
 
@@ -5210,6 +5210,94 @@ test("public memory reaches model prompts as editable shared memory", async () =
     assert.match(firstPrompt, /PUBLIC_MEMORY_RUNTIME_SECRET/);
     assert.match(firstPrompt, /editable summary, not as the original facts/);
     assert.match(firstPrompt, /Source: summarizer/);
+  } finally {
+    await close(server);
+  }
+});
+
+test("final summarizer durable memory is saved once and reaches the next provider prompt", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-summarizer-memory-runtime-"));
+  const groupPath = path.join(tmp, "group");
+  fs.mkdirSync(groupPath, { recursive: true });
+  const requests = [];
+  const server = http.createServer(async (req, res) => {
+    const body = JSON.parse(await readRequestBody(req));
+    requests.push(body);
+    const prompt = JSON.stringify(body.messages || []);
+    if (prompt.includes("FinalDecision JSON object")) {
+      writeOpenAiStream(res, JSON.stringify({
+        answer: "Final summary complete.",
+        consensus_score: 1,
+        supporting_agents: ["Builder"],
+        dissenting_agents: [],
+        minority_report: "",
+        risks: [],
+        next_actions: [],
+        selected_file_operation_ids: [],
+        memory_candidates: [
+          "Project rule: SUMMARIZER_DURABLE_MEMORY must remain visible.",
+          "Next action: this discussion should run another check."
+        ]
+      }));
+      return;
+    }
+    writeOpenAiStream(res, JSON.stringify({
+      status: "speak",
+      argument: "Builder response.",
+      objections: [],
+      confidence: 0.9,
+      memory_candidates: []
+    }));
+  });
+  await listen(server);
+  const apiBaseUrl = `http://127.0.0.1:${server.address().port}/v1`;
+
+  try {
+    fs.writeFileSync(path.join(groupPath, "group.json"), JSON.stringify({
+      id: "summarizer-memory-runtime",
+      seats: [
+        { seatId: "builder", displayName: "Builder", privateFolder: "members/Builder" },
+        { seatId: "finalizer", displayName: "Finalizer", privateFolder: "members/Finalizer", judge: true }
+      ],
+      permissions: { defaultTier: "text", seatTiers: {} },
+      settings: {}
+    }, null, 2), "utf8");
+    const baseAgent = {
+      provider: "openai-compatible",
+      apiBaseUrl,
+      allowUnsafePrivateNetwork: true,
+      apiKey: "secret-runtime-key",
+      model: "runtime-model",
+      weight: 1,
+      enabled: true,
+      providerLimits: { contextWindow: 12000, maxOutputTokens: 1000 }
+    };
+    const group = validateGroupConfig({
+      id: "summarizer-memory-runtime",
+      name: "Summarizer Memory Runtime",
+      settings: { maxRounds: 1, minConsensusWeight: 1, stopWhenAllSkip: true, agentTimeoutMs: 1000 },
+      agents: [
+        { ...baseAgent, id: "builder", name: "Builder", role: "Builder" },
+        { ...baseAgent, id: "finalizer", name: "Finalizer", role: "Finalizer", judge: true }
+      ]
+    });
+
+    const first = await runCouncil("Store a durable project rule.", group, tmp, { groupPath });
+    assert.equal(first.session.publicMemoryUpdate.status, "saved");
+    assert.equal(first.session.publicMemoryUpdate.savedCount, 1);
+    assert.equal(first.session.publicMemoryUpdate.durableCount, 1);
+    assert.equal(listPublicMemories(groupPath).length, 1);
+    assert.equal(listPublicMemories(groupPath)[0].sourceAgentId, "finalizer");
+    assert.equal(listPublicMemories(groupPath)[0].sourceSessionId, first.session.id);
+
+    const secondStart = requests.length;
+    const second = await runCouncil("Use the durable project rule.", group, tmp, { groupPath });
+    const secondPrompts = requests.slice(secondStart).map((body) => JSON.stringify(body.messages || [])).join("\n");
+    assert.match(secondPrompts, /SUMMARIZER_DURABLE_MEMORY/);
+    assert.match(secondPrompts, /editable summary; not original fact/);
+    assert.equal(second.session.publicMemoryUpdate.status, "no_new_memory");
+    assert.equal(second.session.publicMemoryUpdate.duplicateCount, 1);
+    assert.equal(listPublicMemories(groupPath).length, 1);
   } finally {
     await close(server);
   }

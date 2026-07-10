@@ -8,7 +8,7 @@ import { appendMemoryCandidates, searchSessionContextArchive, writeContextArchiv
 import { assessBudgetUsage, assessSizeUsage } from "./tokenLimits.js";
 import { appendSessionTranscriptChunk, readSummaryCache, updateDeterministicSummaries } from "./summaryCache.js";
 import { appendSessionUsage, estimateCost, estimateMemberAccruedCost } from "./usageStats.js";
-import { formatPublicMemoriesForPrompt } from "./publicMemory.js";
+import { appendSummarizerPublicMemories, formatPublicMemoriesForPrompt } from "./publicMemory.js";
 import { applyObjectionLedger, isReviewerLike } from "./objectionLedger.js";
 import { computeFinalState } from "./finalState.js";
 import { parseFileOperationProposals } from "./fileOperations.js";
@@ -440,6 +440,10 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
     }));
   }
   session.finalDecision.memory_candidates = limitMemoryCandidates(session.finalDecision.memory_candidates);
+  session.publicMemoryUpdate = persistSummarizerPublicMemory(options.groupPath, session.finalDecision.memory_candidates, {
+    sessionId: session.id,
+    agent: judge
+  });
   session.completedAt = nowIso();
   session.durationMs = elapsedMs(sessionStartMs);
   session.status = "completed";
@@ -480,6 +484,29 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
     result,
     createdAt: nowIso()
   };
+}
+
+function persistSummarizerPublicMemory(groupPath, candidates, options = {}) {
+  if (!groupPath) {
+    return {
+      status: "not_applicable",
+      reason: "group_workspace_unavailable",
+      candidateCount: Array.isArray(candidates) ? candidates.length : 0
+    };
+  }
+  try {
+    return appendSummarizerPublicMemories(groupPath, candidates, {
+      sourceSessionId: options.sessionId,
+      sourceAgentId: options.agent?.id,
+      sourceAgentName: options.agent?.name
+    });
+  } catch (error) {
+    return {
+      status: "failed",
+      candidateCount: Array.isArray(candidates) ? candidates.length : 0,
+      error: String(error?.message || error || "public_memory_write_failed").slice(0, 500)
+    };
+  }
 }
 
 async function* callRoundModel({ options, session, phase, round, agent, messages, timeoutMs, toolIteration }) {

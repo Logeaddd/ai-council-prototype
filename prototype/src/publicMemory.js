@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { makeId, nowIso } from "./types.js";
+import { filterDurableMemoryCandidates } from "./storage.js";
 
 const MAX_MEMORY_ITEMS = 80;
 const MAX_MEMORY_TEXT = 4000;
@@ -40,6 +41,46 @@ export function deletePublicMemory(groupPath, id) {
   return { ok: true, deleted: before.length !== items.length, id: clean };
 }
 
+export function appendSummarizerPublicMemories(groupPath, candidates, options = {}) {
+  const durable = filterDurableMemoryCandidates(Array.isArray(candidates) ? candidates : [])
+    .map((item) => cleanText(item, MAX_MEMORY_TEXT))
+    .filter(Boolean);
+  const current = listPublicMemories(groupPath);
+  const known = new Set(current.map((item) => normalizedContentKey(item.content)));
+  const saved = [];
+  let duplicates = 0;
+
+  for (const content of durable) {
+    const key = normalizedContentKey(content);
+    if (!key || known.has(key)) {
+      duplicates += 1;
+      continue;
+    }
+    known.add(key);
+    saved.push(normalizeMemoryRecord({
+      title: memoryTitle(content),
+      content,
+      source: "summarizer",
+      sourceSessionId: options.sourceSessionId,
+      sourceAgentId: options.sourceAgentId,
+      createdBy: options.sourceAgentName || options.sourceAgentId || "summarizer",
+      provenance: "editable_summary_not_original_fact"
+    }));
+  }
+
+  if (saved.length) {
+    writePublicMemoryFile(groupPath, [...current, ...saved].slice(-MAX_MEMORY_ITEMS));
+  }
+  return {
+    status: saved.length ? "saved" : "no_new_memory",
+    candidateCount: Array.isArray(candidates) ? candidates.length : 0,
+    durableCount: durable.length,
+    savedCount: saved.length,
+    duplicateCount: duplicates,
+    savedIds: saved.map((item) => item.id)
+  };
+}
+
 export function formatPublicMemoriesForPrompt(groupPath) {
   const items = listPublicMemories(groupPath);
   if (!items.length) return "";
@@ -49,8 +90,10 @@ export function formatPublicMemoriesForPrompt(groupPath) {
       return [
         `Memory ${index + 1}: ${item.title || item.id}`,
         `Source: ${item.source || "unknown"}`,
+        item.sourceAgentId ? `Source member: ${item.sourceAgentId}` : "",
         `Updated: ${item.updatedAt || item.createdAt || "unknown"}`,
         item.sourceSessionId ? `Source session: ${item.sourceSessionId}` : "",
+        item.provenance === "editable_summary_not_original_fact" ? "Provenance: editable summary; not original fact" : "",
         item.content
       ].filter(Boolean).join("\n");
     })
@@ -64,7 +107,9 @@ function normalizeMemoryRecord(record = {}) {
     content: cleanText(record.content, MAX_MEMORY_TEXT),
     source: cleanText(record.source || "user", 80),
     sourceSessionId: cleanText(record.sourceSessionId || "", 120),
+    sourceAgentId: cleanText(record.sourceAgentId || "", 120),
     createdBy: cleanText(record.createdBy || "user", 80),
+    provenance: cleanText(record.provenance || "", 120),
     createdAt: cleanText(record.createdAt || nowIso(), 80),
     updatedAt: cleanText(record.updatedAt || record.createdAt || nowIso(), 80)
   };
@@ -86,4 +131,14 @@ function cleanText(value, max) {
 
 function cleanId(value) {
   return String(value || "").trim().replace(/[^a-zA-Z0-9_.:-]/g, "_").slice(0, 120);
+}
+
+function normalizedContentKey(value) {
+  return String(value || "").trim().replace(/\s+/g, " ").toLocaleLowerCase("en-US");
+}
+
+function memoryTitle(value) {
+  const text = String(value || "").trim().replace(/\s+/g, " ");
+  return cleanText(text.replace(/^(user prefers|user wants|user requires|remember\s*:|project rule\s*:|durable memory\s*:|preference\s*:|用户偏好\s*[：:]|用户希望|用户要求|记住\s*[：:]|项目规则\s*[：:]|长期记忆\s*[：:]|偏好\s*[：:])\s*/i, ""), 80)
+    || "Summarizer memory";
 }

@@ -561,11 +561,11 @@ export function filterDurableMemoryCandidates(candidates) {
 }
 
 function hasDurablePrefix(text) {
-  return /^(user prefers|user wants|user requires|remember:|project rule:|durable memory:|preference:)/i.test(text);
+  return /^(user prefers|user wants|user requires|remember\s*:|project rule\s*:|durable memory\s*:|preference\s*:|用户偏好\s*[：:]|用户希望|用户要求|记住\s*[：:]|项目规则\s*[：:]|长期记忆\s*[：:]|偏好\s*[：:])/i.test(text);
 }
 
 function hasEphemeralMeetingLanguage(text) {
-  return /\b(decision|risk|next action|minority report|critic|judge|builder|smoke test|this session|this discussion)\b/i.test(text);
+  return /\b(decision|risk|next action|minority report|critic|judge|builder|smoke test|this session|this discussion)\b|本次会话|本次讨论|本轮|下一步|少数意见|审查者|总结者|构建者|冒烟测试/i.test(text);
 }
 
 export function readMemoryPending(baseDir) {
