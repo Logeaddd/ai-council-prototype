@@ -138,7 +138,7 @@ function fileOperationProtocolLine(options = {}) {
   if (!options.fileOperationContext) return "";
   const tier = options.fileOperationPermissionTier || "text";
   if (tier === "text") return "You have text-only file permission for this workspace. If the task requires creating or modifying files, do not propose file_operations yourself; discuss requirements and leave file proposals to a member with tool or full file permission.";
-  return "If this task requires inspecting workspace files, request read/list in file_operations. If it requires creating or modifying workspace files, you MUST propose the change in file_operations with the full file content for write/append. Do not put complete file content only in argument, suggested_revision, or artifacts; those fields may summarize it.";
+  return "If this task requires inspecting workspace files, request read/list in file_operations. If it requires creating or modifying workspace files, you MUST propose the change in file_operations with the full file content for write/append. Do not put complete file content only in argument, suggested_revision, or artifacts; those fields may summarize it. Never paste large source files, scripts, Gradle files, manifests, or other durable file contents into argument; put durable file contents only in file_operations.content so the app can write them.";
 }
 
 function toolRequestProtocolLine(options = {}) {

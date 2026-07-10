@@ -305,6 +305,8 @@ test("workspace round prompt requires file_operations for file-writing tasks", (
   assert.match(messages[0].content, /MUST propose the change in file_operations/);
   assert.match(messages[0].content, /full file content for write\/append/);
   assert.match(messages[0].content, /Do not put complete file content only in argument/);
+  assert.match(messages[0].content, /Never paste large source files/);
+  assert.match(messages[0].content, /file_operations\.content/);
 });
 
 test("text-only workspace round prompt does not ask the member to propose file_operations", () => {
