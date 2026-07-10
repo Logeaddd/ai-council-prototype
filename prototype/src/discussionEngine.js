@@ -196,6 +196,11 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
           importedProjectRoots,
           appSettings: options.appSettings,
           searchApiKey: options.searchApiKey,
+          maxReadBytes: group.settings.maxToolReadBytes,
+          maxGrepResults: group.settings.maxToolGrepResults,
+          maxGrepFileBytes: group.settings.maxToolGrepFileBytes,
+          maxCommandOutputBytes: group.settings.maxToolOutputBytes,
+          maxGitOutputBytes: group.settings.maxToolOutputBytes,
           signal: options.signal
         });
         accumulatedToolRequests.push(...toolResult.accepted);
