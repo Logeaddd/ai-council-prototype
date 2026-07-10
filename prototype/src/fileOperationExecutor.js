@@ -181,11 +181,15 @@ function assertNoUnrelatedDirtyFiles(groupPath, proposal) {
 }
 
 function isRuntimeStateFile(file) {
-  return file.startsWith("_supervisor/")
-    || file.startsWith("sessions/")
-    || file.startsWith("shared/logs/")
-    || file.startsWith("shared/cache/")
-    || file === "shared/task_state.json";
+  const normalized = normalizeGitPath(file);
+  const parts = normalized.split("/").filter(Boolean);
+  const isMemberPrivateMemory = parts[0] === "members" && parts.includes("private_memory");
+  return normalized.startsWith("_supervisor/")
+    || normalized.startsWith("sessions/")
+    || normalized.startsWith("shared/logs/")
+    || normalized.startsWith("shared/cache/")
+    || normalized === "shared/task_state.json"
+    || isMemberPrivateMemory;
 }
 
 function expandGitStatusPath(groupPath, file) {

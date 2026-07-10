@@ -193,6 +193,30 @@ test("execution ignores runtime log and session state dirtiness", () => {
   assert.equal(executed.status, "executed");
   assert.equal(fs.readFileSync(path.join(group.groupPath, "src", "runtime-ok.js"), "utf8"), "export const runtimeOk = true;\n");
 });
+
+test("execution ignores member private memory dirtiness", () => {
+  const group = createReadyGitGroup();
+  const pending = createPendingProposal(group.groupPath, {
+    op: "write",
+    path: "src/private-memory-ok.js",
+    content: "export const privateMemoryOk = true;\n",
+    reason: "Create module while member memory is changing.",
+    expected_effect: "Module exists."
+  });
+  approvePendingFileOperation({ groupPath: group.groupPath, proposalId: pending.id, approvedBy: "user" });
+  const memoryDir = path.join(group.groupPath, "members", "Builder", "private_memory");
+  fs.mkdirSync(memoryDir, { recursive: true });
+  fs.writeFileSync(path.join(memoryDir, "usage.jsonl"), "{\"tokens\":1}\n", "utf8");
+
+  const executed = executeApprovedFileOperation({ groupPath: group.groupPath, proposalId: pending.id });
+
+  assert.equal(executed.status, "executed");
+  assert.equal(
+    fs.readFileSync(path.join(group.groupPath, "src", "private-memory-ok.js"), "utf8"),
+    "export const privateMemoryOk = true;\n"
+  );
+});
+
 test("full mode can auto-approve a non-dangerous write proposal", () => {
   const group = createReadyGitGroup();
   const pending = createPendingProposal(group.groupPath, {
