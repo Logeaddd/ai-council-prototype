@@ -308,6 +308,15 @@ test("renderer opens with blank current-session usage instead of stale demo tota
   assert.match(live, /subtractUsageTotals/);
 });
 
+test("transcript follows live output only while the reader remains at the bottom", () => {
+  const app = read("renderer/components/council/council-app.tsx");
+
+  assert.match(app, /transcriptAtBottom/);
+  assert.match(app, /remaining <= 48/);
+  assert.match(app, /scrollTop = scrollContainer\.scrollHeight/);
+  assert.match(app, /onScroll=\{updateTranscriptScrollPosition\}/);
+});
+
 test("task header does not show generic AI mode helper text", () => {
   const transcriptPanel = read("renderer/components/council/transcript-panel.tsx");
   assert.doesNotMatch(transcriptPanel, /WORK_MODE_HINT/);

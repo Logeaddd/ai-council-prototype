@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useEffectEvent, useMemo, useRef, useState } from "react"
+import { useEffect, useEffectEvent, useLayoutEffect, useMemo, useRef, useState } from "react"
 import {
   usage as fallbackUsage,
   type AgentMember,
@@ -137,6 +137,8 @@ export function CouncilApp() {
   const activeRun = useRef<AbortController | null>(null)
   const partials = useRef<Record<string, string>>({})
   const seenRounds = useRef<Set<number>>(new Set())
+  const transcriptScrollRef = useRef<HTMLDivElement | null>(null)
+  const transcriptAtBottom = useRef(true)
 
   const group: LiveGroup = groupList.find((g) => g.id === activeGroup) ?? EMPTY_GROUP
   const sessionUsageSnapshot = useMemo(
@@ -161,6 +163,19 @@ export function CouncilApp() {
       .filter((item) => item.kind === "round")
       .map((item) => (item.kind === "round" ? item.round : 0)),
   )
+
+  useLayoutEffect(() => {
+    const scrollContainer = transcriptScrollRef.current
+    if (!scrollContainer || !transcriptAtBottom.current) return
+    scrollContainer.scrollTop = scrollContainer.scrollHeight
+  }, [items, running])
+
+  function updateTranscriptScrollPosition() {
+    const scrollContainer = transcriptScrollRef.current
+    if (!scrollContainer) return
+    const remaining = scrollContainer.scrollHeight - scrollContainer.scrollTop - scrollContainer.clientHeight
+    transcriptAtBottom.current = remaining <= 48
+  }
 
   const openGroupFromEffect = useEffectEvent((nextGroup: LiveGroup) => openGroup(nextGroup, { silent: true }))
 
@@ -915,7 +930,11 @@ export function CouncilApp() {
         />
 
         <main className="flex min-w-0 flex-1 flex-col">
-          <div className="min-h-0 flex-1 overflow-y-auto">
+          <div
+            ref={transcriptScrollRef}
+            onScroll={updateTranscriptScrollPosition}
+            className="min-h-0 flex-1 overflow-y-auto"
+          >
             <TranscriptPanel
               items={items}
               mode={mode}
