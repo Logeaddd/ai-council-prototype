@@ -274,6 +274,9 @@ test("round prompt advertises artifacts in speak schema", () => {
   assert.match(messages[0].content, /suggested_revision, artifacts, file_operations, tool_requests, confidence/);
   assert.match(messages[0].content, /only to request file work/);
   assert.match(messages[0].content, /Do not invent tool results/);
+  assert.match(messages[0].content, /Do not use proposed_files/);
+  assert.match(messages[0].content, /Durable file contents must be in file_operations\.content/);
+  assert.match(messages[0].content, /Do not put full source code/);
   assert.match(messages[0].content, /Use fetch_url only for text\/html\/json pages/);
   assert.match(messages[0].content, /Do not use fetch_url to download zip/);
   assert.match(messages[0].content, /execute_command with curl\/PowerShell/);
