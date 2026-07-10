@@ -180,8 +180,37 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
       const accumulatedToolRequests = [];
       const accumulatedToolResults = [];
       const accumulatedRejectedToolRequests = [];
+      const accumulatedFileOperationProposals = [];
+      const accumulatedFileOperationExecutionResults = [];
+      const accumulatedPendingFileOperationProposals = [];
+      const accumulatedRejectedFileOperationProposals = [];
       const maxToolIterations = normalizeMaxToolIterations(group.settings.maxToolIterations);
       let toolIterations = 0;
+      const processResponseFileOperations = (currentResponse) => {
+        const fileOperationResult = applyFilePermissionTier(
+          collectFileOperationProposals(currentResponse, agent, round, options.groupPath),
+          fileOperationPermissionTier
+        );
+        if (!fileOperationResult.accepted.length && !fileOperationResult.rejected.length) return;
+        session.fileOperationProposals.push(...fileOperationResult.accepted);
+        const readListResults = executeReadListFileOperations(options.groupPath, fileOperationResult.accepted);
+        session.fileOperationExecutionResults.push(...readListResults);
+        const queueResult = queueFileOperationProposals(fileOperationResult, options.groupPath);
+        session.pendingFileOperationProposals.push(...queueResult.queued);
+        session.rejectedFileOperationProposals.push(...queueResult.rejected);
+        const autoFileExecutionResults = executeRoundAutoFileOperations({
+          groupPath: options.groupPath,
+          session,
+          group: workspaceGroup || group,
+          permissionTier: fileOperationPermissionTier
+        });
+        accumulatedFileOperationProposals.push(...fileOperationResult.accepted);
+        accumulatedFileOperationExecutionResults.push(...readListResults, ...autoFileExecutionResults);
+        accumulatedPendingFileOperationProposals.push(...queueResult.queued);
+        accumulatedRejectedFileOperationProposals.push(...fileOperationResult.rejected, ...queueResult.rejected);
+      };
+
+      processResponseFileOperations(response);
 
       while (response.status === "speak" && response.tool_requests?.length && toolIterations < maxToolIterations) {
         toolIterations += 1;
@@ -247,6 +276,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
         response = applyRoundResponseRules(callOutcome.response, agent, round);
         rawTextForMessage = callOutcome.rawTextForMessage;
         errorForMessage = callOutcome.errorForMessage;
+        processResponseFileOperations(response);
       }
 
       if (response.status === "speak" && response.tool_requests?.length && toolIterations >= maxToolIterations) {
@@ -260,22 +290,6 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
 
       const artifacts = collectMessageArtifacts(response, agent, round);
       session.artifacts.push(...artifacts);
-      const fileOperationResult = applyFilePermissionTier(
-        collectFileOperationProposals(response, agent, round, options.groupPath),
-        fileOperationPermissionTier
-      );
-      session.fileOperationProposals.push(...fileOperationResult.accepted);
-      const readListResults = executeReadListFileOperations(options.groupPath, fileOperationResult.accepted);
-      session.fileOperationExecutionResults.push(...readListResults);
-      const queueResult = queueFileOperationProposals(fileOperationResult, options.groupPath);
-      session.pendingFileOperationProposals.push(...queueResult.queued);
-      session.rejectedFileOperationProposals.push(...queueResult.rejected);
-      const autoFileExecutionResults = executeRoundAutoFileOperations({
-        groupPath: options.groupPath,
-        session,
-        group: workspaceGroup || group,
-        permissionTier: fileOperationPermissionTier
-      });
 
       const message = {
         round,
@@ -283,13 +297,13 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
         agentName: agent.name,
         response,
         artifacts,
-        fileOperationProposals: fileOperationResult.accepted,
-        fileOperationExecutionResults: [...readListResults, ...autoFileExecutionResults],
+        fileOperationProposals: accumulatedFileOperationProposals,
+        fileOperationExecutionResults: accumulatedFileOperationExecutionResults,
         toolRequests: accumulatedToolRequests,
         toolExecutionResults: accumulatedToolResults,
         rejectedToolRequests: accumulatedRejectedToolRequests,
-        pendingFileOperationProposals: queueResult.queued,
-        rejectedFileOperationProposals: [...fileOperationResult.rejected, ...queueResult.rejected],
+        pendingFileOperationProposals: accumulatedPendingFileOperationProposals,
+        rejectedFileOperationProposals: accumulatedRejectedFileOperationProposals,
         displayText: formatDisplayText(agent, response),
         rawText: rawTextForMessage,
         error: errorForMessage,

@@ -3583,6 +3583,132 @@ test("full permission executes approved file operation proposals during the roun
   }
 });
 
+test("full permission executes file operations before tool follow-up requests", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-files-before-tools-"));
+  const groupPath = path.join(tmp, "group");
+  fs.mkdirSync(path.join(groupPath, "sessions"), { recursive: true });
+  fs.writeFileSync(path.join(groupPath, "group.json"), JSON.stringify({
+    groupPath,
+    permissions: {
+      defaultTier: "full",
+      seatTiers: { runtime: "full" }
+    },
+    seats: [
+      {
+        seatId: "runtime",
+        displayName: "Runtime Agent",
+        currentModel: "runtime-model",
+        privateFolder: "members/RuntimeAgent",
+        role: "Executor"
+      }
+    ]
+  }, null, 2), "utf8");
+  execFileSync("git", ["init"], { cwd: groupPath, stdio: "pipe" });
+  execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: groupPath, stdio: "pipe" });
+  execFileSync("git", ["config", "user.name", "Test User"], { cwd: groupPath, stdio: "pipe" });
+  execFileSync("git", ["add", "--", "."], { cwd: groupPath, stdio: "pipe" });
+  execFileSync("git", ["commit", "-m", "test: initialize group"], { cwd: groupPath, stdio: "pipe" });
+  prepareExecutionStandards({
+    groupPath,
+    finalAnswer: "Create the requested file.",
+    recorderSeatId: "runtime"
+  });
+  approveExecutionStandards({ groupPath, approvedBy: "test" });
+  execFileSync("git", ["add", "--", "."], { cwd: groupPath, stdio: "pipe" });
+  execFileSync("git", ["commit", "-m", "test: approve standards"], { cwd: groupPath, stdio: "pipe" });
+
+  let callCount = 0;
+  const server = http.createServer(async (req, res) => {
+    for await (const _ of req) {
+      // Drain request body.
+    }
+    callCount += 1;
+    const payload = callCount === 1
+      ? {
+        status: "speak",
+        argument: "I wrote the file and will inspect the workspace.",
+        file_operations: [
+          {
+            op: "write",
+            path: "src/output.js",
+            content: "export const ok = true;\n",
+            reason: "Create the requested module.",
+            expected_effect: "A module file exists."
+          }
+        ],
+        tool_requests: [
+          {
+            tool: "list_directory",
+            path: "src",
+            reason: "Confirm the generated source directory exists."
+          }
+        ],
+        confidence: 0.8,
+        memory_candidates: []
+      }
+      : callCount === 2
+        ? {
+          status: "speak",
+          argument: "The file is present.",
+          confidence: 0.9,
+          memory_candidates: []
+        }
+        : {
+          answer: "File created.",
+          consensus_score: 1,
+          supporting_agents: ["Runtime Agent"],
+          dissenting_agents: [],
+          minority_report: "None.",
+          risks: [],
+          next_actions: [],
+          selected_file_operation_ids: [],
+          memory_candidates: []
+        };
+    writeOpenAiStream(res, JSON.stringify(payload));
+  });
+  await listen(server);
+  const apiBaseUrl = `http://127.0.0.1:${server.address().port}/v1`;
+
+  try {
+    const group = validateGroupConfig({
+      id: "files-before-tools",
+      name: "Files Before Tools",
+      settings: {
+        maxRounds: 1,
+        minConsensusWeight: 0.75,
+        stopWhenAllSkip: true,
+        agentTimeoutMs: 1000,
+        allowSoloCouncil: true
+      },
+      agents: [
+        {
+          id: "runtime",
+          name: "Runtime Agent",
+          role: "Executor",
+          provider: "openai-compatible",
+          apiBaseUrl,
+          allowUnsafePrivateNetwork: true,
+          apiKey: "secret-runtime-key",
+          model: "runtime-model",
+          providerLimits: { contextWindow: 12000, maxOutputTokens: 1000 },
+          weight: 1,
+          enabled: true,
+          judge: true
+        }
+      ]
+    });
+
+    const { session } = await runCouncil("Create a file then inspect it.", group, tmp, { groupPath });
+
+    assert.equal(fs.readFileSync(path.join(groupPath, "src", "output.js"), "utf8"), "export const ok = true;\n");
+    assert.equal(session.messages[0].toolRequests.length, 1);
+    assert.equal(session.fileOperationExecutionResults.some((item) => item.status === "executed" && item.path === "src/output.js"), true);
+    assert.equal(session.messages[0].fileOperationExecutionResults.some((item) => item.status === "executed" && item.path === "src/output.js"), true);
+  } finally {
+    await close(server);
+  }
+});
+
 test("ready final state auto-executes safe file proposals for full tier", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-auto-exec-runtime-"));
   const groupPath = path.join(tmp, "group");
