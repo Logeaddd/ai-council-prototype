@@ -130,6 +130,30 @@ test("workspace path aliases cannot escape the workspace", async () => {
   assert.equal(result.results.every((item) => item.code === "path_escape_denied"), true);
 });
 
+test("existing relative workspace directories are not mistaken for workspace aliases", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-workspace-literal-"));
+  const projectDir = path.join(tmp, "workspace", "random-surface-mod");
+  fs.mkdirSync(projectDir, { recursive: true });
+  fs.writeFileSync(path.join(projectDir, "notes.md"), "LITERAL_WORKSPACE_DIR_FACT\n", "utf8");
+
+  const result = await executeToolRequests({
+    permissionTier: "full",
+    groupPath: tmp,
+    agent: { id: "full", name: "Full" },
+    round: 1,
+    requests: [
+      { tool: "read_file", path: "workspace/random-surface-mod/notes.md", reason: "Read real nested workspace directory." },
+      { tool: "execute_command", cwd: "workspace/random-surface-mod", command: nodeCommand("require('fs').writeFileSync('cwd-fact.txt','REAL_CWD_FACT')"), shell: shellForNodeCommand(), reason: "Run in real nested workspace directory." }
+    ]
+  });
+
+  assert.equal(result.rejected.length, 0);
+  assert.equal(result.results.every((item) => item.status === "completed"), true);
+  assert.match(result.results[0].result.content, /LITERAL_WORKSPACE_DIR_FACT/);
+  assert.equal(fs.readFileSync(path.join(projectDir, "cwd-fact.txt"), "utf8"), "REAL_CWD_FACT");
+  assert.equal(result.results[1].result.cwd, "workspace/random-surface-mod");
+});
+
 test("text-only seats cannot use controlled file tools", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-tools-deny-"));
   fs.writeFileSync(path.join(tmp, "notes.md"), "content", "utf8");

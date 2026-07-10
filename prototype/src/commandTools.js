@@ -229,6 +229,8 @@ function resolveGroupRoot(groupPath) {
 }
 
 function resolveCommandCwd(groupRoot, input) {
+  const literal = resolveExistingRelativeLiteral(groupRoot, input || ".");
+  if (literal) return literal;
   const alias = normalizeWorkspacePathAlias(input || ".");
   const raw = alias.path || ".";
   const candidate = !alias.aliased && path.isAbsolute(raw) ? path.resolve(raw) : path.resolve(groupRoot, raw);
@@ -237,6 +239,19 @@ function resolveCommandCwd(groupRoot, input) {
     throw toolError("path_escape_denied", "Command cwd must stay inside the group workspace.");
   }
   if (!fs.existsSync(real)) throw toolError("cwd_not_found", "Command cwd does not exist.");
+  if (!fs.statSync(real).isDirectory()) throw toolError("cwd_not_directory", "Command cwd is not a directory.");
+  return real;
+}
+
+function resolveExistingRelativeLiteral(groupRoot, input) {
+  const raw = String(input || ".").trim();
+  if (!raw || path.isAbsolute(raw) || raw.startsWith("/") || raw.startsWith("\\")) return "";
+  const candidate = path.resolve(groupRoot, raw);
+  if (!fs.existsSync(candidate)) return "";
+  const real = fs.realpathSync.native(candidate);
+  if (!isInsidePath(groupRoot, real)) {
+    throw toolError("path_escape_denied", "Command cwd must stay inside the group workspace.");
+  }
   if (!fs.statSync(real).isDirectory()) throw toolError("cwd_not_directory", "Command cwd is not a directory.");
   return real;
 }

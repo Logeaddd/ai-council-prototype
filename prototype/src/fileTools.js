@@ -240,7 +240,10 @@ function* walkFiles(basePath, root, options = {}) {
 }
 
 function resolveTarget(inputPath, roots, options = {}) {
-  const alias = normalizeWorkspacePathAlias(requiredText(inputPath, "path"));
+  const rawInput = requiredText(inputPath, "path");
+  const literal = resolveExistingRelativeLiteral(rawInput, roots, options);
+  if (literal) return literal;
+  const alias = normalizeWorkspacePathAlias(rawInput);
   const raw = alias.path;
   const rootIndexes = alias.aliased ? [0] : candidateRootIndexes(roots, options.rootHint);
   const candidates = [];
@@ -280,6 +283,26 @@ function resolveTarget(inputPath, roots, options = {}) {
     path: selected.real,
     relativePath: normalizeRelative(selected.root, selected.real)
   };
+}
+
+function resolveExistingRelativeLiteral(inputPath, roots, options = {}) {
+  const raw = String(inputPath || "").trim();
+  if (!raw || path.isAbsolute(raw) || raw.startsWith("/") || raw.startsWith("\\")) return null;
+  for (const index of candidateRootIndexes(roots, options.rootHint)) {
+    const root = roots[index];
+    const candidate = path.resolve(root, raw);
+    if (!fs.existsSync(candidate)) continue;
+    const real = fs.realpathSync.native(candidate);
+    assertInsideAllowedRoot(root, real);
+    assertNotForbidden(root, real, { protectInternal: index === 0 });
+    return {
+      root,
+      rootLabel: rootLabel(index),
+      path: real,
+      relativePath: normalizeRelative(root, real)
+    };
+  }
+  return null;
 }
 
 function candidateRootIndexes(roots, hint) {
