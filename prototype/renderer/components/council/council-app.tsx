@@ -987,6 +987,7 @@ export function CouncilApp() {
         webSearchConfigured={appSettings?.capabilities?.webSearch?.configured}
         webSearchSource={formatSearchKeySource(appSettings?.capabilities?.webSearch?.source)}
         theme={theme}
+        onProvidersChange={setProviderOptions}
         onSave={handleSaveSettings}
       />
       <ChatHistorySheet

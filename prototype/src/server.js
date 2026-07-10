@@ -4,7 +4,7 @@ import { execFile } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { readAppSettings, redactAppSettingsForClient, updateAppSettings, userDataDir } from "./appSettings.js";
+import { readAppSettings, redactAppSettingsForClient, removeCustomModelService, updateAppSettings, upsertCustomModelService, userDataDir } from "./appSettings.js";
 import { loadJson, validateGroupConfig, validateRuntimeEnv } from "./config.js";
 import { runCouncil, runCouncilEvents } from "./discussionEngine.js";
 import { approveExecutionStandards, prepareExecutionStandards, readExecutionStandards } from "./executionStandards.js";
@@ -106,7 +106,21 @@ async function handleApi(req, res, url) {
   }
 
   if (req.method === "GET" && url.pathname === "/api/providers") {
-    sendJson(res, 200, { providers: listProviderPresets() });
+    const custom = readCurrentAppSettings().modelServices?.custom || [];
+    sendJson(res, 200, { providers: listProviderPresets(custom) });
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/providers") {
+    const body = await readBody(req);
+    const provider = upsertCustomModelService(baseDir, body.provider || body, { groupsRoot: defaultGroupsRoot });
+    sendJson(res, 200, { ok: true, provider: listProviderPresets([provider]).find((item) => item.id === provider.id) });
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/providers/delete") {
+    const body = await readBody(req);
+    sendJson(res, 200, removeCustomModelService(baseDir, body.id, { groupsRoot: defaultGroupsRoot }));
     return;
   }
 

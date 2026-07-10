@@ -13,6 +13,21 @@ test("provider registry exposes official OpenAI-compatible presets with custom o
   assert.equal(resolveProviderBaseUrl("deepseek", "https://proxy.example/v1"), "https://proxy.example/v1");
 });
 
+test("provider registry exposes saved user model services as OpenAI-compatible presets", () => {
+  const presets = listProviderPresets([{
+    id: "user-provider-test",
+    label: "My relay",
+    officialBaseUrl: "https://models.example.test/v1",
+    defaultModel: "relay-model",
+    modelsEndpoint: "/models"
+  }]);
+  const saved = presets.find((preset) => preset.id === "user-provider-test");
+  assert.equal(saved.userDefined, true);
+  assert.equal(saved.transport, "openai-compatible");
+  assert.equal(saved.officialBaseUrl, "https://models.example.test/v1");
+  assert.deepEqual(saved.models, ["relay-model"]);
+});
+
 test("model discovery reports real response and cache sources", async () => {
   clearModelDiscoveryCache();
   let calls = 0;

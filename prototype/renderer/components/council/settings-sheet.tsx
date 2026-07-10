@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useEffect, useState, type ComponentType, type ReactNode } from "react"
+import { useCallback, useEffect, useRef, useState, type ComponentType, type ReactNode } from "react"
 import {
   Brain,
   Database,
@@ -30,10 +30,12 @@ import {
   fetchProviderPresets,
   fetchSkillCatalog,
   fetchSkills,
+  deleteCustomProvider,
   installMcpCatalogItem,
   installMcpPackage,
   installSkill,
   removeSkill,
+  saveCustomProvider,
   searchMcpPackages,
   searchSkills,
   setSkillEnabled,
@@ -97,6 +99,7 @@ export function SettingsSheet({
   webSearchSource,
   theme,
   onSave,
+  onProvidersChange,
 }: {
   open: boolean
   onClose: () => void
@@ -124,6 +127,7 @@ export function SettingsSheet({
     clearWebSearchKey?: boolean
     toolAccess?: CapabilityAccess
   }) => Promise<void> | void
+  onProvidersChange?: (providers: ProviderPresetRecord[]) => void
 }) {
   const [activeTab, setActiveTab] = useState<SettingsTab>("appearance")
   const [selectedTheme, setSelectedTheme] = useState<AppearanceTheme>(theme)
@@ -149,11 +153,16 @@ export function SettingsSheet({
   const [skillSearchResults, setSkillSearchResults] = useState<SkillSearchResult[]>([])
   const [searchingSkills, setSearchingSkills] = useState(false)
   const [busySkillId, setBusySkillId] = useState("")
+  const refreshingFacts = useRef(false)
 
-  const reloadFacts = useCallback(async () => {
+  const reloadFacts = useCallback(async (options: { silent?: boolean } = {}) => {
+    if (refreshingFacts.current) return
+    refreshingFacts.current = true
     await Promise.resolve()
-    setLoadingFacts(true)
-    setSettingsError("")
+    if (!options.silent) {
+      setLoadingFacts(true)
+      setSettingsError("")
+    }
     try {
       const [providerResult, capabilityResult, catalogResult, serverResult, skillCatalogResult, skillsResult] = await Promise.all([
         fetchProviderPresets(),
@@ -164,6 +173,7 @@ export function SettingsSheet({
         groupPath ? fetchSkills(groupPath) : Promise.resolve({ ok: true, skills: [] }),
       ])
       setProviders(providerResult.providers || [])
+      onProvidersChange?.(providerResult.providers || [])
       setCapabilities(capabilityResult.capabilities || [])
       setCapabilityAccess(capabilityResult.toolAccess || accessFromCapabilities(capabilityResult.capabilities || []))
       setMcpCatalog(catalogResult.catalog || [])
@@ -171,11 +181,12 @@ export function SettingsSheet({
       setSkillCatalog(skillCatalogResult.catalog || [])
       setSkills(skillsResult.skills || [])
     } catch (error) {
-      setSettingsError(errorMessage(error))
+      if (!options.silent) setSettingsError(errorMessage(error))
     } finally {
-      setLoadingFacts(false)
+      refreshingFacts.current = false
+      if (!options.silent) setLoadingFacts(false)
     }
-  }, [groupPath])
+  }, [groupPath, onProvidersChange])
 
   useEffect(() => {
     if (!open) return
@@ -183,8 +194,12 @@ export function SettingsSheet({
     void Promise.resolve().then(() => {
       if (!cancelled) return reloadFacts()
     })
+    const intervalId = window.setInterval(() => {
+      if (!cancelled) void reloadFacts({ silent: true })
+    }, 4000)
     return () => {
       cancelled = true
+      window.clearInterval(intervalId)
     }
   }, [open, reloadFacts])
 
@@ -436,7 +451,7 @@ export function SettingsSheet({
             />
           ) : null}
 
-          {activeTab === "models" ? <ModelsPanel providers={providers} loading={loadingFacts} /> : null}
+          {activeTab === "models" ? <ModelsPanel providers={providers} loading={loadingFacts} onChanged={() => reloadFacts()} /> : null}
 
           {activeTab === "search" ? (
             <SearchPanel
@@ -655,23 +670,84 @@ function RulesPanel({
 function ModelsPanel({
   providers,
   loading,
+  onChanged,
 }: {
   providers: ProviderPresetRecord[]
   loading: boolean
+  onChanged: () => Promise<void>
 }) {
+  const [label, setLabel] = useState("")
+  const [baseUrl, setBaseUrl] = useState("")
+  const [defaultModel, setDefaultModel] = useState("")
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState("")
+
+  async function add() {
+    if (busy || !label.trim() || !baseUrl.trim()) return
+    setBusy(true)
+    setError("")
+    try {
+      await saveCustomProvider({
+        label: label.trim(),
+        officialBaseUrl: baseUrl.trim(),
+        defaultModel: defaultModel.trim(),
+      })
+      setLabel("")
+      setBaseUrl("")
+      setDefaultModel("")
+      await onChanged()
+    } catch (reason) {
+      setError(errorMessage(reason))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function remove(id: string) {
+    if (busy) return
+    setBusy(true)
+    setError("")
+    try {
+      await deleteCustomProvider(id)
+      await onChanged()
+    } catch (reason) {
+      setError(errorMessage(reason))
+    } finally {
+      setBusy(false)
+    }
+  }
+
   return (
     <div className="space-y-4">
       <PanelTitle title="模型服务" />
-      <FactGrid
-        rows={providers.map((provider) => ({
-          key: provider.id,
-          name: provider.label || provider.name || provider.id,
-          meta: provider.defaultModel || provider.baseUrl || provider.officialBaseUrl || "自定义模型",
-          tone: "success",
-          status: "已内置",
-        }))}
-        loading={loading}
-      />
+      <div className="grid gap-2 sm:grid-cols-3">
+        <input value={label} onChange={(event) => setLabel(event.target.value)} className={inputClass} placeholder="名称" />
+        <input value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} className={cn(inputClass, "font-mono text-[12px]")} placeholder="API 地址" />
+        <div className="flex gap-2">
+          <input value={defaultModel} onChange={(event) => setDefaultModel(event.target.value)} className={cn(inputClass, "min-w-0 font-mono text-[12px]")} placeholder="默认模型" />
+          <button type="button" disabled={busy || !label.trim() || !baseUrl.trim()} onClick={() => void add()} className="rounded-md bg-primary px-3 text-[13px] font-semibold text-primary-foreground disabled:opacity-50">加入</button>
+        </div>
+      </div>
+      {error ? <div className="text-[13px] text-danger">{error}</div> : null}
+      {loading ? <div className="py-6 text-center text-[13px] text-muted-foreground">加载中...</div> : null}
+      {!loading ? (
+        <div className="space-y-2">
+          {providers.map((provider) => (
+            <div key={provider.id} className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 rounded-md border border-border px-3 py-2">
+              <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                  <span className="truncate text-[13px] font-medium text-foreground">{provider.label || provider.name || provider.id}</span>
+                  <Badge tone="success">{provider.userDefined ? "已加入" : "已内置"}</Badge>
+                </div>
+                <div className="mt-1 truncate font-mono text-[11px] text-muted-foreground">{provider.defaultModel || provider.baseUrl || provider.officialBaseUrl || "自定义模型"}</div>
+              </div>
+              {provider.userDefined ? (
+                <button type="button" title="移除" aria-label="移除" disabled={busy} onClick={() => void remove(provider.id)} className="grid size-8 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-danger/10 hover:text-danger disabled:opacity-50"><X className="size-4" /></button>
+              ) : null}
+            </div>
+          ))}
+        </div>
+      ) : null}
     </div>
   )
 }
@@ -782,7 +858,7 @@ function McpPanel({
               if (event.key === "Enter") void onSearch()
             }}
             className={cn(inputClass, "flex-1 font-mono text-[12px]")}
-            placeholder="npm 包名或关键词"
+            placeholder="搜索 npm MCP"
           />
           <button
             type="button"

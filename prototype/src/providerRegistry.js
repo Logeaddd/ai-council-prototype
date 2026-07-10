@@ -194,8 +194,21 @@
   }
 ];
 
-export function listProviderPresets() {
-  return PROVIDER_PRESETS.map((preset) => ({ ...preset }));
+export function listProviderPresets(customProviders = []) {
+  const builtInIds = new Set(PROVIDER_PRESETS.map((preset) => preset.id));
+  const custom = (Array.isArray(customProviders) ? customProviders : [])
+    .filter((preset) => preset?.id && !builtInIds.has(preset.id))
+    .map((preset) => ({
+      id: preset.id,
+      label: preset.label,
+      transport: "openai-compatible",
+      officialBaseUrl: preset.officialBaseUrl,
+      defaultModel: preset.defaultModel || "",
+      models: preset.defaultModel ? [preset.defaultModel] : [],
+      modelsEndpoint: preset.modelsEndpoint || "/models",
+      userDefined: true
+    }));
+  return [...PROVIDER_PRESETS.map((preset) => ({ ...preset })), ...custom];
 }
 
 export function findProviderPreset(id) {

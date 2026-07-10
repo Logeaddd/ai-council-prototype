@@ -6,6 +6,8 @@ import assert from "node:assert/strict";
 import {
   readAppSettings,
   redactAppSettingsForClient,
+  removeCustomModelService,
+  upsertCustomModelService,
   updateAppSettings
 } from "../src/appSettings.js";
 
@@ -104,6 +106,31 @@ test("appearance theme defaults light and persists dark without replacing other 
     assert.equal(saved.capabilities.webSearch.apiKey, "keep-theme-key");
     assert.equal(client.appearance.theme, "dark");
     assert.equal(JSON.stringify(client).includes("keep-theme-key"), false);
+  } finally {
+    fs.rmSync(baseDir, { recursive: true, force: true });
+  }
+});
+
+test("custom model services persist without storing API keys and can be removed", () => {
+  const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-custom-provider-"));
+  try {
+    const saved = upsertCustomModelService(baseDir, {
+      label: "My relay",
+      officialBaseUrl: "https://models.example.test/v1/",
+      defaultModel: "my-model",
+      apiKey: "must-not-be-saved"
+    });
+    const loaded = readAppSettings(baseDir);
+    const client = redactAppSettingsForClient(loaded, { env: {} });
+
+    assert.match(saved.id, /^user-provider-/);
+    assert.equal(loaded.modelServices.custom[0].officialBaseUrl, "https://models.example.test/v1");
+    assert.equal(loaded.modelServices.custom[0].defaultModel, "my-model");
+    assert.equal(JSON.stringify(loaded).includes("must-not-be-saved"), false);
+    assert.equal(client.modelServices.custom[0].label, "My relay");
+
+    removeCustomModelService(baseDir, saved.id);
+    assert.equal(readAppSettings(baseDir).modelServices.custom.length, 0);
   } finally {
     fs.rmSync(baseDir, { recursive: true, force: true });
   }

@@ -406,6 +406,7 @@ export interface ProviderPresetRecord {
   modelsEndpoint?: string
   customUrl?: boolean
   keyless?: boolean
+  userDefined?: boolean
 }
 
 export interface ModelDiscoveryResult {
@@ -634,6 +635,20 @@ function subtractUsageTotals(
 
 export async function fetchProviderPresets() {
   return api<{ providers: ProviderPresetRecord[] }>("/api/providers")
+}
+
+export async function saveCustomProvider(body: {
+  id?: string
+  label: string
+  officialBaseUrl: string
+  defaultModel?: string
+  modelsEndpoint?: string
+}) {
+  return api<{ ok: boolean; provider: ProviderPresetRecord }>("/api/providers", body)
+}
+
+export async function deleteCustomProvider(id: string) {
+  return api<{ ok: boolean; id: string }>("/api/providers/delete", { id })
 }
 
 export async function fetchCapabilities() {
