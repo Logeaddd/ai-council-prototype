@@ -174,11 +174,11 @@ function selectVisibleObjections(unresolvedObjections, agent, visibility) {
 }
 
 function selectVisibleFileOperationResults(results, agent, visibility) {
-  if (visibility === "full") return results;
-  return results.filter((item) => {
+  const visible = visibility === "full" ? results : results.filter((item) => {
     const source = item.source_agent_id || item.sourceAgentId || item.proposedBy?.seatId || item.proposedBy?.id;
     return source === agent.id;
   });
+  return compactFileOperationResultsForContext(visible);
 }
 
 function selectVisibleToolResults(results, agent, visibility) {
@@ -187,6 +187,33 @@ function selectVisibleToolResults(results, agent, visibility) {
     return source === agent.id;
   });
   return compactToolResultsForContext(visible);
+}
+
+function compactFileOperationResultsForContext(results) {
+  return dedupeSimilarFileOperationResults(Array.isArray(results) ? results : [])
+    .slice(-MAX_TOOL_RESULTS_IN_CONTEXT)
+    .map((item) => compactContextValue(item));
+}
+
+function dedupeSimilarFileOperationResults(results) {
+  const seen = new Set();
+  const kept = [];
+  for (let index = results.length - 1; index >= 0; index -= 1) {
+    const item = results[index];
+    const signature = fileOperationResultSignature(item);
+    if (signature && seen.has(signature)) continue;
+    if (signature) seen.add(signature);
+    kept.push(item);
+  }
+  return kept.reverse();
+}
+
+function fileOperationResultSignature(item = {}) {
+  const op = String(item.op || item.operation || item.action || "");
+  const path = String(item.path || item.targetPath || "").trim();
+  if (!op || !path) return "";
+  const source = String(item.source_agent_id || item.sourceAgentId || item.agentId || item.proposedBy?.seatId || item.proposedBy?.id || "");
+  return [source, op, path].join("\u001f");
 }
 
 function compactToolResultsForContext(results) {

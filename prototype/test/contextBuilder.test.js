@@ -217,6 +217,60 @@ test("context prompt sections include file operation execution results", () => {
   assert.match(core, /overwrite_requires_confirmation/);
 });
 
+test("context prompt sections keep only the latest repeated file operation result", () => {
+  const context = buildMemberContext(agent, {
+    question: "Continue after reading files.",
+    unresolvedObjections: {},
+    artifacts: [],
+    fileOperationExecutionResults: [
+      {
+        op: "read",
+        path: "forge_mod/build.gradle",
+        status: "completed",
+        source_agent_id: "critic",
+        content: "OLD_BUILD_GRADLE_SHOULD_DROP"
+      },
+      {
+        op: "read",
+        path: "forge_mod/build.gradle",
+        status: "completed",
+        source_agent_id: "critic",
+        content: "LATEST_BUILD_GRADLE_SHOULD_STAY"
+      }
+    ],
+    messages: []
+  });
+  const core = buildContextPromptSections(context).find((section) => section.title === "Non-compressible core")?.content || "";
+
+  assert.match(core, /LATEST_BUILD_GRADLE_SHOULD_STAY/);
+  assert.doesNotMatch(core, /OLD_BUILD_GRADLE_SHOULD_DROP/);
+  assert.equal(context.core.fileOperationExecutionResults.length, 1);
+});
+
+test("context prompt sections compact large file operation results", () => {
+  const largeRead = `${"F".repeat(12000)}FILE_TAIL_FACT`;
+  const context = buildMemberContext(agent, {
+    question: "Use read file output.",
+    unresolvedObjections: {},
+    artifacts: [],
+    fileOperationExecutionResults: [
+      {
+        op: "read",
+        path: "forge_mod/src/main/java/ExampleMod.java",
+        status: "completed",
+        source_agent_id: "critic",
+        content: largeRead
+      }
+    ],
+    messages: []
+  });
+  const core = buildContextPromptSections(context).find((section) => section.title === "Non-compressible core")?.content || "";
+
+  assert.match(core, /tool output truncated/);
+  assert.match(core, /FILE_TAIL_FACT/);
+  assert.ok(core.length < largeRead.length);
+});
+
 test("context prompt sections include web tool execution results", () => {
   const context = buildMemberContext(agent, {
     question: "Check current sources.",
