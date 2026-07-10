@@ -240,7 +240,7 @@ test("full mode can auto-approve a non-dangerous write proposal", () => {
   assert.equal(fs.readFileSync(path.join(group.groupPath, "src", "auto.js"), "utf8"), "export const auto = true;\n");
 });
 
-test("full mode never auto-approves overwrite delete or bulk operations", () => {
+test("full mode auto-approves overwrite delete and larger batches inside the workspace", () => {
   const overwriteGroup = createReadyGitGroup();
   fs.mkdirSync(path.join(overwriteGroup.groupPath, "src"), { recursive: true });
   fs.writeFileSync(path.join(overwriteGroup.groupPath, "src", "existing.js"), "old\n", "utf8");
@@ -253,11 +253,15 @@ test("full mode never auto-approves overwrite delete or bulk operations", () => 
     reason: "Overwrite.",
     expected_effect: "Replaced."
   });
-  assert.throws(() => autoApprovePendingFileOperation({
+  const overwriteApproval = autoApprovePendingFileOperation({
     groupPath: overwriteGroup.groupPath,
     proposalId: overwrite.id,
     mode: "full"
-  }), /overwrite_requires_explicit_confirmation/);
+  });
+  const overwriteExecuted = executeApprovedFileOperation({ groupPath: overwriteGroup.groupPath, proposalId: overwrite.id });
+  assert.equal(overwriteApproval.dangerousConfirmed, true);
+  assert.equal(overwriteExecuted.status, "executed");
+  assert.equal(fs.readFileSync(path.join(overwriteGroup.groupPath, "src", "existing.js"), "utf8"), "new\n");
 
   const deleteGroup = createReadyGitGroup();
   fs.writeFileSync(path.join(deleteGroup.groupPath, "old.txt"), "old\n", "utf8");
@@ -269,11 +273,15 @@ test("full mode never auto-approves overwrite delete or bulk operations", () => 
     reason: "Delete old file.",
     expected_effect: "Removed."
   });
-  assert.throws(() => autoApprovePendingFileOperation({
+  const deleteApproval = autoApprovePendingFileOperation({
     groupPath: deleteGroup.groupPath,
     proposalId: deletion.id,
     mode: "full"
-  }), /auto_approval_only_allows_write_or_append/);
+  });
+  const deleteExecuted = executeApprovedFileOperation({ groupPath: deleteGroup.groupPath, proposalId: deletion.id });
+  assert.equal(deleteApproval.dangerousConfirmed, true);
+  assert.equal(deleteExecuted.status, "executed");
+  assert.equal(fs.existsSync(path.join(deleteGroup.groupPath, "old.txt")), false);
 
   const bulkGroup = createReadyGitGroup();
   const bulk = createPendingProposal(bulkGroup.groupPath, {
@@ -283,12 +291,15 @@ test("full mode never auto-approves overwrite delete or bulk operations", () => 
     reason: "Append note.",
     expected_effect: "Note appended."
   });
-  assert.throws(() => autoApprovePendingFileOperation({
+  const bulkApproval = autoApprovePendingFileOperation({
     groupPath: bulkGroup.groupPath,
     proposalId: bulk.id,
     mode: "full",
     maxBatchSize: 2
-  }), /bulk_requires_explicit_confirmation/);
+  });
+  const bulkExecuted = executeApprovedFileOperation({ groupPath: bulkGroup.groupPath, proposalId: bulk.id });
+  assert.equal(bulkApproval.status, "approved");
+  assert.equal(bulkExecuted.status, "executed");
 });
 
 test("automatic approval requires full mode", () => {

@@ -1,10 +1,9 @@
-import fs from "node:fs";
 import path from "node:path";
 import { autoApprovePendingFileOperation, executeApprovedFileOperation } from "./fileOperationExecutor.js";
 import { appendFileOperationAuditLog, listPendingFileOperationProposals, updatePendingFileOperationProposal } from "./fileOperationQueue.js";
 
 const DEFAULT_MAX_AUTO_FILES_PER_RUN = 3;
-const AUTO_SAFE_OPS = new Set(["write", "append"]);
+const AUTO_FULL_OPS = new Set(["write", "append", "delete"]);
 
 export function runAutoFileOperations(options = {}) {
   const groupPath = requirePath(options.groupPath, "groupPath");
@@ -157,10 +156,7 @@ function proposalQueueRank(proposal = {}) {
 }
 
 function autoPolicy(groupPath, proposal) {
-  if (proposal.op === "delete") return { allowed: false, reason: "delete_requires_confirmation" };
-  if (!AUTO_SAFE_OPS.has(proposal.op)) return { allowed: false, reason: `unsafe_op:${proposal.op}` };
-  const target = path.join(groupPath, proposal.path);
-  if (proposal.op === "write" && fs.existsSync(target)) return { allowed: false, reason: "overwrite_requires_confirmation" };
+  if (!AUTO_FULL_OPS.has(proposal.op)) return { allowed: false, reason: `unsupported_auto_op:${proposal.op}` };
   return { allowed: true };
 }
 
@@ -189,7 +185,7 @@ function markSkipped(groupPath, proposal, status, reason) {
 }
 
 function terminalSkippedStatus(status, reason) {
-  return status === "superseded" || String(reason || "").startsWith("unsafe_op:");
+  return status === "superseded" || String(reason || "").startsWith("unsupported_auto_op:");
 }
 
 function attachResults(session, results) {

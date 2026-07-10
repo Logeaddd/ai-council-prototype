@@ -211,7 +211,7 @@ test("auto runner requires full effective seat permission", () => {
   assert.equal(approved.status, "approved");
 });
 
-test("auto runner never overwrites pre-existing files", () => {
+test("auto runner overwrites pre-existing files for full permission", () => {
   const group = createReadyGitGroup({ defaultTier: "full" });
   fs.mkdirSync(path.join(group.groupPath, "src"), { recursive: true });
   fs.writeFileSync(path.join(group.groupPath, "src", "existing.js"), "old\n", "utf8");
@@ -222,28 +222,21 @@ test("auto runner never overwrites pre-existing files", () => {
     path: "src/existing.js",
     content: "new\n",
     reason: "Try overwrite.",
-    expected_effect: "Should require confirmation."
+    expected_effect: "Should replace the file."
   }, "executor");
 
   const result = runAutoFileOperations({ groupPath: group.groupPath, session: baseSession(), group });
 
-  assert.equal(result.state, "blocked_by_policy");
-  assert.equal(fs.readFileSync(path.join(group.groupPath, "src", "existing.js"), "utf8"), "old\n");
-  assert.equal(result.results[0].reason, "overwrite_requires_confirmation");
+  assert.equal(result.state, "executed");
+  assert.equal(fs.readFileSync(path.join(group.groupPath, "src", "existing.js"), "utf8"), "new\n");
+  assert.equal(result.results[0].status, "executed");
   const pending = listPendingFileOperationProposals(group.groupPath);
-  assert.equal(pending[0].status, "pending_user_approval");
-  assert.equal(pending[0].autoExecutionStatus, "skipped_policy");
-  const approved = approvePendingFileOperation({
-    groupPath: group.groupPath,
-    proposalId: pending[0].id,
-    approvedBy: "user",
-    dangerousConfirmed: true
-  });
-  assert.equal(approved.status, "approved");
-  assert.equal(approved.dangerousConfirmed, true);
+  assert.equal(pending[0].status, "executed");
+  assert.equal(pending[0].autoApproved, true);
+  assert.equal(pending[0].dangerousConfirmed, true);
 });
 
-test("auto runner leaves delete proposals pending for explicit approval", () => {
+test("auto runner deletes files for full permission", () => {
   const group = createReadyGitGroup({ defaultTier: "full" });
   fs.writeFileSync(path.join(group.groupPath, "old.txt"), "old\n", "utf8");
   git(group.groupPath, ["add", "--", "old.txt"]);
@@ -252,25 +245,18 @@ test("auto runner leaves delete proposals pending for explicit approval", () => 
     op: "delete",
     path: "old.txt",
     reason: "Delete old file.",
-    expected_effect: "Should require confirmation."
+    expected_effect: "Should remove the file."
   }, "executor");
 
   const result = runAutoFileOperations({ groupPath: group.groupPath, session: baseSession(), group });
 
-  assert.equal(result.state, "blocked_by_policy");
-  assert.equal(fs.existsSync(path.join(group.groupPath, "old.txt")), true);
-  assert.equal(result.results[0].reason, "delete_requires_confirmation");
+  assert.equal(result.state, "executed");
+  assert.equal(fs.existsSync(path.join(group.groupPath, "old.txt")), false);
+  assert.equal(result.results[0].status, "executed");
   const pending = listPendingFileOperationProposals(group.groupPath);
-  assert.equal(pending[0].status, "pending_user_approval");
-  assert.equal(pending[0].autoExecutionStatus, "skipped_policy");
-  const approved = approvePendingFileOperation({
-    groupPath: group.groupPath,
-    proposalId: pending[0].id,
-    approvedBy: "user",
-    dangerousConfirmed: true
-  });
-  assert.equal(approved.status, "approved");
-  assert.equal(approved.dangerousConfirmed, true);
+  assert.equal(pending[0].status, "executed");
+  assert.equal(pending[0].autoApproved, true);
+  assert.equal(pending[0].dangerousConfirmed, true);
 });
 
 test("auto runner terminalizes unsupported unsafe operations", () => {
@@ -286,7 +272,7 @@ test("auto runner terminalizes unsupported unsafe operations", () => {
   const secondRun = runAutoFileOperations({ groupPath: group.groupPath, session: baseSession(), group });
 
   assert.equal(firstRun.state, "blocked_by_policy");
-  assert.equal(firstRun.results[0].reason, "unsafe_op:read");
+  assert.equal(firstRun.results[0].reason, "unsupported_auto_op:read");
   assert.equal(secondRun.state, "not_requested");
   const pending = listPendingFileOperationProposals(group.groupPath);
   assert.equal(pending.find((item) => item.id === proposal.id).status, "skipped_policy");

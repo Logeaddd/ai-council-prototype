@@ -7,6 +7,7 @@ import { nowIso } from "./types.js";
 
 const WRITE_OPS = new Set(["write", "append"]);
 const DANGEROUS_OPS = new Set(["delete"]);
+const AUTO_APPROVAL_OPS = new Set(["write", "append", "delete"]);
 const FRAMEWORK_STATE_FILES = [
   "approvals/execution-standards.user.approval.json",
   "shared/harness/execution-standard.md",
@@ -64,13 +65,14 @@ export function autoApprovePendingFileOperation(options = {}) {
   const target = validateFileOperationPath(groupPath, proposal.path);
   const policy = autoApprovalPolicy(proposal, target.path, options);
   if (!policy.allowed) throw new Error(policy.reason);
+  const autoDangerous = isDangerousProposal(proposal, target.path);
   const approved = {
     ...proposal,
     status: "approved",
     approvedBy: String(options.approvedBy || "system:auto-full"),
     approvedAt: nowIso(),
     autoApproved: true,
-    dangerousConfirmed: false
+    dangerousConfirmed: autoDangerous
   };
   updatePendingFileOperationProposal(groupPath, approved);
   appendFileOperationAuditLog(groupPath, "auto_approved", approved);
@@ -105,13 +107,9 @@ export function executeApprovedFileOperation(options = {}) {
 
 
 function autoApprovalPolicy(proposal, targetPath, options = {}) {
-  if (!WRITE_OPS.has(proposal.op)) return { allowed: false, reason: "auto_approval_only_allows_write_or_append" };
-  if (DANGEROUS_OPS.has(proposal.op)) return { allowed: false, reason: "delete_requires_explicit_confirmation" };
-  if (proposal.op === "write" && fs.existsSync(targetPath)) {
-    return { allowed: false, reason: "overwrite_requires_explicit_confirmation" };
-  }
+  if (!AUTO_APPROVAL_OPS.has(proposal.op)) return { allowed: false, reason: `auto_approval_unsupported_op:${proposal.op}` };
   const maxBatchSize = Number(options.maxBatchSize || 1);
-  if (maxBatchSize > 1) return { allowed: false, reason: "bulk_requires_explicit_confirmation" };
+  if (!Number.isFinite(maxBatchSize) || maxBatchSize < 1) return { allowed: false, reason: "invalid_auto_batch_size" };
   return { allowed: true };
 }
 function applyProposal(filePath, proposal) {
@@ -147,11 +145,15 @@ function verifyApplied(filePath, proposal, beforeExists) {
 
 function assertDangerousOperationConfirmed(proposal, targetPath, options) {
   const overwrite = proposal.op === "write" && fs.existsSync(targetPath);
-  const dangerous = DANGEROUS_OPS.has(proposal.op) || overwrite;
+  const dangerous = isDangerousProposal(proposal, targetPath);
   if (!dangerous) return;
   if (proposal.dangerousConfirmed || options.dangerousConfirmed) return;
   const code = overwrite ? "overwrite_requires_confirmation" : "delete_requires_confirmation";
   throw new Error(code);
+}
+
+function isDangerousProposal(proposal, targetPath) {
+  return DANGEROUS_OPS.has(proposal.op) || (proposal.op === "write" && fs.existsSync(targetPath));
 }
 
 function assertGitRepository(groupPath) {
