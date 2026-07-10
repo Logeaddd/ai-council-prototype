@@ -757,6 +757,31 @@ test("git_operation commits staged workspace changes and creates branches", asyn
   assert.equal(execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: tmp, encoding: "utf8" }).trim(), "feature/git-tool");
 });
 
+test("git_operation clones repositories into workspace destinations", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-git-clone-"));
+  const source = path.join(tmp, "source-repo");
+  fs.mkdirSync(source, { recursive: true });
+  initGitRepo(source);
+  fs.writeFileSync(path.join(source, "README.md"), "GIT_CLONE_FACT\n", "utf8");
+  execFileSync("git", ["add", "README.md"], { cwd: source, stdio: "pipe" });
+  execFileSync("git", ["commit", "-m", "seed clone fixture"], { cwd: source, stdio: "pipe" });
+
+  const result = await executeToolRequests({
+    permissionTier: "full",
+    groupPath: tmp,
+    agent: { id: "full", name: "Full" },
+    round: 1,
+    requests: [
+      { tool: "git_operation", action: "clone", url: source, destination: "workspace/cloned-repo", reason: "Clone local fixture." }
+    ]
+  });
+
+  assert.equal(result.results[0].status, "completed");
+  assert.equal(result.results[0].result.action, "clone");
+  assert.deepEqual(result.results[0].result.paths, ["workspace/cloned-repo"]);
+  assert.match(fs.readFileSync(path.join(tmp, "workspace", "cloned-repo", "README.md"), "utf8"), /GIT_CLONE_FACT/);
+});
+
 test("git_operation rejects unsupported destructive actions", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-git-reject-"));
   initGitRepo(tmp);

@@ -11,13 +11,13 @@ const MAX_OUTPUT_BYTES = 1024 * 1024;
 
 export async function gitOperationTool(request, options = {}) {
   const groupRoot = resolveGroupRoot(options.groupPath);
-  const cwd = resolveGitCwd(groupRoot, request.cwd || request.path || ".");
   const action = normalizeAction(request.action || request.command || request.query);
+  const cwd = resolveGitCwd(groupRoot, action === "clone" ? (request.cwd || ".") : (request.cwd || request.path || "."));
   const timeoutMs = clampNumber(request.timeoutMs || options.gitTimeoutMs || options.timeoutMs, DEFAULT_TIMEOUT_MS, MIN_TIMEOUT_MS, MAX_TIMEOUT_MS);
   const maxOutputBytes = clampNumber(request.maxOutputBytes || options.maxGitOutputBytes, DEFAULT_MAX_OUTPUT_BYTES, 1024, MAX_OUTPUT_BYTES);
   const startedAtMs = Date.now();
 
-  if (action !== "init") await assertGitRepository(cwd, { timeoutMs, maxOutputBytes, signal: options.signal });
+  if (!["init", "clone"].includes(action)) await assertGitRepository(cwd, { timeoutMs, maxOutputBytes, signal: options.signal });
 
   const context = {
     action,
@@ -32,6 +32,7 @@ export async function gitOperationTool(request, options = {}) {
 
   if (action === "status") return statusOperation(context);
   if (action === "init") return singleGitOperation(context, ["init"]);
+  if (action === "clone") return cloneOperation(context, request);
   if (action === "branch") return singleGitOperation(context, ["branch", "--list"]);
   if (action === "create_branch") {
     const branch = requiredName(request.branch || request.name, "branch");
@@ -70,6 +71,31 @@ async function singleGitOperation(context, args, extra = {}) {
     stdout: step.stdout,
     stderr: step.stderr,
     ...extra
+  });
+}
+
+async function cloneOperation(context, request) {
+  const url = requiredText(request.url || request.repository || request.repo || request.remote, "url");
+  if (/[\r\n]/.test(url)) throw toolError("invalid_url", "Git clone URL cannot contain line breaks.");
+  const destination = optionalCloneDestination(request.destination || request.dest || request.path || request.name, context);
+  const branch = optionalName(request.branch);
+  const args = ["clone"];
+  if (branch) args.push("--branch", branch);
+  args.push(url);
+  if (destination.absolute) {
+    fs.mkdirSync(path.dirname(destination.absolute), { recursive: true });
+    args.push(destination.absolute);
+  }
+  const step = await runGit(context, args);
+  return gitResult(context, {
+    ok: step.ok,
+    code: step.code,
+    error: step.error,
+    remote: redactSecrets(url),
+    branch,
+    paths: destination.relative ? [destination.relative] : [],
+    stdout: step.stdout,
+    stderr: step.stderr
   });
 }
 
@@ -264,7 +290,7 @@ function gitResult(context, payload) {
 
 function normalizeAction(value) {
   const raw = String(value || "status").trim().toLowerCase().replace(/[-\s]+/g, "_");
-  if (["status", "init", "branch", "commit", "pull", "push"].includes(raw)) return raw;
+  if (["status", "init", "clone", "branch", "commit", "pull", "push"].includes(raw)) return raw;
   if (["create_branch", "branch_create", "new_branch"].includes(raw)) return "create_branch";
   if (["switch_branch", "checkout", "checkout_branch"].includes(raw)) return "switch_branch";
   if (["force_push", "push_force", "reset", "reset_hard", "hard_reset", "rebase"].includes(raw)) {
@@ -317,6 +343,8 @@ function resolveGroupRoot(groupPath) {
 }
 
 function resolveGitCwd(groupRoot, input) {
+  const literal = resolveExistingRelativeLiteral(groupRoot, input || ".");
+  if (literal) return literal;
   const alias = normalizeWorkspacePathAlias(input || ".");
   const raw = alias.path || ".";
   const candidate = !alias.aliased && path.isAbsolute(raw) ? path.resolve(raw) : path.resolve(groupRoot, raw);
@@ -325,6 +353,36 @@ function resolveGitCwd(groupRoot, input) {
   if (!fs.existsSync(real)) throw toolError("cwd_not_found", "Git cwd does not exist.");
   if (!fs.statSync(real).isDirectory()) throw toolError("cwd_not_directory", "Git cwd is not a directory.");
   return real;
+}
+
+function resolveExistingRelativeLiteral(groupRoot, input) {
+  const raw = String(input || ".").trim();
+  if (!raw || path.isAbsolute(raw) || raw.startsWith("/") || raw.startsWith("\\")) return "";
+  const candidate = path.resolve(groupRoot, raw);
+  if (!fs.existsSync(candidate)) return "";
+  const real = fs.realpathSync.native(candidate);
+  if (!isInsidePath(groupRoot, real)) throw toolError("path_escape_denied", "Git cwd must stay inside the group workspace.");
+  if (!fs.statSync(real).isDirectory()) throw toolError("cwd_not_directory", "Git cwd is not a directory.");
+  return real;
+}
+
+function optionalCloneDestination(value, context) {
+  const raw = String(value || "").trim();
+  if (!raw) return { absolute: "", relative: "" };
+  if (/[\r\n]/.test(raw)) throw toolError("invalid_destination", "Git clone destination cannot contain line breaks.");
+  const alias = (path.isAbsolute(raw) || raw.startsWith("/") || raw.startsWith("\\"))
+    ? normalizeWorkspacePathAlias(raw)
+    : { path: raw, aliased: false };
+  const absolute = !alias.aliased && path.isAbsolute(alias.path)
+    ? path.resolve(alias.path)
+    : path.resolve(context.groupRoot, alias.path);
+  if (!isInsidePath(context.groupRoot, absolute)) {
+    throw toolError("path_escape_denied", "Git clone destination must stay inside the group workspace.");
+  }
+  return {
+    absolute,
+    relative: path.relative(context.groupRoot, absolute).replaceAll("\\", "/") || "."
+  };
 }
 
 function killProcess(child) {
