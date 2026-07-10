@@ -1,4 +1,5 @@
 import { isReviewerLike, reviewIntensityRules } from "./objectionLedger.js";
+import { disabledToolNames } from "./capabilityPolicy.js";
 
 export function buildRoundPrompt(agent, question, session, round, options = {}) {
   const transcript = formatRoundContext(session, options.contextSections);
@@ -38,6 +39,7 @@ export function buildRoundPrompt(agent, question, session, round, options = {}) 
         "Use fetch_url only for text/html/json pages. Do not use fetch_url to download zip, jar, exe, images, or other binary files; for binary downloads use execute_command with curl/PowerShell inside the workspace, then use extract_archive for zip files if needed.",
         toolRuntimeEnvironmentLine(options.runtimeEnvironment),
         "Each tool_requests item must include tool and reason. For web_search/search_context/mcp_search_npm/skill_search include query. For load_context include sessionId and optional round. For skill_read include skillId and optional offset/maxBytes; when truncated is true, read again from nextOffset. For skill_enable/skill_disable/skill_remove include skillId. For skill_install include skillId for a built-in skill, skillUrl for a public SKILL.md URL, or skillMarkdown for direct Markdown. For fetch_url/api_request/browser_control include url. For api_request include method and optional headers, json, or body. For list_directory/read_file/extract_archive/database_query include path. For database_query include sql and optional params, mode (query or execute), create, and maxRows. For extract_archive include destination when you want a specific output folder. For search_files/grep_content include query and optional path. For execute_command include command, optional cwd, optional shell (system, powershell, cmd, bash, sh), optional timeoutMs, and optional background. A background command only proves startup; use process_control with action list, status, output, or stop and processId to observe and control it. For process_control output, optionally include stream (stdout or stderr), offset, and maxBytes. For run_code include language and code. For install_package include manager (npm, pip, cargo, go, or gem) and packageName. For run_tests include runner (npm, pytest, cargo, or custom), optional cwd, and command for custom. For git_operation include action (status, init, clone, branch, create_branch, switch_branch, commit, pull, push), optional url/repository/repo for clone, optional destination for clone, optional branch, remote, message, paths, cwd, and timeoutMs. For browser_control include optional steps with action open, navigate, click, type, evaluate, screenshot, wait, or wait_for_selector. For mcp_install_npm include packageSpec or catalogId, optional serverId, binName, and args. For mcp_uninstall include serverId. For mcp_list_tools, mcp_list_resources, and mcp_list_prompts include optional serverId. For mcp_call include mcpToolName and arguments; include serverId only after choosing a specific server or when the same tool name appears on more than one MCP server. For mcp_read_resource include serverId when needed and uri. For mcp_get_prompt include serverId when needed, promptName, and optional arguments. Allowed tool values: web_search, fetch_url, api_request, list_directory, read_file, search_files, grep_content, search_context, load_context, skill_read, skill_list, skill_search, skill_install, skill_enable, skill_disable, skill_remove, extract_archive, execute_command, process_control, run_code, install_package, run_tests, git_operation, browser_control, database_query, mcp_search_npm, mcp_install_npm, mcp_uninstall, mcp_list_tools, mcp_call, mcp_list_resources, mcp_read_resource, mcp_list_prompts, mcp_get_prompt.",
+        disabledCapabilitiesLine(options.appSettings),
         "If skipping, use keys: status, reason.",
         globalRequirement ? `[Boss global requirement]\n${globalRequirement}` : "",
         resumeInstruction ? `[Continuation]\n${resumeInstruction}` : "",
@@ -142,9 +144,19 @@ function independentAnswerModeLine(options = {}) {
 
 function fileOperationProtocolLine(options = {}) {
   if (!options.fileOperationContext) return "";
+  if (disabledToolNames(options.appSettings).includes("read_file")) {
+    return "Global settings have disabled file tools. Do not request file_operations or claim workspace files were read, written, appended, or deleted.";
+  }
   const tier = options.fileOperationPermissionTier || "text";
   if (tier === "text") return "You have text-only file permission for this workspace. If the task requires creating or modifying files, do not propose file_operations yourself; discuss requirements and leave file proposals to a member with tool or full file permission.";
   return "If this task requires inspecting workspace files, request read/list in file_operations. If it requires creating or modifying workspace files, you MUST propose the change in file_operations with the full file content for write/append. Do not put complete file content only in argument, suggested_revision, or artifacts; those fields may summarize it. Never paste large source files, scripts, Gradle files, manifests, or other durable file contents into argument; put durable file contents only in file_operations.content so the app can write them.";
+}
+
+function disabledCapabilitiesLine(appSettings) {
+  const tools = disabledToolNames(appSettings);
+  if (!tools.length) return "";
+  const fileOverride = tools.includes("read_file") ? " file_operations are also disabled." : "";
+  return `Global settings override every generic tool statement above. These tools are disabled and unavailable; do not request them: ${tools.join(", ")}.${fileOverride}`;
 }
 
 function toolRequestProtocolLine(options = {}) {

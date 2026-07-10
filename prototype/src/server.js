@@ -25,6 +25,7 @@ import { importProjectFolder } from "./projectImporter.js";
 import { deletePublicMemory, listPublicMemories, upsertPublicMemory } from "./publicMemory.js";
 import { readTaskState } from "./taskState.js";
 import { listCapabilities } from "./capabilityRegistry.js";
+import { capabilityEnabled } from "./capabilityPolicy.js";
 import { fetchPublicUrl, searchWeb } from "./webTools.js";
 import { deleteMcpServerConfig, listMcpServerConfigs, upsertMcpServerConfig } from "./mcpConfig.js";
 import {
@@ -68,7 +69,10 @@ const server = http.createServer(async (req, res) => {
     }
     serveStatic(res, url.pathname);
   } catch (error) {
-    sendJson(res, error.statusCode || 500, { error: error.message });
+    sendJson(res, error.statusCode || 500, {
+      error: error.message,
+      ...(error.code ? { code: error.code } : {})
+    });
   }
 });
 
@@ -107,11 +111,16 @@ async function handleApi(req, res, url) {
   }
 
   if (req.method === "GET" && url.pathname === "/api/capabilities") {
-    sendJson(res, 200, { capabilities: listCapabilities({ env: process.env, appSettings: readCurrentAppSettings() }) });
+    const appSettings = readCurrentAppSettings();
+    sendJson(res, 200, {
+      capabilities: listCapabilities({ env: process.env, appSettings }),
+      toolAccess: appSettings.capabilities?.toolAccess || {}
+    });
     return;
   }
 
   if (req.method === "POST" && url.pathname === "/api/tools/fetch-url") {
+    requireCapability("web");
     const body = await readBody(req);
     sendJson(res, 200, await fetchPublicUrl(body.url, {
       timeoutMs: body.timeoutMs,
@@ -121,6 +130,7 @@ async function handleApi(req, res, url) {
   }
 
   if (req.method === "POST" && url.pathname === "/api/tools/web-search") {
+    requireCapability("web");
     const body = await readBody(req);
     sendJson(res, 200, await searchWeb(body.query, {
       count: body.count,
@@ -241,6 +251,7 @@ async function handleApi(req, res, url) {
   }
 
   if (req.method === "POST" && url.pathname === "/api/mcp/tools/list") {
+    requireCapability("mcp");
     const body = await readBody(req);
     sendJson(res, 200, await listConfiguredMcpTools(baseDir, {
       serverId: body.serverId || body.id
@@ -251,7 +262,9 @@ async function handleApi(req, res, url) {
   }
 
   if (req.method === "POST" && url.pathname === "/api/mcp/tools/call") {
+    requireCapability("mcp");
     const body = await readBody(req);
+    if (isBuiltInWebMcpRequest(body)) requireCapability("web");
     sendJson(res, 200, await callConfiguredMcpTool(baseDir, {
       serverId: body.serverId || body.id,
       mcpToolName: body.mcpToolName || body.toolName || body.name,
@@ -263,6 +276,7 @@ async function handleApi(req, res, url) {
   }
 
   if (req.method === "POST" && url.pathname === "/api/mcp/resources/list") {
+    requireCapability("mcp");
     const body = await readBody(req);
     sendJson(res, 200, await listConfiguredMcpResources(baseDir, {
       serverId: body.serverId || body.id,
@@ -274,6 +288,7 @@ async function handleApi(req, res, url) {
   }
 
   if (req.method === "POST" && url.pathname === "/api/mcp/resources/read") {
+    requireCapability("mcp");
     const body = await readBody(req);
     sendJson(res, 200, await readConfiguredMcpResource(baseDir, {
       serverId: body.serverId || body.id,
@@ -285,6 +300,7 @@ async function handleApi(req, res, url) {
   }
 
   if (req.method === "POST" && url.pathname === "/api/mcp/prompts/list") {
+    requireCapability("mcp");
     const body = await readBody(req);
     sendJson(res, 200, await listConfiguredMcpPrompts(baseDir, {
       serverId: body.serverId || body.id,
@@ -296,6 +312,7 @@ async function handleApi(req, res, url) {
   }
 
   if (req.method === "POST" && url.pathname === "/api/mcp/prompts/get") {
+    requireCapability("mcp");
     const body = await readBody(req);
     sendJson(res, 200, await getConfiguredMcpPrompt(baseDir, {
       serverId: body.serverId || body.id,
@@ -591,6 +608,7 @@ async function handleApi(req, res, url) {
 
 
   if (req.method === "POST" && url.pathname === "/api/file-operations/approve") {
+    requireCapability("files");
     const body = await readBody(req);
     body.groupPath = resolveWorkspacePath(body.groupPath, "groupPath");
     sendJson(res, 200, approvePendingFileOperation(body));
@@ -605,6 +623,7 @@ async function handleApi(req, res, url) {
   }
 
   if (req.method === "POST" && url.pathname === "/api/file-operations/auto-approve") {
+    requireCapability("files");
     const body = await readBody(req);
     body.groupPath = resolveWorkspacePath(body.groupPath, "groupPath");
     sendJson(res, 200, autoApprovePendingFileOperation(body));
@@ -612,6 +631,7 @@ async function handleApi(req, res, url) {
   }
 
   if (req.method === "POST" && url.pathname === "/api/file-operations/execute") {
+    requireCapability("files");
     const body = await readBody(req);
     body.groupPath = resolveWorkspacePath(body.groupPath, "groupPath");
     sendJson(res, 200, executeApprovedFileOperation(body));
@@ -1093,6 +1113,21 @@ function readCurrentAppSettings() {
   return readAppSettings(baseDir, { groupsRoot: defaultGroupsRoot });
 }
 
+function requireCapability(familyId) {
+  if (capabilityEnabled(readCurrentAppSettings(), familyId)) return;
+  const error = new Error(`${familyId}_capability_disabled`);
+  error.code = "capability_disabled";
+  error.statusCode = 409;
+  throw error;
+}
+
+function isBuiltInWebMcpRequest(body = {}) {
+  const serverId = String(body.serverId || body.id || "").toLowerCase();
+  const toolName = String(body.mcpToolName || body.toolName || body.name || "").toLowerCase();
+  return ["web-tools", "built-in-web-tools", "builtin-web-tools"].includes(serverId)
+    || ["web_search", "fetch_url"].includes(toolName);
+}
+
 function buildAppSettingsPatch(body) {
   const patch = {};
   if (Object.hasOwn(body, "groupsRoot")) {
@@ -1103,11 +1138,15 @@ function buildAppSettingsPatch(body) {
   }
 
   const webSearch = body.capabilities?.webSearch || {};
-  if (Object.hasOwn(webSearch, "apiKey") || Object.hasOwn(body, "webSearchApiKey")) {
+  const toolAccess = body.capabilities?.toolAccess;
+  if (Object.hasOwn(webSearch, "apiKey") || Object.hasOwn(body, "webSearchApiKey") || (toolAccess && typeof toolAccess === "object")) {
     patch.capabilities = {
-      webSearch: {
-        apiKey: String(Object.hasOwn(webSearch, "apiKey") ? webSearch.apiKey : body.webSearchApiKey).trim()
-      }
+      ...(Object.hasOwn(webSearch, "apiKey") || Object.hasOwn(body, "webSearchApiKey") ? {
+        webSearch: {
+          apiKey: String(Object.hasOwn(webSearch, "apiKey") ? webSearch.apiKey : body.webSearchApiKey).trim()
+        }
+      } : {}),
+      ...(toolAccess && typeof toolAccess === "object" ? { toolAccess } : {})
     };
   }
   return patch;

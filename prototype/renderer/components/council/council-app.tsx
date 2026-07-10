@@ -382,14 +382,16 @@ export function CouncilApp() {
     groupsRoot?: string
     webSearchApiKey?: string
     clearWebSearchKey?: boolean
+    toolAccess?: import("@/lib/council-live").CapabilityAccess
   }) {
     setMode(values.mode)
     setGlobalRequirement(values.globalRequirement)
     setMaxRounds(values.totalRounds)
     setAgentTimeoutMinutes(values.agentTimeoutMinutes)
     const shouldUpdateWebSearchKey = Boolean(values.webSearchApiKey) || Boolean(values.clearWebSearchKey)
+    const shouldUpdateToolAccess = Boolean(values.toolAccess)
     const shouldUpdateGroupsRoot = values.groupsRoot !== undefined && values.groupsRoot !== (appSettings?.groupsRoot || "")
-    if (shouldUpdateWebSearchKey || shouldUpdateGroupsRoot) {
+    if (shouldUpdateWebSearchKey || shouldUpdateGroupsRoot || shouldUpdateToolAccess) {
       try {
         const nextSettings = await saveAppSettings({
           ...(shouldUpdateGroupsRoot ? { groupsRoot: values.groupsRoot || "" } : {}),
@@ -397,6 +399,7 @@ export function CouncilApp() {
             webSearch: {
               ...(shouldUpdateWebSearchKey ? { apiKey: values.clearWebSearchKey ? "" : values.webSearchApiKey || "" } : {}),
             },
+            ...(shouldUpdateToolAccess ? { toolAccess: values.toolAccess } : {}),
           },
         })
         setAppSettings(nextSettings)

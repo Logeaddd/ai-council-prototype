@@ -441,7 +441,19 @@ export interface AppSettings {
       envKeyConfigured?: boolean
       source?: string
     }
+    toolAccess?: CapabilityAccess
   }
+}
+
+export interface CapabilityAccess {
+  web?: boolean
+  files?: boolean
+  automation?: boolean
+  browser?: boolean
+  database?: boolean
+  memory?: boolean
+  mcp?: boolean
+  skills?: boolean
 }
 
 export interface CapabilityRecord {
@@ -455,6 +467,7 @@ export interface CapabilityRecord {
   requirement?: string
   command?: string
   tools?: string[]
+  capabilityKey?: keyof CapabilityAccess
 }
 
 export interface McpInstallCatalogItem {
@@ -625,7 +638,7 @@ export async function fetchProviderPresets() {
 }
 
 export async function fetchCapabilities() {
-  return api<{ capabilities: CapabilityRecord[] }>("/api/capabilities")
+  return api<{ capabilities: CapabilityRecord[]; toolAccess?: CapabilityAccess }>("/api/capabilities")
 }
 
 export async function fetchMcpServers() {
@@ -730,6 +743,7 @@ export async function saveAppSettings(body: Partial<AppSettings> & {
     webSearch?: {
       apiKey?: string
     }
+    toolAccess?: CapabilityAccess
   }
 }) {
   return api<AppSettings>("/api/app-settings", body)

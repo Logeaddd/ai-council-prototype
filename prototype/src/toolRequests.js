@@ -33,6 +33,7 @@ import {
   searchSkillCandidates
 } from "./skillPacks.js";
 import { loadSessionContextArchiveItem, searchSessionContextArchive } from "./storage.js";
+import { disabledCapabilityForRequest } from "./capabilityPolicy.js";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -153,6 +154,25 @@ export async function executeToolRequests(options = {}) {
       const rejection = reject(base, "permission_denied", `${normalized.tool} requires full permission.`);
       rejected.push(rejection);
       events.push(toolEvent("tool_failure", base, { status: "rejected", code: rejection.code, error: rejection.error }));
+      appendToolAuditLog(options.groupPath, "rejected", rejection);
+      appendCommandAuditLog(options.groupPath, "rejected", rejection);
+      appendCodeRunAuditLog(options.groupPath, "rejected", rejection);
+      appendPackageAuditLog(options.groupPath, "rejected", rejection);
+      appendTestAuditLog(options.groupPath, "rejected", rejection);
+      appendApiAuditLog(options.groupPath, "rejected", rejection);
+      appendGitAuditLog(options.groupPath, "rejected", rejection);
+      appendBrowserAuditLog(options.groupPath, "rejected", rejection);
+      appendDatabaseAuditLog(options.groupPath, "rejected", rejection);
+      appendMcpAuditLog(options.groupPath, "rejected", rejection);
+      appendProcessAuditLog(options.groupPath, "rejected", rejection);
+      continue;
+    }
+    const disabledCapability = disabledCapabilityForRequest(normalized, options.appSettings);
+    if (disabledCapability) {
+      const rejection = reject(base, "capability_disabled", `${disabledCapability.label} is disabled in global settings.`);
+      rejection.capabilityId = disabledCapability.id;
+      rejected.push(rejection);
+      events.push(toolEvent("tool_failure", base, { status: "rejected", code: rejection.code, error: rejection.error, capabilityId: disabledCapability.id }));
       appendToolAuditLog(options.groupPath, "rejected", rejection);
       appendCommandAuditLog(options.groupPath, "rejected", rejection);
       appendCodeRunAuditLog(options.groupPath, "rejected", rejection);
@@ -755,6 +775,7 @@ function reject(request, code, reason) {
     skillId: request.skillId,
     skillUrl: safeSkillUrlForStorage(request.skillUrl),
     skillMarkdown: request.skillMarkdown ? summarizeBodyForStorage(request.skillMarkdown) : undefined,
+    capabilityId: request.capabilityId,
     mode: request.mode,
     maxRows: request.maxRows,
     headers: safeHeadersForStorage(request.headers),
@@ -826,6 +847,7 @@ function resultRecord(request, extra) {
     skillId: request.skillId,
     skillUrl: safeSkillUrlForStorage(request.skillUrl),
     skillMarkdown: request.skillMarkdown ? summarizeBodyForStorage(request.skillMarkdown) : undefined,
+    capabilityId: request.capabilityId,
     mode: request.mode,
     maxRows: request.maxRows,
     headers: safeHeadersForStorage(request.headers),
@@ -925,6 +947,7 @@ function toolEvent(type, request, extra = {}) {
     skillId: request.skillId,
     skillUrl: safeSkillUrlForStorage(request.skillUrl),
     skillMarkdown: request.skillMarkdown ? summarizeBodyForStorage(request.skillMarkdown) : undefined,
+    capabilityId: request.capabilityId,
     mode: request.mode,
     maxRows: request.maxRows,
     headers: safeHeadersForStorage(request.headers),
@@ -1207,6 +1230,7 @@ function appendToolAuditLog(groupPath, action, item) {
       status: item.status,
       code: item.code,
       error: item.error,
+      capabilityId: item.capabilityId,
       round: item.round,
       source_agent_id: item.source_agent_id,
       source_agent_name: item.source_agent_name,
@@ -1280,6 +1304,7 @@ function appendSkillToolAuditLog(groupPath, action, item) {
       status: item.status,
       code: item.code,
       error: item.error,
+      capabilityId: item.capabilityId,
       round: item.round,
       source_agent_id: item.source_agent_id,
       source_agent_name: item.source_agent_name,
@@ -1587,6 +1612,7 @@ function appendMcpAuditLog(groupPath, action, item) {
       status: item.status,
       code: item.code,
       error: item.error,
+      capabilityId: item.capabilityId,
       round: item.round,
       source_agent_id: item.source_agent_id,
       source_agent_name: item.source_agent_name,

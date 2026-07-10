@@ -36,6 +36,7 @@ import {
   setSkillEnabled,
   uninstallMcpServer,
   type CapabilityRecord,
+  type CapabilityAccess,
   type McpInstallCatalogItem,
   type McpSearchResult,
   type McpServerRecord,
@@ -112,6 +113,7 @@ export function SettingsSheet({
     groupsRoot?: string
     webSearchApiKey?: string
     clearWebSearchKey?: boolean
+    toolAccess?: CapabilityAccess
   }) => Promise<void> | void
 }) {
   const [activeTab, setActiveTab] = useState<SettingsTab>("rules")
@@ -124,6 +126,7 @@ export function SettingsSheet({
   const [settingsError, setSettingsError] = useState("")
   const [providers, setProviders] = useState<ProviderPresetRecord[]>([])
   const [capabilities, setCapabilities] = useState<CapabilityRecord[]>([])
+  const [capabilityAccess, setCapabilityAccess] = useState<CapabilityAccess>({})
   const [mcpCatalog, setMcpCatalog] = useState<McpInstallCatalogItem[]>([])
   const [mcpSearchQuery, setMcpSearchQuery] = useState("")
   const [mcpSearchResults, setMcpSearchResults] = useState<McpSearchResult[]>([])
@@ -152,6 +155,7 @@ export function SettingsSheet({
       ])
       setProviders(providerResult.providers || [])
       setCapabilities(capabilityResult.capabilities || [])
+      setCapabilityAccess(capabilityResult.toolAccess || accessFromCapabilities(capabilityResult.capabilities || []))
       setMcpCatalog(catalogResult.catalog || [])
       setMcpServers(serverResult.servers || [])
       setSkillCatalog(skillCatalogResult.catalog || [])
@@ -186,6 +190,7 @@ export function SettingsSheet({
         groupsRoot: dataRoot.trim(),
         webSearchApiKey: webSearchApiKey.trim(),
         clearWebSearchKey,
+        toolAccess: capabilityAccess,
       })
       onGlobalRequirementChange(text)
       setWebSearchApiKey("")
@@ -474,7 +479,14 @@ export function SettingsSheet({
           {activeTab === "plugins" ? <PluginsPanel servers={mcpServers} loading={loadingFacts} /> : null}
           {activeTab === "memory" ? <MemoryPanel capabilities={capabilities} loading={loadingFacts} /> : null}
           {activeTab === "data" ? <DataPanel value={dataRoot} onChange={setDataRoot} /> : null}
-          {activeTab === "security" ? <SecurityPanel capabilities={capabilities} loading={loadingFacts} /> : null}
+          {activeTab === "security" ? (
+            <SecurityPanel
+              capabilities={capabilities}
+              access={capabilityAccess}
+              loading={loadingFacts}
+              onToggle={(key) => setCapabilityAccess((current) => ({ ...current, [key]: current[key] === false }))}
+            />
+          ) : null}
         </div>
       </div>
     </Sheet>
@@ -1087,10 +1099,14 @@ function DataPanel({
 
 function SecurityPanel({
   capabilities,
+  access,
   loading,
+  onToggle,
 }: {
   capabilities: CapabilityRecord[]
+  access: CapabilityAccess
   loading: boolean
+  onToggle: (key: keyof CapabilityAccess) => void
 }) {
   const fullTools = capabilities.filter((item) =>
     ["execute-command", "run-code", "install-package", "run-tests", "git-operation", "browser-control"].includes(item.id) ||
@@ -1105,6 +1121,19 @@ function SecurityPanel({
         <PermissionBlock title="工具" items={["网页", "文件", "数据库读取"]} />
         <PermissionBlock title="完全" items={["终端", "代码", "安装", "Git", "浏览器", "MCP"]} />
       </div>
+      <div className="grid gap-2 sm:grid-cols-2">
+        {CAPABILITY_SWITCHES.map((item) => (
+          <label key={item.key} className="flex items-center justify-between rounded-md border border-border px-3 py-2 text-[13px]">
+            <span>{item.label}</span>
+            <input
+              type="checkbox"
+              checked={access[item.key] !== false}
+              onChange={() => onToggle(item.key)}
+              className="h-4 w-4 accent-[var(--primary)]"
+            />
+          </label>
+        ))}
+      </div>
       <FactGrid
         rows={fullTools.map((item) => ({
           key: item.id,
@@ -1117,6 +1146,26 @@ function SecurityPanel({
       />
     </div>
   )
+}
+
+const CAPABILITY_SWITCHES: Array<{ key: keyof CapabilityAccess; label: string }> = [
+  { key: "web", label: "联网工具" },
+  { key: "files", label: "文件工具" },
+  { key: "automation", label: "终端与代码" },
+  { key: "browser", label: "浏览器" },
+  { key: "database", label: "数据库" },
+  { key: "memory", label: "历史与公共记忆" },
+  { key: "mcp", label: "MCP" },
+  { key: "skills", label: "技能" },
+]
+
+function accessFromCapabilities(capabilities: CapabilityRecord[]): CapabilityAccess {
+  const access: CapabilityAccess = {}
+  for (const capability of capabilities) {
+    if (!capability.capabilityKey || Object.hasOwn(access, capability.capabilityKey)) continue
+    access[capability.capabilityKey] = capability.enabled !== false
+  }
+  return access
 }
 
 function FactGrid({

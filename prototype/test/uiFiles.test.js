@@ -312,6 +312,7 @@ test("preferences wording is removed while group pin and delete actions are wire
 
 test("settings page is category-first and avoids explanatory filler text", () => {
   const settings = read("renderer/components/council/settings-sheet.tsx");
+  const app = read("renderer/components/council/council-app.tsx");
   const sidebar = read("renderer/components/council/groups-sidebar.tsx");
   const live = read("renderer/lib/council-live.ts");
 
@@ -351,6 +352,14 @@ test("settings page is category-first and avoids explanatory filler text", () =>
   assert.match(live, /\/api\/mcp\/search/);
   assert.match(live, /\/api\/mcp\/install/);
   assert.match(live, /\/api\/mcp\/uninstall/);
+  assert.match(settings, /CAPABILITY_SWITCHES\.map/);
+  assert.match(settings, /checked=\{access\[item\.key\] !== false\}/);
+  assert.match(settings, /onChange=\{\(\) => onToggle\(item\.key\)\}/);
+  for (const key of ["web", "files", "automation", "browser", "database", "memory", "mcp", "skills"]) {
+    assert.match(settings, new RegExp(`key: ["']${key}["']`));
+  }
+  assert.match(app, /toolAccess: values\.toolAccess/);
+  assert.match(live, /toolAccess\?: CapabilityAccess/);
 
   for (const text of [
     "议会规则应用",

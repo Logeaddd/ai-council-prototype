@@ -1,6 +1,7 @@
 import path from "node:path";
 import { autoApprovePendingFileOperation, executeApprovedFileOperation } from "./fileOperationExecutor.js";
 import { appendFileOperationAuditLog, listPendingFileOperationProposals, updatePendingFileOperationProposal } from "./fileOperationQueue.js";
+import { capabilityEnabled } from "./capabilityPolicy.js";
 
 const DEFAULT_MAX_AUTO_FILES_PER_RUN = 3;
 const AUTO_FULL_OPS = new Set(["write", "append", "delete"]);
@@ -20,6 +21,13 @@ export function runAutoFileOperations(options = {}) {
     const existing = Array.isArray(session.fileOperationExecutionResults) ? session.fileOperationExecutionResults : [];
     session.fileOperationExecutionState = existing.length ? executionState(existing) : "not_requested";
     return { state: session.fileOperationExecutionState, results: existing };
+  }
+
+  if (!capabilityEnabled(options.appSettings, "files")) {
+    for (const proposal of pending) {
+      results.push(markPending(groupPath, proposal, "capability_disabled", "files_capability_disabled"));
+    }
+    return attachResults(session, results);
   }
 
   if (finalState !== "ready_to_execute") {
@@ -80,6 +88,25 @@ export function runAutoFileOperations(options = {}) {
   }
 
   return attachResults(session, results);
+}
+
+function markPending(groupPath, proposal, status, reason) {
+  const next = {
+    ...proposal,
+    autoExecutionStatus: status,
+    autoExecutionReason: reason
+  };
+  updatePendingFileOperationProposal(groupPath, next);
+  appendFileOperationAuditLog(groupPath, status, next);
+  return {
+    proposalId: proposal.id,
+    path: proposal.path,
+    op: proposal.op,
+    source_agent_id: proposalSeatId(proposal),
+    source_agent_name: proposal.source_agent_name,
+    status,
+    reason
+  };
 }
 
 export function effectivePermissionTier(group = {}, seatId = "") {

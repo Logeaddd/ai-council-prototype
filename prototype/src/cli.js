@@ -7,6 +7,7 @@ import { EVAL_MODES, compareEvalReports, runEvalHarness } from "./evalHarness.js
 import { readMemoryPending } from "./storage.js";
 import { initGroupWorkspace, replaceMember } from "./workspaceManager.js";
 import { addReview, createRecorderDraft, finalizeDraft, listDrafts } from "./writeFlow.js";
+import { readAppSettings } from "./appSettings.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const baseDir = path.resolve(__dirname, "..");
@@ -19,7 +20,9 @@ async function main() {
     const question = loadQuestion(args);
     const group = validateGroupConfig(loadJson(groupPath));
     validateRuntimeEnv(group);
-    const result = await runCouncil(question, group, baseDir);
+    const result = await runCouncil(question, group, baseDir, {
+      appSettings: readAppSettings(baseDir)
+    });
     printFinal(result);
     if (args.includes("--show-transcript")) printTranscript(result);
     return;

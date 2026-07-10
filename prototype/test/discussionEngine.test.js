@@ -12,8 +12,9 @@ import { appendSessionUsage, readGroupUsage } from "../src/usageStats.js";
 import { approveExecutionStandards, prepareExecutionStandards } from "../src/executionStandards.js";
 import { appendPrivateChatMessage } from "../src/privateChat.js";
 import { listPublicMemories, upsertPublicMemory } from "../src/publicMemory.js";
-import { writeContextArchive } from "../src/storage.js";
+import { readMemoryPending, writeContextArchive } from "../src/storage.js";
 import { enableSkillForGroup, installSkillMarkdown } from "../src/skillPacks.js";
+import { writeTaskState } from "../src/taskState.js";
 
 
 test("onModelCall records round and final model payloads", async () => {
@@ -5210,6 +5211,106 @@ test("public memory reaches model prompts as editable shared memory", async () =
     assert.match(firstPrompt, /PUBLIC_MEMORY_RUNTIME_SECRET/);
     assert.match(firstPrompt, /editable summary, not as the original facts/);
     assert.match(firstPrompt, /Source: summarizer/);
+  } finally {
+    await close(server);
+  }
+});
+
+test("disabled memory stays out of provider prompts and stops automatic memory writes", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-memory-disabled-runtime-"));
+  const groupPath = path.join(tmp, "group");
+  fs.mkdirSync(groupPath, { recursive: true });
+  const requests = [];
+  const server = http.createServer(async (req, res) => {
+    const body = JSON.parse(await readRequestBody(req));
+    requests.push(body);
+    const isFinal = JSON.stringify(body.messages || []).includes("FinalDecision JSON object");
+    writeOpenAiStream(res, JSON.stringify(isFinal ? {
+      answer: "Fresh final answer.",
+      consensus_score: 1,
+      supporting_agents: ["Builder"],
+      dissenting_agents: [],
+      minority_report: "",
+      risks: [],
+      next_actions: [],
+      memory_candidates: ["Project rule: NEW_DISABLED_MEMORY must not be saved."]
+    } : {
+      status: "speak",
+      argument: "Fresh answer without historical context.",
+      objections: [],
+      confidence: 0.9,
+      memory_candidates: ["Project rule: ROUND_DISABLED_MEMORY must not be saved."]
+    }));
+  });
+  await listen(server);
+  const apiBaseUrl = `http://127.0.0.1:${server.address().port}/v1`;
+
+  try {
+    fs.writeFileSync(path.join(groupPath, "group.json"), JSON.stringify({
+      id: "memory-disabled-runtime",
+      seats: [{ seatId: "builder", displayName: "Builder", privateFolder: "members/Builder", judge: true }],
+      permissions: { defaultTier: "text", seatTiers: {} },
+      settings: {}
+    }, null, 2), "utf8");
+    upsertPublicMemory(groupPath, {
+      title: "Hidden public memory",
+      content: "DISABLED_PUBLIC_MEMORY_SECRET",
+      source: "summarizer"
+    });
+    writeGroupSharedSummary(groupPath, "DISABLED_GROUP_SUMMARY_SECRET");
+    writeTaskState(groupPath, {
+      sourceQuestion: "DISABLED_TASK_STATE_SECRET",
+      decisions: [{ id: "old", text: "DISABLED_TASK_STATE_SECRET" }]
+    });
+    appendPrivateChatMessage(groupPath, "builder", "DISABLED_PRIVATE_MEMORY_SECRET", { from: "boss" });
+    const summaryPath = path.join(groupPath, "shared", "cache", "shared-summary.md");
+    const taskStatePath = path.join(groupPath, "shared", "task_state.json");
+    const summaryBefore = fs.readFileSync(summaryPath);
+    const taskStateBefore = fs.readFileSync(taskStatePath);
+
+    const group = validateGroupConfig({
+      id: "memory-disabled-runtime",
+      name: "Memory Disabled Runtime",
+      settings: { maxRounds: 1, minConsensusWeight: 1, stopWhenAllSkip: true, agentTimeoutMs: 1000, allowSoloCouncil: true },
+      agents: [{
+        id: "builder",
+        name: "Builder",
+        role: "Builder",
+        provider: "openai-compatible",
+        apiBaseUrl,
+        allowUnsafePrivateNetwork: true,
+        apiKey: "secret-runtime-key",
+        model: "runtime-model",
+        weight: 1,
+        enabled: true,
+        judge: true,
+        providerLimits: { contextWindow: 12000, maxOutputTokens: 1000 }
+      }]
+    });
+
+    const result = await runCouncil("Answer without saved memory.", group, tmp, {
+      groupPath,
+      appSettings: { capabilities: { toolAccess: { memory: false } } }
+    });
+    const providerText = requests.map((body) => JSON.stringify(body.messages || [])).join("\n");
+
+    for (const secret of [
+      "DISABLED_PUBLIC_MEMORY_SECRET",
+      "DISABLED_GROUP_SUMMARY_SECRET",
+      "DISABLED_TASK_STATE_SECRET",
+      "DISABLED_PRIVATE_MEMORY_SECRET"
+    ]) assert.doesNotMatch(providerText, new RegExp(secret));
+    assert.equal(result.session.publicMemoryUpdate.status, "disabled");
+    assert.deepEqual(result.memoryRecords, []);
+    assert.equal(listPublicMemories(groupPath).length, 1);
+    assert.deepEqual(readMemoryPending(tmp), []);
+    assert.deepEqual(fs.readFileSync(summaryPath), summaryBefore);
+    assert.deepEqual(fs.readFileSync(taskStatePath), taskStateBefore);
+    assert.equal(result.transcriptChunk, undefined);
+    assert.equal(result.summaryUpdate, undefined);
+    assert.equal(result.taskStateUpdate, undefined);
+    assert.ok(result.sessionPath);
+    assert.ok(result.contextArchive);
   } finally {
     await close(server);
   }

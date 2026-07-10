@@ -415,6 +415,29 @@ test("full tool prompt advertises full-only tools while tool tier does not", () 
   assert.doesNotMatch(tool[0].content, /mcp_read_resource for configured/);
 });
 
+test("round prompt overrides the generic catalog with globally disabled tools", () => {
+  const messages = buildRoundPrompt({
+    id: "executor",
+    name: "Executor",
+    role: "Executor"
+  }, "Inspect and edit the workspace", { messages: [] }, 1, {
+    fileOperationContext: true,
+    fileOperationPermissionTier: "full",
+    appSettings: {
+      capabilities: {
+        toolAccess: { web: false, files: false, automation: false }
+      }
+    }
+  });
+
+  assert.match(messages[0].content, /Global settings have disabled file tools/);
+  assert.match(messages[0].content, /disabled and unavailable/);
+  assert.match(messages[0].content, /web_search/);
+  assert.match(messages[0].content, /read_file/);
+  assert.match(messages[0].content, /execute_command/);
+  assert.doesNotMatch(messages[0].content, /MUST propose the change in file_operations/);
+});
+
 test("round prompt tells members the real tool runtime environment", () => {
   const messages = buildRoundPrompt({
     id: "executor",

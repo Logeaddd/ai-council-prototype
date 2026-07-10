@@ -63,3 +63,25 @@ test("updating app settings without capabilities preserves stored search key", (
     fs.rmSync(baseDir, { recursive: true, force: true });
   }
 });
+
+test("global capability switches default on and update without changing the search key", () => {
+  const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-settings-"));
+  try {
+    updateAppSettings(baseDir, {
+      capabilities: { webSearch: { apiKey: "keep-this-key" } }
+    });
+    const saved = updateAppSettings(baseDir, {
+      capabilities: { toolAccess: { web: false, files: false } }
+    });
+    const client = redactAppSettingsForClient(saved, { env: {} });
+
+    assert.equal(saved.capabilities.webSearch.apiKey, "keep-this-key");
+    assert.equal(saved.capabilities.toolAccess.web, false);
+    assert.equal(saved.capabilities.toolAccess.files, false);
+    assert.equal(saved.capabilities.toolAccess.automation, true);
+    assert.equal(client.capabilities.toolAccess.web, false);
+    assert.equal(JSON.stringify(client).includes("keep-this-key"), false);
+  } finally {
+    fs.rmSync(baseDir, { recursive: true, force: true });
+  }
+});

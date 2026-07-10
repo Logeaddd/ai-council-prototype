@@ -288,6 +288,28 @@ test("server exposes local MCP server config APIs without starting fake runtimes
   assert.match(mcpConfigJs, /runtime: "not_started"/);
 });
 
+test("server capability gates cover direct web, MCP runtime, and file execution routes", () => {
+  const serverJs = fs.readFileSync(path.join(root, "src", "server.js"), "utf8");
+  assert.match(serverJs, /\/api\/tools\/fetch-url"\) \{\s*requireCapability\("web"\)/);
+  assert.match(serverJs, /\/api\/tools\/web-search"\) \{\s*requireCapability\("web"\)/);
+  for (const route of ["tools/list", "tools/call", "resources/list", "resources/read", "prompts/list", "prompts/get"]) {
+    const escaped = route.replace("/", "\\/");
+    assert.match(serverJs, new RegExp(`/api/mcp/${escaped}[^]*?requireCapability\\(\"mcp\"\\)`));
+  }
+  for (const route of ["approve", "auto-approve", "execute"]) {
+    assert.match(serverJs, new RegExp(`/api/file-operations/${route}[^]*?requireCapability\\(\"files\"\\)`));
+  }
+  assert.match(serverJs, /error\.statusCode = 409/);
+  assert.match(serverJs, /error\.code = "capability_disabled"/);
+  assert.match(serverJs, /\.\.\.\(error\.code \? \{ code: error\.code \} : \{\}\)/);
+});
+
+test("CLI council runs use the same persisted global capability policy", () => {
+  const cliJs = fs.readFileSync(path.join(root, "src", "cli.js"), "utf8");
+  assert.match(cliJs, /readAppSettings/);
+  assert.match(cliJs, /runCouncil\(question, group, baseDir, \{\s*appSettings: readAppSettings\(baseDir\)/);
+});
+
 test("server exposes guarded real skill pack APIs", () => {
   const serverJs = fs.readFileSync(path.join(root, "src", "server.js"), "utf8");
   const skillJs = fs.readFileSync(path.join(root, "src", "skillPacks.js"), "utf8");

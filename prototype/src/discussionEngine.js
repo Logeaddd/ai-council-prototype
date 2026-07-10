@@ -23,6 +23,7 @@ import { readTaskState, updateTaskStateFromSession } from "./taskState.js";
 import { discoverRuntimeEnvironment, formatRuntimeEnvironment } from "./runtimeEnvironment.js";
 import { applyDeliverableVerification, verifyFinalDeliverables } from "./deliverableVerification.js";
 import { formatEnabledSkillMetadataForPrompt, listEnabledSkillMetadata } from "./skillPacks.js";
+import { capabilityEnabled } from "./capabilityPolicy.js";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -49,10 +50,11 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
   const globalRequirement = options.globalRequirement || group.settings?.globalRequirement || "";
   const continuationContext = normalizeContinuationContext(options.continuationContext);
   const workspaceGroup = options.groupPath ? readWorkspaceGroup(options.groupPath) : undefined;
-  const taskState = options.groupPath ? readTaskState(options.groupPath) : undefined;
+  const memoryEnabled = capabilityEnabled(options.appSettings, "memory");
+  const taskState = options.groupPath && memoryEnabled ? readTaskState(options.groupPath) : undefined;
   const runtimeDiscoveryOptions = { managedToolRoots: [path.join(baseDir, "tools")] };
   const runtimeEnvironment = formatRuntimeEnvironment(discoverRuntimeEnvironment(options.groupPath || baseDir, runtimeDiscoveryOptions));
-  const retrievedContext = options.groupPath
+  const retrievedContext = options.groupPath && memoryEnabled
     ? searchSessionContextArchive(options.groupPath, [question, options.latestBossInstruction].filter(Boolean).join("\n"), {
       limit: options.contextSearchLimit || group.settings?.contextSearchLimit || 5
     })
@@ -102,9 +104,9 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
         attachments,
         taskState,
         retrievedContext,
-        enabledSkills: loadEnabledSkills(baseDir, options.groupPath),
-        ...loadSummaryContext(options.groupPath, agent),
-        privateBossMessages: loadPrivateBossMessages(options.groupPath, agent)
+        enabledSkills: loadEnabledSkills(baseDir, options.groupPath, options.appSettings),
+        ...loadSummaryContext(options.groupPath, agent, options.appSettings),
+        privateBossMessages: loadPrivateBossMessages(options.groupPath, agent, options.appSettings)
       });
       const contextStatus = summarizeContextStatus(memberContext, {
         groupPath: options.groupPath,
@@ -166,7 +168,8 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
         groupSettings: group.settings,
         independentAnswerMode: transcriptVisibility === "own",
         hideOpenObjectionLedger: transcriptVisibility === "own",
-        runtimeEnvironment
+        runtimeEnvironment,
+        appSettings: options.appSettings
       };
       const messages = buildRoundPrompt(agent, question, session, round, {
         ...promptOptions,
@@ -196,7 +199,8 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
       const processResponseFileOperations = (currentResponse) => {
         const fileOperationResult = applyFilePermissionTier(
           collectFileOperationProposals(currentResponse, agent, round, options.groupPath),
-          fileOperationPermissionTier
+          fileOperationPermissionTier,
+          options.appSettings
         );
         if (!fileOperationResult.accepted.length && !fileOperationResult.rejected.length) return;
         session.fileOperationProposals.push(...fileOperationResult.accepted);
@@ -209,7 +213,8 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
           groupPath: options.groupPath,
           session,
           group: workspaceGroup || group,
-          permissionTier: fileOperationPermissionTier
+          permissionTier: fileOperationPermissionTier,
+          appSettings: options.appSettings
         });
         accumulatedFileOperationProposals.push(...fileOperationResult.accepted);
         accumulatedFileOperationExecutionResults.push(...readListResults, ...autoFileExecutionResults);
@@ -266,9 +271,9 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
           attachments,
           taskState,
           retrievedContext,
-          enabledSkills: loadEnabledSkills(baseDir, options.groupPath),
-          ...loadSummaryContext(options.groupPath, agent),
-          privateBossMessages: loadPrivateBossMessages(options.groupPath, agent)
+          enabledSkills: loadEnabledSkills(baseDir, options.groupPath, options.appSettings),
+          ...loadSummaryContext(options.groupPath, agent, options.appSettings),
+          privateBossMessages: loadPrivateBossMessages(options.groupPath, agent, options.appSettings)
         });
         const followupMessages = buildRoundPrompt(agent, question, session, round, {
           ...promptOptions,
@@ -366,9 +371,9 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
     attachments,
     taskState,
     retrievedContext,
-    enabledSkills: loadEnabledSkills(baseDir, options.groupPath),
-    ...loadSummaryContext(options.groupPath, judge),
-    privateBossMessages: loadPrivateBossMessages(options.groupPath, judge)
+    enabledSkills: loadEnabledSkills(baseDir, options.groupPath, options.appSettings),
+    ...loadSummaryContext(options.groupPath, judge, options.appSettings),
+    privateBossMessages: loadPrivateBossMessages(options.groupPath, judge, options.appSettings)
   });
   const finalContextStatus = summarizeContextStatus(finalContext, {
     groupPath: options.groupPath,
@@ -430,7 +435,8 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
     const fileExecution = runAutoFileOperations({
       groupPath: options.groupPath,
       session,
-      group: workspaceGroup || group
+      group: workspaceGroup || group,
+      appSettings: options.appSettings
     });
     session.finalDecision.file_execution_state = fileExecution.state;
     session.finalDecision.file_execution_results = fileExecution.results;
@@ -442,7 +448,8 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
   session.finalDecision.memory_candidates = limitMemoryCandidates(session.finalDecision.memory_candidates);
   session.publicMemoryUpdate = persistSummarizerPublicMemory(options.groupPath, session.finalDecision.memory_candidates, {
     sessionId: session.id,
-    agent: judge
+    agent: judge,
+    appSettings: options.appSettings
   });
   session.completedAt = nowIso();
   session.durationMs = elapsedMs(sessionStartMs);
@@ -454,19 +461,21 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
   const contextArchive = options.groupPath
     ? writeContextArchive(session, options.groupPath, { attachments })
     : undefined;
-  const transcriptChunk = options.groupPath
+  const transcriptChunk = options.groupPath && memoryEnabled
     ? appendSessionTranscriptChunk(options.groupPath, session)
     : undefined;
-  const summaryUpdate = options.groupPath
+  const summaryUpdate = options.groupPath && memoryEnabled
     ? updateDeterministicSummaries(options.groupPath, session, workspaceGroup)
     : undefined;
   const usageRecord = options.groupPath
     ? appendSessionUsage(options.groupPath, session, workspaceGroup)
     : undefined;
-  const taskStateUpdate = options.groupPath
+  const taskStateUpdate = options.groupPath && memoryEnabled
     ? updateTaskStateFromSession(options.groupPath, session)
     : undefined;
-  const memoryRecords = appendMemoryCandidates(session.finalDecision, session, baseDir);
+  const memoryRecords = memoryEnabled
+    ? appendMemoryCandidates(session.finalDecision, session, baseDir)
+    : [];
 
   const result = { session, sessionPath, contextArchive, memoryRecords, transcriptChunk, summaryUpdate, usageRecord, taskStateUpdate };
   yield {
@@ -487,6 +496,13 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
 }
 
 function persistSummarizerPublicMemory(groupPath, candidates, options = {}) {
+  if (!capabilityEnabled(options.appSettings, "memory")) {
+    return {
+      status: "disabled",
+      reason: "memory_capability_disabled",
+      candidateCount: Array.isArray(candidates) ? candidates.length : 0
+    };
+  }
   if (!groupPath) {
     return {
       status: "not_applicable",
@@ -974,15 +990,16 @@ function formatCost(value) {
   return Number(value).toFixed(6).replace(/0+$/, "").replace(/\.$/, "");
 }
 
-function loadSummaryContext(groupPath, agent) {
+function loadSummaryContext(groupPath, agent, appSettings) {
   if (!groupPath) return {};
+  if (!capabilityEnabled(appSettings, "memory")) return {};
   try {
     const group = readWorkspaceGroup(groupPath);
     const cache = readSummaryCache(groupPath, agent, group);
     return {
       memberShortSummary: cache.memberShortSummary,
       groupSharedSummary: [
-        formatPublicMemoriesForPrompt(groupPath),
+        capabilityEnabled(appSettings, "memory") ? formatPublicMemoriesForPrompt(groupPath) : "",
         cache.groupSharedSummary,
         formatCompressedTranscriptChunks(cache.compressedTranscriptChunks)
       ].filter(Boolean).join("\n\n")
@@ -992,9 +1009,10 @@ function loadSummaryContext(groupPath, agent) {
   }
 }
 
-function loadPrivateBossMessages(groupPath, agent) {
+function loadPrivateBossMessages(groupPath, agent, appSettings) {
   const seatId = agent?.id;
   if (!groupPath || !seatId) return [];
+  if (!capabilityEnabled(appSettings, "memory")) return [];
   // Browser-only seats may not exist in group.json; use the same display-name
   // based seat payload that private-chat writes use, or the inbox path diverges.
   const seat = {
@@ -1023,8 +1041,9 @@ function formatCompressedTranscriptChunks(chunks = []) {
   return summaries.join("\n");
 }
 
-function loadEnabledSkills(baseDir, groupPath) {
+function loadEnabledSkills(baseDir, groupPath, appSettings) {
   if (!groupPath) return "";
+  if (!capabilityEnabled(appSettings, "skills")) return "";
   try {
     return formatEnabledSkillMetadataForPrompt(listEnabledSkillMetadata(baseDir, groupPath));
   } catch {
@@ -1204,7 +1223,8 @@ function executeRoundAutoFileOperations(options = {}) {
   const result = runAutoFileOperations({
     groupPath: options.groupPath,
     session: autoSession,
-    group: options.group
+    group: options.group,
+    appSettings: options.appSettings
   });
   options.session.fileOperationExecutionResults = result.results || [];
   syncPendingFileOperationStatuses(options.session, options.session.fileOperationExecutionResults);
@@ -1232,7 +1252,26 @@ function syncPendingFileOperationStatuses(session, executionResults = []) {
   });
 }
 
-function applyFilePermissionTier(fileOperationResult, tier) {
+function applyFilePermissionTier(fileOperationResult, tier, appSettings) {
+  if (!capabilityEnabled(appSettings, "files")) {
+    return {
+      accepted: [],
+      rejected: [
+        ...fileOperationResult.rejected,
+        ...fileOperationResult.accepted.map((proposal) => ({
+          id: proposal.id,
+          op: proposal.op,
+          path: proposal.path,
+          sourceIndex: proposal.sourceIndex,
+          source_agent_id: proposal.source_agent_id,
+          source_agent_name: proposal.source_agent_name,
+          code: "capability_disabled",
+          capabilityId: "files",
+          reason: "File tools are disabled in global settings."
+        }))
+      ]
+    };
+  }
   if (tier !== "text") return fileOperationResult;
   return {
     accepted: [],

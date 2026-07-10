@@ -159,6 +159,33 @@ test("auto runner leaves usable-with-risks proposals pending", () => {
   assert.equal(approved.status, "approved");
 });
 
+test("auto runner keeps existing proposals pending while file capability is disabled", () => {
+  const group = createReadyGitGroup({ defaultTier: "full" });
+  const proposal = queueProposal(group.groupPath, {
+    op: "write",
+    path: "src/disabled.js",
+    content: "export const disabled = true;\n",
+    reason: "This must remain pending while files are disabled.",
+    expected_effect: "No file is written."
+  }, "executor");
+
+  const result = runAutoFileOperations({
+    groupPath: group.groupPath,
+    session: baseSession(),
+    group,
+    appSettings: { capabilities: { toolAccess: { files: false } } }
+  });
+
+  assert.equal(result.state, "blocked_by_policy");
+  assert.equal(fs.existsSync(path.join(group.groupPath, "src", "disabled.js")), false);
+  assert.equal(result.results[0].proposalId, proposal.id);
+  assert.equal(result.results[0].status, "capability_disabled");
+  const pending = listPendingFileOperationProposals(group.groupPath).find((item) => item.id === proposal.id);
+  assert.equal(pending.status, "pending_user_approval");
+  assert.equal(pending.autoExecutionStatus, "capability_disabled");
+  assert.equal(readFileOperationAuditLog(group.groupPath).some((item) => item.action === "capability_disabled"), true);
+});
+
 test("auto runner blocks batches above distinct path limit", () => {
   const group = createReadyGitGroup({ defaultTier: "full" });
   for (const name of ["a", "b", "c", "d"]) {

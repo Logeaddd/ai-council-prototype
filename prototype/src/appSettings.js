@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { normalizeCapabilityAccess } from "./capabilityPolicy.js";
 
 export function readAppSettings(baseDir, defaults = {}) {
   const filePath = appSettingsPath(baseDir);
@@ -48,7 +49,8 @@ export function redactAppSettingsForClient(settings, options = {}) {
         storedKeyConfigured,
         envKeyConfigured,
         source: storedKeyConfigured ? "configured_local" : envKeyConfigured ? "configured_env" : "built_in_html"
-      }
+      },
+      toolAccess: normalized.capabilities.toolAccess
     }
   };
 }
@@ -67,7 +69,8 @@ function normalizeCapabilities(value = {}) {
     webSearch: {
       provider: "Brave Search",
       apiKey: String(value.webSearch?.apiKey || "").trim()
-    }
+    },
+    toolAccess: normalizeCapabilityAccess(value.toolAccess)
   };
 }
 
@@ -79,6 +82,10 @@ function mergeCapabilities(current = {}, patch = undefined) {
     webSearch: {
       ...(current.webSearch || {}),
       ...(patch.webSearch || {})
+    },
+    toolAccess: {
+      ...(current.toolAccess || {}),
+      ...(patch.toolAccess || {})
     }
   };
 }
