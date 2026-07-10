@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { addMember, initGroupWorkspace, replaceMember } from "../src/workspaceManager.js";
+import { addMember, initGroupWorkspace, reorderSeats, replaceMember } from "../src/workspaceManager.js";
 
 test("initializes custom group workspace with shared and member folders", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-ws-"));
@@ -139,4 +139,34 @@ test("adding a member stores full configuration, role flags, and permission tier
   assert.equal(summarizerSeat.mandatoryRedTeam, false);
   assert.equal(summarizerSeat.judge, true);
   assert.equal(savedAgain.permissions.seatTiers[summarizer.seat.seatId], "text");
+});
+
+test("reordering seats persists the exact member order", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-reorder-"));
+  const group = initGroupWorkspace({
+    root,
+    groupFolderName: "ordered-group",
+    members: [
+      { seatId: "member", displayName: "成员", model: "deepseek-chat" },
+      { seatId: "reviewer", displayName: "审查者", model: "deepseek-chat", role: "reviewer" },
+      { seatId: "judge", displayName: "总结者", model: "deepseek-chat", role: "summarizer" }
+    ]
+  });
+
+  const result = reorderSeats({
+    groupPath: group.groupPath,
+    seatIds: ["judge", "member", "reviewer"]
+  });
+  const saved = JSON.parse(fs.readFileSync(path.join(group.groupPath, "group.json"), "utf8"));
+
+  assert.deepEqual(result.group.seats.map((seat) => seat.seatId), ["judge", "member", "reviewer"]);
+  assert.deepEqual(saved.seats.map((seat) => seat.displayName), ["总结者", "成员", "审查者"]);
+  assert.throws(
+    () => reorderSeats({ groupPath: group.groupPath, seatIds: ["judge", "member"] }),
+    /every current seat exactly once/,
+  );
+  assert.throws(
+    () => reorderSeats({ groupPath: group.groupPath, seatIds: ["judge", "judge", "member"] }),
+    /duplicate/,
+  );
 });

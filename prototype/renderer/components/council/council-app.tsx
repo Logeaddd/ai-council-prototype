@@ -32,6 +32,7 @@ import {
   groupRecordToUiGroup,
   messageToTranscriptItem,
   rejectFileOperation,
+  reorderSeats,
   saveAppSettings,
   saveGroupSettings,
   saveSeatConfig,
@@ -500,6 +501,39 @@ export function CouncilApp() {
     setStatusText("请先配置新成员，保存后才会添加到小组。")
   }
 
+  async function handleReorderMembers(seatIds: string[]) {
+    if (!group.path || !workspaceGroup) return
+    const currentIds = members.map((member) => member.id)
+    if (
+      seatIds.length !== currentIds.length ||
+      seatIds.some((id) => !currentIds.includes(id)) ||
+      currentIds.every((id, index) => id === seatIds[index])
+    ) {
+      return
+    }
+    const previousGroup = workspaceGroup
+    const orderedSeats = seatIds
+      .map((id) => (workspaceGroup.seats || workspaceGroup.agents || []).find((seat, index) => {
+        const seatId = seat.seatId || seat.id || `seat_${String(index + 1).padStart(2, "0")}`
+        return seatId === id
+      }))
+      .filter(Boolean) as NonNullable<WorkspaceGroup["seats"]>
+    if (workspaceGroup.seats) {
+      setWorkspaceGroup({ ...workspaceGroup, seats: orderedSeats })
+    } else if (workspaceGroup.agents) {
+      setWorkspaceGroup({ ...workspaceGroup, agents: orderedSeats })
+    }
+    try {
+      const result = await reorderSeats({ groupPath: group.path, seatIds })
+      setWorkspaceGroup(result.group)
+      setStatusText("成员顺序已保存。")
+    } catch (error) {
+      setWorkspaceGroup(previousGroup)
+      addSystemItem(`保存成员顺序失败：${errorMessage(error)}`)
+      setStatusText("保存成员顺序失败。")
+    }
+  }
+
   async function handleDiscoverModels(values: {
     providerId: string
     baseUrl: string
@@ -884,6 +918,7 @@ export function CouncilApp() {
             onAddMember={handleAddMember}
             onConfigureMember={setConfigMemberId}
             onToggleMuteMember={toggleMuteMember}
+            onReorderMembers={handleReorderMembers}
             onApproveFileOp={(id) => handleFileOperation("approve", id)}
             onRejectFileOp={(id) => handleFileOperation("reject", id)}
             onExecuteFileOp={(id) => handleFileOperation("execute", id)}

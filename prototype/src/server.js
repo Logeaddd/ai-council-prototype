@@ -18,7 +18,7 @@ import { listProviderPresets } from "./providerRegistry.js";
 import { discoverProviderModels, checkProviderHealth } from "./modelDiscovery.js";
 import { readUsageSnapshot } from "./usageStats.js";
 import { formatFileAttachmentsForPrompt, normalizeFileAttachments } from "./attachments.js";
-import { addMember, initGroupWorkspace, replaceMember } from "./workspaceManager.js";
+import { addMember, initGroupWorkspace, reorderSeats, replaceMember } from "./workspaceManager.js";
 import { addReview, createRecorderDraft, finalizeDraft, listApproved, listDrafts } from "./writeFlow.js";
 import { listGroupSessions, readGroupSession, readSessionContextArchive, searchSessionContextArchive } from "./storage.js";
 import { importProjectFolder } from "./projectImporter.js";
@@ -595,6 +595,13 @@ async function handleApi(req, res, url) {
       if (!status.ok) throw new Error("Git is required before enabling tool permissions.");
     }
     sendJson(res, 200, updateGroupSeat(groupPath, body));
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/group/seats/reorder") {
+    const body = await readBody(req);
+    const groupPath = resolveWorkspacePath(body.groupPath, "groupPath");
+    sendJson(res, 200, reorderSeats({ groupPath, seatIds: body.seatIds }));
     return;
   }
 

@@ -105,12 +105,16 @@ test("server exposes guarded group settings and seat config persistence", () => 
   const workspaceManagerJs = fs.readFileSync(path.join(root, "src", "workspaceManager.js"), "utf8");
   assert.match(serverJs, /\/api\/group\/settings/);
   assert.match(serverJs, /\/api\/group\/seat/);
+  assert.match(serverJs, /\/api\/group\/seats\/reorder/);
   assert.match(serverJs, /\/api\/workspace\/add-member/);
   assert.match(serverJs, /updateGroupSettings/);
   assert.match(serverJs, /updateGroupSeat/);
+  assert.match(serverJs, /reorderSeats\(\{ groupPath, seatIds: body\.seatIds \}\)/);
   assert.match(serverJs, /resolveWorkspacePath\(body\.groupPath, "groupPath"\)/);
   assert.match(serverJs, /addMember\(body\)/);
   assert.match(workspaceManagerJs, /export function addMember/);
+  assert.match(workspaceManagerJs, /export function reorderSeats/);
+  assert.match(workspaceManagerJs, /Seat order must include every current seat exactly once/);
   assert.match(workspaceManagerJs, /nextSeatId/);
   assert.match(workspaceManagerJs, /createMemberDirs\(privateFolder\)/);
   assert.match(serverJs, /normalizeMaxRounds\(settings\.maxRounds\)/);

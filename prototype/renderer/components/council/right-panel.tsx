@@ -11,6 +11,7 @@ import {
   Cpu,
   FileCode2,
   GitCommitHorizontal,
+  GripVertical,
   KeyRound,
   Plus,
   Settings2,
@@ -53,6 +54,7 @@ export function RightPanel({
   onAddMember,
   onConfigureMember,
   onToggleMuteMember,
+  onReorderMembers,
   onApproveFileOp,
   onRejectFileOp,
   onExecuteFileOp,
@@ -71,10 +73,36 @@ export function RightPanel({
   onAddMember: () => void
   onConfigureMember: (id: string) => void
   onToggleMuteMember: (id: string) => void
+  onReorderMembers: (ids: string[]) => void
   onApproveFileOp: (id: string) => void
   onRejectFileOp: (id: string) => void
   onExecuteFileOp: (id: string) => void
 }) {
+  const [draggedMemberId, setDraggedMemberId] = useState<string | null>(null)
+  const [dragOverMemberId, setDragOverMemberId] = useState<string | null>(null)
+
+  function handleMemberDrop(targetId: string) {
+    if (!draggedMemberId || draggedMemberId === targetId) {
+      setDraggedMemberId(null)
+      setDragOverMemberId(null)
+      return
+    }
+    const ids = members.map((member) => member.id)
+    const from = ids.indexOf(draggedMemberId)
+    const to = ids.indexOf(targetId)
+    if (from < 0 || to < 0) {
+      setDraggedMemberId(null)
+      setDragOverMemberId(null)
+      return
+    }
+    const next = ids.filter((id) => id !== draggedMemberId)
+    const targetIndex = next.indexOf(targetId)
+    next.splice(from < to ? targetIndex + 1 : targetIndex, 0, draggedMemberId)
+    onReorderMembers(next)
+    setDraggedMemberId(null)
+    setDragOverMemberId(null)
+  }
+
   return (
     <aside className="flex h-full w-[22rem] shrink-0 flex-col overflow-y-auto border-l border-border bg-sidebar">
       <DecisionCard decision={decision} statusText={statusText} />
@@ -97,6 +125,31 @@ export function RightPanel({
               key={member.id}
               member={member}
               mode={mode}
+              dragging={draggedMemberId === member.id}
+              dragOver={dragOverMemberId === member.id && draggedMemberId !== member.id}
+              draggable={members.length > 1}
+              onDragStart={(event) => {
+                setDraggedMemberId(member.id)
+                event.dataTransfer.effectAllowed = "move"
+                event.dataTransfer.setData("text/plain", member.id)
+              }}
+              onDragOver={(event) => {
+                if (!draggedMemberId || draggedMemberId === member.id) return
+                event.preventDefault()
+                event.dataTransfer.dropEffect = "move"
+                setDragOverMemberId(member.id)
+              }}
+              onDragLeave={() => {
+                setDragOverMemberId((current) => (current === member.id ? null : current))
+              }}
+              onDrop={(event) => {
+                event.preventDefault()
+                handleMemberDrop(member.id)
+              }}
+              onDragEnd={() => {
+                setDraggedMemberId(null)
+                setDragOverMemberId(null)
+              }}
               onConfigure={() => onConfigureMember(member.id)}
               onToggleMute={() => onToggleMuteMember(member.id)}
             />
@@ -215,11 +268,27 @@ function DecisionCard({
 function MemberCard({
   member,
   mode,
+  dragging,
+  dragOver,
+  draggable,
+  onDragStart,
+  onDragOver,
+  onDragLeave,
+  onDrop,
+  onDragEnd,
   onConfigure,
   onToggleMute,
 }: {
   member: AgentMember
   mode: WorkMode
+  dragging: boolean
+  dragOver: boolean
+  draggable: boolean
+  onDragStart: (event: React.DragEvent<HTMLButtonElement>) => void
+  onDragOver: (event: React.DragEvent<HTMLDivElement>) => void
+  onDragLeave: () => void
+  onDrop: (event: React.DragEvent<HTMLDivElement>) => void
+  onDragEnd: () => void
   onConfigure: () => void
   onToggleMute: () => void
 }) {
@@ -231,12 +300,31 @@ function MemberCard({
         : "danger"
   return (
     <div
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop}
       className={cn(
         "rounded-lg border bg-card/50 transition-colors",
         member.state === "unavailable" ? "border-danger/30" : "border-border",
+        dragging && "opacity-55",
+        dragOver && "border-primary/70 bg-primary/5",
       )}
     >
       <div className="flex items-center gap-2.5 p-2.5">
+        <button
+          type="button"
+          draggable={draggable}
+          onDragStart={onDragStart}
+          onDragEnd={onDragEnd}
+          aria-label={`拖动调整 ${member.name} 顺序`}
+          title="拖动排序"
+          className={cn(
+            "flex size-5 shrink-0 cursor-grab items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground active:cursor-grabbing",
+            !draggable && "cursor-default opacity-40 hover:bg-transparent hover:text-muted-foreground",
+          )}
+        >
+          <GripVertical className="size-3.5" />
+        </button>
         <Avatar name={member.name} id={member.id} size="lg" />
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5">

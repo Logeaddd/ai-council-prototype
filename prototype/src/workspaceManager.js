@@ -159,6 +159,35 @@ export function addMember(options) {
   return { ok: true, group, seat };
 }
 
+export function reorderSeats(options) {
+  const groupPath = path.resolve(requireOption(options.groupPath, "groupPath"));
+  const seatIds = options.seatIds;
+  if (!Array.isArray(seatIds)) throw new Error("seatIds must be an array");
+  const groupFile = path.join(groupPath, "group.json");
+  const group = JSON.parse(fs.readFileSync(groupFile, "utf8"));
+  const seatKey = Array.isArray(group.seats) ? "seats" : "agents";
+  const seats = Array.isArray(group[seatKey]) ? group[seatKey] : [];
+  const ids = seatIds.map((id) => String(id || "").trim()).filter(Boolean);
+  if (ids.length !== seats.length) {
+    throw new Error("Seat order must include every current seat exactly once");
+  }
+  if (new Set(ids).size !== ids.length) {
+    throw new Error("Seat order contains duplicate seat ids");
+  }
+  const byId = new Map();
+  seats.forEach((seat, index) => {
+    byId.set(seatIdForOrder(seat, index), seat);
+  });
+  const unknown = ids.filter((id) => !byId.has(id));
+  if (unknown.length) {
+    throw new Error(`Unknown seatId in order: ${unknown.join(", ")}`);
+  }
+  group[seatKey] = ids.map((id) => byId.get(id));
+  writeJson(groupFile, group);
+  appendLog(groupPath, `Reordered seats: ${ids.join(", ")}`);
+  return { ok: true, group };
+}
+
 function createMemberDirs(privateFolder) {
   createDirs([
     privateFolder,
@@ -215,6 +244,10 @@ function nextSeatId(seats) {
   let index = seats.length + 1;
   while (used.has(`seat_${String(index).padStart(2, "0")}`)) index += 1;
   return `seat_${String(index).padStart(2, "0")}`;
+}
+
+function seatIdForOrder(seat = {}, index = 0) {
+  return seat.seatId || seat.id || `seat_${String(index + 1).padStart(2, "0")}`;
 }
 
 function normalizeReviewIntensity(value) {

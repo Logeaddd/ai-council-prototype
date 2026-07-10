@@ -196,6 +196,23 @@ test("right panel uses plain wording and keeps real member and file-operation co
   assert.match(rightPanel, /aria-label="拒绝"/);
 });
 
+test("right panel can drag members and persist their order", () => {
+  const rightPanel = read("renderer/components/council/right-panel.tsx");
+  const app = read("renderer/components/council/council-app.tsx");
+  const live = read("renderer/lib/council-live.ts");
+
+  assert.match(rightPanel, /GripVertical/);
+  assert.match(rightPanel, /draggable=\{members\.length > 1\}/);
+  assert.match(rightPanel, /onDragStart/);
+  assert.match(rightPanel, /onDrop/);
+  assert.match(rightPanel, /onReorderMembers\(next\)/);
+  assert.match(app, /async function handleReorderMembers\(seatIds: string\[\]\)/);
+  assert.match(app, /reorderSeats\(\{ groupPath: group\.path, seatIds \}\)/);
+  assert.match(app, /onReorderMembers=\{handleReorderMembers\}/);
+  assert.match(live, /export async function reorderSeats/);
+  assert.match(live, /\/api\/group\/seats\/reorder/);
+});
+
 test("independent mode is named proctoring and uses supervisors", () => {
   const data = read("renderer/lib/council-data.ts");
   const rightPanel = read("renderer/components/council/right-panel.tsx");

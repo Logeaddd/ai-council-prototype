@@ -772,6 +772,13 @@ export async function saveSeatConfig(body: {
   return api<{ ok: boolean; group: WorkspaceGroup }>("/api/group/seat", body)
 }
 
+export async function reorderSeats(body: {
+  groupPath: string
+  seatIds: string[]
+}) {
+  return api<{ ok: boolean; group: WorkspaceGroup }>("/api/group/seats/reorder", body)
+}
+
 export async function approveFileOperation(groupPath: string, proposalId: string) {
   return api<unknown>("/api/file-operations/approve", {
     groupPath,
