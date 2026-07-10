@@ -167,6 +167,32 @@ test("execution refuses unrelated dirty framework state files", () => {
     proposalId: pending.id
   }), /unrelated change: shared\/harness\/old-note\.md/);
 });
+
+test("execution ignores runtime log and session state dirtiness", () => {
+  const group = createReadyGitGroup();
+  const pending = createPendingProposal(group.groupPath, {
+    op: "write",
+    path: "src/runtime-ok.js",
+    content: "export const runtimeOk = true;\n",
+    reason: "Create module while runtime logs are changing.",
+    expected_effect: "Module exists."
+  });
+  approvePendingFileOperation({ groupPath: group.groupPath, proposalId: pending.id, approvedBy: "user" });
+  fs.mkdirSync(path.join(group.groupPath, "_supervisor"), { recursive: true });
+  fs.mkdirSync(path.join(group.groupPath, "sessions"), { recursive: true });
+  fs.mkdirSync(path.join(group.groupPath, "shared", "logs"), { recursive: true });
+  fs.mkdirSync(path.join(group.groupPath, "shared", "cache"), { recursive: true });
+  fs.writeFileSync(path.join(group.groupPath, "_supervisor", "events.jsonl"), "runtime event\n", "utf8");
+  fs.writeFileSync(path.join(group.groupPath, "sessions", "active.json"), "{}", "utf8");
+  fs.writeFileSync(path.join(group.groupPath, "shared", "logs", "commands.jsonl"), "runtime command\n", "utf8");
+  fs.writeFileSync(path.join(group.groupPath, "shared", "cache", "compressed-transcript.jsonl"), "runtime cache\n", "utf8");
+  fs.writeFileSync(path.join(group.groupPath, "shared", "task_state.json"), "{}", "utf8");
+
+  const executed = executeApprovedFileOperation({ groupPath: group.groupPath, proposalId: pending.id });
+
+  assert.equal(executed.status, "executed");
+  assert.equal(fs.readFileSync(path.join(group.groupPath, "src", "runtime-ok.js"), "utf8"), "export const runtimeOk = true;\n");
+});
 test("full mode can auto-approve a non-dangerous write proposal", () => {
   const group = createReadyGitGroup();
   const pending = createPendingProposal(group.groupPath, {

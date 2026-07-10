@@ -174,10 +174,18 @@ function assertNoUnrelatedDirtyFiles(groupPath, proposal) {
     if (!file) continue;
     const files = expandGitStatusPath(groupPath, file);
     for (const expanded of files) {
-      if (allowed.has(expanded)) continue;
+      if (allowed.has(expanded) || isRuntimeStateFile(expanded)) continue;
       throw new Error(`Working tree has unrelated change: ${expanded}`);
     }
   }
+}
+
+function isRuntimeStateFile(file) {
+  return file.startsWith("_supervisor/")
+    || file.startsWith("sessions/")
+    || file.startsWith("shared/logs/")
+    || file.startsWith("shared/cache/")
+    || file === "shared/task_state.json";
 }
 
 function expandGitStatusPath(groupPath, file) {
