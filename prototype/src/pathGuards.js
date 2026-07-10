@@ -1,6 +1,11 @@
 import path from "node:path";
 
 const WORKSPACE_PATH_ALIASES = new Set(["workspace", "group"]);
+const WORKSPACE_PATH_PREFIX_ALIASES = [
+  "root/workspace",
+  "home/oai/share",
+  "mnt/data"
+];
 
 export function isInsidePath(root, candidate) {
   const relative = path.relative(path.resolve(root), path.resolve(candidate));
@@ -25,6 +30,17 @@ export function normalizeWorkspacePathAlias(input, options = {}) {
   if (normalized.startsWith("//")) return { path: raw, aliased: false };
 
   const candidate = normalized.startsWith("/") ? normalized.replace(/^\/+/, "") : normalized;
+  const lowerCandidate = candidate.toLowerCase();
+  for (const prefix of WORKSPACE_PATH_PREFIX_ALIASES) {
+    if (lowerCandidate === prefix || lowerCandidate.startsWith(`${prefix}/`)) {
+      const rest = candidate.slice(prefix.length).replace(/^\/+/, "");
+      return {
+        path: rest || ".",
+        aliased: true,
+        alias: prefix
+      };
+    }
+  }
   const firstSlash = candidate.indexOf("/");
   const firstSegment = (firstSlash === -1 ? candidate : candidate.slice(0, firstSlash)).toLowerCase();
   if (!WORKSPACE_PATH_ALIASES.has(firstSegment)) return { path: raw, aliased: false };

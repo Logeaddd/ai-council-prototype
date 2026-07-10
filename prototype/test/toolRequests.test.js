@@ -66,6 +66,7 @@ test("workspace path aliases work across local agent tools", async () => {
       { tool: "list_directory", path: "/workspace", reason: "List workspace root." },
       { tool: "read_file", path: "/workspace/docs/notes.md", reason: "Read aliased file." },
       { tool: "execute_command", cwd: "/workspace", command: nodeCommand("console.log('ALIAS_COMMAND_FACT')"), shell: shellForNodeCommand(), reason: "Run command in aliased cwd." },
+      { tool: "execute_command", cwd: "/root/workspace", command: nodeCommand("console.log('ROOT_WORKSPACE_ALIAS_FACT')"), shell: shellForNodeCommand(), reason: "Run command in common agent workspace alias." },
       { tool: "run_tests", cwd: "workspace", runner: "custom", command: nodeCommand("console.log('ALIAS_TEST_FACT')"), reason: "Run tests in aliased cwd." },
       { tool: "extract_archive", path: "/workspace/sample.zip", destination: "/workspace/out", reason: "Extract aliased archive." },
       { tool: "database_query", path: "/workspace/data/app.sqlite", create: true, mode: "execute", sql: "CREATE TABLE facts(body TEXT); INSERT INTO facts(body) VALUES ('ALIAS_DB_FACT');", reason: "Create aliased database." },
@@ -79,11 +80,12 @@ test("workspace path aliases work across local agent tools", async () => {
   assert.equal(result.results[0].result.path, ".");
   assert.match(result.results[1].result.content, /WORKSPACE_ALIAS_FACT/);
   assert.match(result.results[2].result.stdout, /ALIAS_COMMAND_FACT/);
-  assert.match(result.results[3].result.stdout, /ALIAS_TEST_FACT/);
+  assert.match(result.results[3].result.stdout, /ROOT_WORKSPACE_ALIAS_FACT/);
+  assert.match(result.results[4].result.stdout, /ALIAS_TEST_FACT/);
   assert.equal(fs.readFileSync(path.join(tmp, "out", "unzipped.txt"), "utf8"), "ALIAS_ZIP_FACT");
   assert.equal(fs.existsSync(path.join(tmp, "data", "app.sqlite")), true);
   assert.equal(fs.existsSync(path.join(tmp, "shared", "environments", "npm", "node_modules", "workspace-alias-local-package", "package.json")), true);
-  assert.equal(result.results[7].result.cwd, ".");
+  assert.equal(result.results[8].result.cwd, ".");
 });
 
 test("workspace path aliases cannot escape the workspace", async () => {
