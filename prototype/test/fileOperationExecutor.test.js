@@ -182,10 +182,12 @@ test("execution ignores runtime log and session state dirtiness", () => {
   fs.mkdirSync(path.join(group.groupPath, "sessions"), { recursive: true });
   fs.mkdirSync(path.join(group.groupPath, "shared", "logs"), { recursive: true });
   fs.mkdirSync(path.join(group.groupPath, "shared", "cache"), { recursive: true });
+  fs.mkdirSync(path.join(group.groupPath, "shared", "usage"), { recursive: true });
   fs.writeFileSync(path.join(group.groupPath, "_supervisor", "events.jsonl"), "runtime event\n", "utf8");
   fs.writeFileSync(path.join(group.groupPath, "sessions", "active.json"), "{}", "utf8");
   fs.writeFileSync(path.join(group.groupPath, "shared", "logs", "commands.jsonl"), "runtime command\n", "utf8");
   fs.writeFileSync(path.join(group.groupPath, "shared", "cache", "compressed-transcript.jsonl"), "runtime cache\n", "utf8");
+  fs.writeFileSync(path.join(group.groupPath, "shared", "usage", "usage.jsonl"), "runtime usage\n", "utf8");
   fs.writeFileSync(path.join(group.groupPath, "shared", "task_state.json"), "{}", "utf8");
 
   const executed = executeApprovedFileOperation({ groupPath: group.groupPath, proposalId: pending.id });

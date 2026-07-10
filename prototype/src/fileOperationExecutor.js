@@ -190,6 +190,7 @@ function isRuntimeStateFile(file) {
     || normalized.startsWith("sessions/")
     || normalized.startsWith("shared/logs/")
     || normalized.startsWith("shared/cache/")
+    || normalized.startsWith("shared/usage/")
     || normalized === "shared/task_state.json"
     || isMemberPrivateMemory;
 }
