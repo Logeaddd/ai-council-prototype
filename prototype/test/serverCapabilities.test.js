@@ -29,10 +29,15 @@ test("persisted capability switches block direct server execution routes", async
   try {
     await waitForServer(port, child, () => output);
     await requestJson(port, "/api/app-settings", {
+      appearance: { theme: "dark" },
       capabilities: {
         toolAccess: { web: false, files: false, mcp: false }
       }
     });
+
+    const appSettings = await requestJson(port, "/api/app-settings", undefined, "GET");
+    assert.equal(appSettings.status, 200);
+    assert.equal(appSettings.body.appearance.theme, "dark");
 
     const capabilityState = await requestJson(port, "/api/capabilities", undefined, "GET");
     assert.equal(capabilityState.status, 200);

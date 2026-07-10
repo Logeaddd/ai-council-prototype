@@ -433,6 +433,9 @@ export interface ProviderHealthResult {
 export interface AppSettings {
   groupsRoot?: string
   firstRunComplete?: boolean
+  appearance?: {
+    theme?: AppearanceTheme
+  }
   capabilities?: {
     webSearch?: {
       provider?: string
@@ -444,6 +447,8 @@ export interface AppSettings {
     toolAccess?: CapabilityAccess
   }
 }
+
+export type AppearanceTheme = "light" | "dark"
 
 export interface CapabilityAccess {
   web?: boolean

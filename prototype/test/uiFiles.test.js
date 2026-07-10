@@ -34,6 +34,27 @@ test("renderer build is static, type checked, and offline-friendly for Electron"
   assert.match(layout, /AI Council · 智能议会/);
 });
 
+test("renderer defaults to a warm light theme and persists optional dark mode", () => {
+  const globals = read("renderer/app/globals.css");
+  const layout = read("renderer/app/layout.tsx");
+  const settings = read("renderer/components/council/settings-sheet.tsx");
+  const app = read("renderer/components/council/council-app.tsx");
+  const live = read("renderer/lib/council-live.ts");
+
+  assert.match(globals, /:root\s*\{\s*color-scheme: light/);
+  assert.match(globals, /\.dark\s*\{\s*color-scheme: dark/);
+  assert.match(globals, /--background: oklch\(0\.955 0\.014 88\)/);
+  assert.match(layout, /ai-council:theme/);
+  assert.match(layout, /theme === "dark"/);
+  assert.match(settings, /id: "appearance", label: "外观"/);
+  assert.match(settings, /label: "浅色"/);
+  assert.match(settings, /label: "暗色"/);
+  assert.match(settings, /theme: selectedTheme/);
+  assert.match(app, /appearance: \{ theme: values\.theme \}/);
+  assert.match(app, /applyAppearanceTheme/);
+  assert.match(live, /AppearanceTheme = "light" \| "dark"/);
+});
+
 test("renderer uses the provided logo asset for visible branding and icons", () => {
   const sidebar = read("renderer/components/council/groups-sidebar.tsx");
   const layout = read("renderer/app/layout.tsx");

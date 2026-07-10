@@ -14,7 +14,11 @@ export function updateAppSettings(baseDir, patch, defaults = {}) {
   const next = normalizeSettings({
     ...current,
     ...patch,
-    capabilities: mergeCapabilities(current.capabilities, patch.capabilities)
+    capabilities: mergeCapabilities(current.capabilities, patch.capabilities),
+    appearance: {
+      ...(current.appearance || {}),
+      ...(patch.appearance || {})
+    }
   });
   const filePath = appSettingsPath(baseDir);
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -42,6 +46,7 @@ export function redactAppSettingsForClient(settings, options = {}) {
     version: normalized.version,
     groupsRoot: normalized.groupsRoot,
     firstRunComplete: normalized.firstRunComplete,
+    appearance: normalized.appearance,
     capabilities: {
       webSearch: {
         provider: storedKeyConfigured || envKeyConfigured ? normalized.capabilities.webSearch.provider : "Bing Web",
@@ -60,7 +65,14 @@ function normalizeSettings(value = {}) {
     version: 1,
     groupsRoot: String(value.groupsRoot || "").trim(),
     firstRunComplete: Boolean(value.firstRunComplete),
+    appearance: normalizeAppearance(value.appearance),
     capabilities: normalizeCapabilities(value.capabilities)
+  };
+}
+
+function normalizeAppearance(value = {}) {
+  return {
+    theme: value.theme === "dark" ? "dark" : "light"
   };
 }
 

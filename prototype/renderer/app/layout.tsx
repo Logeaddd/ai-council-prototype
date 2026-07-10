@@ -14,9 +14,16 @@ export const metadata: Metadata = {
 }
 
 export const viewport: Viewport = {
-  colorScheme: "dark",
-  themeColor: "#1a1f26",
+  colorScheme: "light dark",
+  themeColor: "#f3eee2",
 }
+
+const themeScript = `
+  try {
+    const theme = localStorage.getItem("ai-council:theme");
+    document.documentElement.classList.toggle("dark", theme === "dark");
+  } catch {}
+`
 
 export default function RootLayout({
   children,
@@ -24,7 +31,10 @@ export default function RootLayout({
   children: React.ReactNode
 }>) {
   return (
-    <html lang="zh-CN" className="bg-background">
+    <html lang="zh-CN" className="bg-background" suppressHydrationWarning>
+      <head>
+        <script dangerouslySetInnerHTML={{ __html: themeScript }} />
+      </head>
       <body className="bg-background font-sans antialiased">{children}</body>
     </html>
   )

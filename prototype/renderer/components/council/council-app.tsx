@@ -49,6 +49,7 @@ import {
   type ProviderHealthResult,
   type ProviderPresetRecord,
   type AppSettings,
+  type AppearanceTheme,
   type UsageSnapshot,
   type WorkspaceGroup,
 } from "@/lib/council-live"
@@ -62,6 +63,7 @@ import { SettingsSheet } from "./settings-sheet"
 import { ChatHistorySheet } from "./chat-history-sheet"
 
 const LAYOUT_KEY = "ai-council:layout-v3-template"
+const THEME_KEY = "ai-council:theme"
 const CREATE_MEMBER_ID = "__new_member__"
 const EMPTY_GROUP: LiveGroup = {
   id: "",
@@ -107,6 +109,7 @@ export function CouncilApp() {
   const [mode, setMode] = useState<WorkMode>("collab")
   const [running, setRunning] = useState(false)
   const [visualStyle, setVisualStyle] = useState<VisualStyle>("workbench")
+  const [theme, setTheme] = useState<AppearanceTheme>("light")
   const [rightOpen, setRightOpen] = useState(false)
   const [layoutLoaded, setLayoutLoaded] = useState(false)
   const [groupList, setGroupList] = useState<LiveGroup[]>([])
@@ -168,6 +171,9 @@ export function CouncilApp() {
         const layout = raw ? JSON.parse(raw) as Partial<Layout> : {}
         if (layout.visualStyle) setVisualStyle(layout.visualStyle)
         if (typeof layout.rightOpen === "boolean") setRightOpen(layout.rightOpen)
+        const cachedTheme = normalizeAppearanceTheme(window.localStorage.getItem(THEME_KEY))
+        setTheme(cachedTheme)
+        applyAppearanceTheme(cachedTheme)
       } catch {
         // Ignore broken local layout data.
       }
@@ -187,7 +193,12 @@ export function CouncilApp() {
           .catch(() => {})
         fetchAppSettings()
           .then((settings) => {
-            if (!cancelled) setAppSettings(settings)
+            if (!cancelled) {
+              const savedTheme = normalizeAppearanceTheme(settings.appearance?.theme)
+              setAppSettings(settings)
+              setTheme(savedTheme)
+              applyAppearanceTheme(savedTheme)
+            }
           })
           .catch(() => {})
         const index = await api<GroupIndexResponse>("/api/groups-index")
@@ -376,6 +387,7 @@ export function CouncilApp() {
   }
 
   async function handleSaveSettings(values: {
+    theme: AppearanceTheme
     mode: WorkMode
     globalRequirement: string
     totalRounds: number
@@ -392,10 +404,12 @@ export function CouncilApp() {
     const shouldUpdateWebSearchKey = Boolean(values.webSearchApiKey) || Boolean(values.clearWebSearchKey)
     const shouldUpdateToolAccess = Boolean(values.toolAccess)
     const shouldUpdateGroupsRoot = values.groupsRoot !== undefined && values.groupsRoot !== (appSettings?.groupsRoot || "")
-    if (shouldUpdateWebSearchKey || shouldUpdateGroupsRoot || shouldUpdateToolAccess) {
+    const shouldUpdateTheme = values.theme !== normalizeAppearanceTheme(appSettings?.appearance?.theme)
+    if (shouldUpdateWebSearchKey || shouldUpdateGroupsRoot || shouldUpdateToolAccess || shouldUpdateTheme) {
       try {
         const nextSettings = await saveAppSettings({
           ...(shouldUpdateGroupsRoot ? { groupsRoot: values.groupsRoot || "" } : {}),
+          ...(shouldUpdateTheme ? { appearance: { theme: values.theme } } : {}),
           capabilities: {
             webSearch: {
               ...(shouldUpdateWebSearchKey ? { apiKey: values.clearWebSearchKey ? "" : values.webSearchApiKey || "" } : {}),
@@ -405,11 +419,13 @@ export function CouncilApp() {
         })
         setAppSettings(nextSettings)
       } catch (error) {
-        addSystemItem(`保存联网搜索密钥失败：${errorMessage(error)}`)
-        setStatusText("保存联网搜索密钥失败。")
+        addSystemItem(`保存应用设置失败：${errorMessage(error)}`)
+        setStatusText("保存应用设置失败。")
         return
       }
     }
+    setTheme(values.theme)
+    applyAppearanceTheme(values.theme)
     if (!group.path) {
       addSystemItem("还没有本地小组，暂时不能保存议会设置。")
       return
@@ -970,6 +986,7 @@ export function CouncilApp() {
         groupPath={group.path || ""}
         webSearchConfigured={appSettings?.capabilities?.webSearch?.configured}
         webSearchSource={formatSearchKeySource(appSettings?.capabilities?.webSearch?.source)}
+        theme={theme}
         onSave={handleSaveSettings}
       />
       <ChatHistorySheet
@@ -998,6 +1015,22 @@ function normalizeTimeoutMinutes(value: unknown) {
   const minutes = raw > 1000 ? Math.round(raw / 60_000) : raw
   if (!Number.isFinite(minutes)) return 15
   return Math.max(1, Math.min(60, Math.round(minutes)))
+}
+
+function normalizeAppearanceTheme(value: unknown): AppearanceTheme {
+  return value === "dark" ? "dark" : "light"
+}
+
+function applyAppearanceTheme(theme: AppearanceTheme) {
+  if (typeof document === "undefined") return
+  document.documentElement.classList.toggle("dark", theme === "dark")
+  try {
+    window.localStorage.setItem(THEME_KEY, theme)
+  } catch {
+    // Theme persistence falls back to app settings.
+  }
+  const color = theme === "dark" ? "#1a1f26" : "#f3eee2"
+  document.querySelector('meta[name="theme-color"]')?.setAttribute("content", color)
 }
 
 function buildCreateMemberDraft(

@@ -85,3 +85,26 @@ test("global capability switches default on and update without changing the sear
     fs.rmSync(baseDir, { recursive: true, force: true });
   }
 });
+
+test("appearance theme defaults light and persists dark without replacing other settings", () => {
+  const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-theme-settings-"));
+  try {
+    const initial = readAppSettings(baseDir);
+    assert.equal(initial.appearance.theme, "light");
+
+    updateAppSettings(baseDir, {
+      groupsRoot: "D:/groups",
+      capabilities: { webSearch: { apiKey: "keep-theme-key" } }
+    });
+    const saved = updateAppSettings(baseDir, { appearance: { theme: "dark" } });
+    const client = redactAppSettingsForClient(saved, { env: {} });
+
+    assert.equal(saved.appearance.theme, "dark");
+    assert.equal(saved.groupsRoot, "D:/groups");
+    assert.equal(saved.capabilities.webSearch.apiKey, "keep-theme-key");
+    assert.equal(client.appearance.theme, "dark");
+    assert.equal(JSON.stringify(client).includes("keep-theme-key"), false);
+  } finally {
+    fs.rmSync(baseDir, { recursive: true, force: true });
+  }
+});

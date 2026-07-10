@@ -150,6 +150,8 @@ test("server stores app settings under local user-data and guards groups root", 
   assert.match(appSettingsJs, /userDataDir/);
   assert.match(appSettingsJs, /app-settings\.json/);
   assert.match(appSettingsJs, /groupsRoot/);
+  assert.match(appSettingsJs, /appearance/);
+  assert.match(appSettingsJs, /theme: value\.theme === "dark" \? "dark" : "light"/);
   assert.match(appSettingsJs, /storedKeyConfigured/);
   assert.match(appSettingsJs, /envKeyConfigured/);
 });

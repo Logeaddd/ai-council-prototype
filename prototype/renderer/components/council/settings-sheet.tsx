@@ -6,11 +6,14 @@ import {
   Database,
   Globe,
   Layers,
+  Moon,
+  Palette,
   Plug,
   Puzzle,
   ScrollText,
   Shield,
   Sparkles,
+  Sun,
   UserCheck,
   Users,
   X,
@@ -37,6 +40,7 @@ import {
   uninstallMcpServer,
   type CapabilityRecord,
   type CapabilityAccess,
+  type AppearanceTheme,
   type McpInstallCatalogItem,
   type McpSearchResult,
   type McpServerRecord,
@@ -48,6 +52,7 @@ import {
 import { Badge, Sheet, inputClass, type Tone } from "./primitives"
 
 type SettingsTab =
+  | "appearance"
   | "rules"
   | "models"
   | "search"
@@ -63,6 +68,7 @@ const SETTINGS_TABS: Array<{
   label: string
   icon: ComponentType<{ className?: string }>
 }> = [
+  { id: "appearance", label: "外观", icon: Palette },
   { id: "rules", label: "议会规则", icon: ScrollText },
   { id: "models", label: "模型服务", icon: Brain },
   { id: "search", label: "网络搜索", icon: Globe },
@@ -89,6 +95,7 @@ export function SettingsSheet({
   groupPath,
   webSearchConfigured,
   webSearchSource,
+  theme,
   onSave,
 }: {
   open: boolean
@@ -105,7 +112,9 @@ export function SettingsSheet({
   groupPath?: string
   webSearchConfigured?: boolean
   webSearchSource?: string
+  theme: AppearanceTheme
   onSave: (values: {
+    theme: AppearanceTheme
     mode: WorkMode
     globalRequirement: string
     totalRounds: number
@@ -116,7 +125,8 @@ export function SettingsSheet({
     toolAccess?: CapabilityAccess
   }) => Promise<void> | void
 }) {
-  const [activeTab, setActiveTab] = useState<SettingsTab>("rules")
+  const [activeTab, setActiveTab] = useState<SettingsTab>("appearance")
+  const [selectedTheme, setSelectedTheme] = useState<AppearanceTheme>(theme)
   const [text, setText] = useState(globalRequirement)
   const [dataRoot, setDataRoot] = useState(groupsRoot || "")
   const [webSearchApiKey, setWebSearchApiKey] = useState("")
@@ -183,6 +193,7 @@ export function SettingsSheet({
     setSaving(true)
     try {
       await onSave({
+        theme: selectedTheme,
         mode,
         globalRequirement: text,
         totalRounds,
@@ -408,6 +419,10 @@ export function SettingsSheet({
             </div>
           ) : null}
 
+          {activeTab === "appearance" ? (
+            <AppearancePanel theme={selectedTheme} onChange={setSelectedTheme} />
+          ) : null}
+
           {activeTab === "rules" ? (
             <RulesPanel
               mode={mode}
@@ -490,6 +505,44 @@ export function SettingsSheet({
         </div>
       </div>
     </Sheet>
+  )
+}
+
+function AppearancePanel({
+  theme,
+  onChange,
+}: {
+  theme: AppearanceTheme
+  onChange: (theme: AppearanceTheme) => void
+}) {
+  return (
+    <div className="space-y-6">
+      <PanelTitle title="外观" />
+      <SettingRow label="配色">
+        <div className="grid grid-cols-2 gap-2">
+          {[
+            { value: "light" as AppearanceTheme, label: "浅色", icon: Sun, swatch: "bg-[#f3eee2]" },
+            { value: "dark" as AppearanceTheme, label: "暗色", icon: Moon, swatch: "bg-[#1a1f26]" },
+          ].map(({ value, label, icon: Icon, swatch }) => (
+            <button
+              key={value}
+              type="button"
+              onClick={() => onChange(value)}
+              className={cn(
+                "flex h-11 items-center gap-2 rounded-md border px-3 text-left text-[13px] transition-colors",
+                theme === value
+                  ? "border-primary/50 bg-primary/10 text-foreground"
+                  : "border-border text-muted-foreground hover:bg-accent hover:text-foreground",
+              )}
+            >
+              <span className={cn("size-5 rounded border border-black/15", swatch)} />
+              <Icon className="size-4" />
+              <span>{label}</span>
+            </button>
+          ))}
+        </div>
+      </SettingRow>
+    </div>
   )
 }
 

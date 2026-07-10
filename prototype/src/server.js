@@ -1137,6 +1137,11 @@ function buildAppSettingsPatch(body) {
   if (Object.hasOwn(body, "firstRunComplete")) {
     patch.firstRunComplete = body.firstRunComplete !== false;
   }
+  if (body.appearance && typeof body.appearance === "object" && Object.hasOwn(body.appearance, "theme")) {
+    patch.appearance = {
+      theme: body.appearance.theme === "dark" ? "dark" : "light"
+    };
+  }
 
   const webSearch = body.capabilities?.webSearch || {};
   const toolAccess = body.capabilities?.toolAccess;
