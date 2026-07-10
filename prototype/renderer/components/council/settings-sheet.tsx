@@ -656,43 +656,44 @@ function McpPanel({
       <div className="space-y-2">
         {loading ? <EmptyLine text="读取中" /> : null}
         {!loading && !catalog.length ? <EmptyLine text="暂无可加入项" /> : null}
-        {catalog.map((item) => (
-          <div
-            key={item.id}
-            className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 rounded-md border border-border px-3 py-2"
-          >
-            <div className="min-w-0">
-              <div className="flex items-center gap-2">
-                <span className="truncate text-[13px] font-medium text-foreground">{item.name}</span>
-                <Badge tone={item.installed ? "success" : "neutral"}>
-                  {item.installed ? "已加入" : "可加入"}
-                </Badge>
+        {catalog.map((item) => {
+          const state = mcpCatalogDisplay(item)
+          return (
+            <div
+              key={item.id}
+              className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 rounded-md border border-border px-3 py-2"
+            >
+              <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                  <span className="truncate text-[13px] font-medium text-foreground">{item.name}</span>
+                  <Badge tone={state.tone}>{state.label}</Badge>
+                </div>
+                <div className="mt-1 truncate font-mono text-[11px] text-muted-foreground">
+                  {item.packageName}
+                </div>
               </div>
-              <div className="mt-1 truncate font-mono text-[11px] text-muted-foreground">
-                {item.packageName}
-              </div>
+              {state.joined ? (
+                <button
+                  type="button"
+                  disabled={busyId === item.id}
+                  onClick={() => void onUninstall(item)}
+                  className="rounded-md border border-border px-3 py-1.5 text-[13px] text-danger transition-colors hover:bg-danger/10 disabled:opacity-50"
+                >
+                  {busyId === item.id ? "移除中" : "移除"}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  disabled={Boolean(busyId)}
+                  onClick={() => void onInstall(item)}
+                  className="rounded-md bg-primary px-3 py-1.5 text-[13px] font-semibold text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
+                >
+                  {busyId === item.id ? "加入中" : state.action}
+                </button>
+              )}
             </div>
-            {item.installed ? (
-              <button
-                type="button"
-                disabled={busyId === item.id}
-                onClick={() => void onUninstall(item)}
-                className="rounded-md border border-border px-3 py-1.5 text-[13px] text-danger transition-colors hover:bg-danger/10 disabled:opacity-50"
-              >
-                {busyId === item.id ? "移除中" : "移除"}
-              </button>
-            ) : (
-              <button
-                type="button"
-                disabled={Boolean(busyId)}
-                onClick={() => void onInstall(item)}
-                className="rounded-md bg-primary px-3 py-1.5 text-[13px] font-semibold text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
-              >
-                {busyId === item.id ? "加入中" : "加入"}
-              </button>
-            )}
-          </div>
-        ))}
+          )
+        })}
       </div>
 
       <div className="space-y-2">
@@ -985,6 +986,24 @@ function capabilityTone(item: CapabilityRecord): Tone {
   if (item.status === "needs_config") return "warning"
   if (item.status === "planned" || item.enabled === false) return "neutral"
   return "success"
+}
+
+function mcpCatalogDisplay(item: McpInstallCatalogItem): {
+  label: string
+  action: string
+  tone: Tone
+  joined: boolean
+} {
+  if (item.runtimeStatus === "disabled" || (item.serverConfigured && item.serverEnabled === false)) {
+    return { label: "已停用", action: "重新加入", tone: "neutral", joined: true }
+  }
+  if (item.runtimeStatus === "package_only" || (item.packageInstalled && !item.serverConfigured)) {
+    return { label: "仅下载", action: "重新加入", tone: "warning", joined: false }
+  }
+  if (item.installed && item.serverConfigured !== false) {
+    return { label: "已加入", action: "加入", tone: "success", joined: true }
+  }
+  return { label: "可加入", action: "加入", tone: "neutral", joined: false }
 }
 
 function errorMessage(error: unknown) {
