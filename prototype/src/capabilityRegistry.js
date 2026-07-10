@@ -65,6 +65,16 @@ export function listCapabilities(options = {}) {
       requirement: "完全允许"
     },
     {
+      id: "background-processes",
+      label: "后台进程",
+      kind: "tool",
+      status: "ready",
+      enabled: true,
+      provider: "built-in",
+      source: "local_server",
+      requirement: "完全允许"
+    },
+    {
       id: "run-code",
       label: "运行代码",
       kind: "tool",

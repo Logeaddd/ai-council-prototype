@@ -3,6 +3,7 @@ import { fetchPublicUrl, searchWeb } from "./webTools.js";
 import { executeFileTool } from "./fileTools.js";
 import { extractArchiveTool } from "./archiveTools.js";
 import { executeCommandTool } from "./commandTools.js";
+import { processControlTool } from "./processTools.js";
 import { runCodeTool } from "./codeRunTools.js";
 import { installPackageTool } from "./packageTools.js";
 import { runTestsTool } from "./testRunTools.js";
@@ -34,6 +35,7 @@ const ALLOWED_TOOLS = new Set([
   "load_context",
   "extract_archive",
   "execute_command",
+  "process_control",
   "run_code",
   "install_package",
   "run_tests",
@@ -55,6 +57,7 @@ const FILE_TOOLS = new Set(["list_directory", "read_file", "search_files", "grep
 const CONTEXT_TOOLS = new Set(["search_context", "load_context"]);
 const ARCHIVE_TOOLS = new Set(["extract_archive"]);
 const COMMAND_TOOLS = new Set(["execute_command"]);
+const PROCESS_TOOLS = new Set(["process_control"]);
 const CODE_TOOLS = new Set(["run_code"]);
 const PACKAGE_TOOLS = new Set(["install_package"]);
 const TEST_TOOLS = new Set(["run_tests"]);
@@ -63,7 +66,7 @@ const GIT_TOOLS = new Set(["git_operation"]);
 const BROWSER_TOOLS = new Set(["browser_control"]);
 const DATABASE_TOOLS = new Set(["database_query"]);
 const MCP_TOOLS = new Set(["mcp_list_tools", "mcp_call", "mcp_list_resources", "mcp_read_resource", "mcp_list_prompts", "mcp_get_prompt", "mcp_search_npm", "mcp_install_npm", "mcp_uninstall"]);
-const FULL_PERMISSION_TOOLS = new Set(["extract_archive", "execute_command", "run_code", "install_package", "run_tests", "git_operation", "browser_control", "mcp_list_tools", "mcp_call", "mcp_list_resources", "mcp_read_resource", "mcp_list_prompts", "mcp_get_prompt", "mcp_search_npm", "mcp_install_npm", "mcp_uninstall"]);
+const FULL_PERMISSION_TOOLS = new Set(["extract_archive", "execute_command", "process_control", "run_code", "install_package", "run_tests", "git_operation", "browser_control", "mcp_list_tools", "mcp_call", "mcp_list_resources", "mcp_read_resource", "mcp_list_prompts", "mcp_get_prompt", "mcp_search_npm", "mcp_install_npm", "mcp_uninstall"]);
 
 export function normalizeToolRequests(value) {
   if (!Array.isArray(value)) return [];
@@ -93,7 +96,7 @@ export async function executeToolRequests(options = {}) {
     };
 
     if (!ALLOWED_TOOLS.has(normalized.tool)) {
-      const rejection = reject(base, "invalid_tool", "Tool must be one of web_search, fetch_url, list_directory, read_file, search_files, grep_content, search_context, load_context, extract_archive, execute_command, run_code, install_package, run_tests, api_request, git_operation, browser_control, database_query, mcp_list_tools, mcp_call, mcp_list_resources, mcp_read_resource, mcp_list_prompts, mcp_get_prompt, mcp_search_npm, mcp_install_npm, mcp_uninstall.");
+      const rejection = reject(base, "invalid_tool", "Tool must be one of web_search, fetch_url, list_directory, read_file, search_files, grep_content, search_context, load_context, extract_archive, execute_command, process_control, run_code, install_package, run_tests, api_request, git_operation, browser_control, database_query, mcp_list_tools, mcp_call, mcp_list_resources, mcp_read_resource, mcp_list_prompts, mcp_get_prompt, mcp_search_npm, mcp_install_npm, mcp_uninstall.");
       rejected.push(rejection);
       events.push(toolEvent("tool_failure", base, { status: "rejected", code: rejection.code, error: rejection.error }));
       appendToolAuditLog(options.groupPath, "rejected", rejection);
@@ -106,6 +109,7 @@ export async function executeToolRequests(options = {}) {
       appendBrowserAuditLog(options.groupPath, "rejected", rejection);
       appendDatabaseAuditLog(options.groupPath, "rejected", rejection);
       appendMcpAuditLog(options.groupPath, "rejected", rejection);
+      appendProcessAuditLog(options.groupPath, "rejected", rejection);
       continue;
     }
     if (permissionTier === "text") {
@@ -122,6 +126,7 @@ export async function executeToolRequests(options = {}) {
       appendBrowserAuditLog(options.groupPath, "rejected", rejection);
       appendDatabaseAuditLog(options.groupPath, "rejected", rejection);
       appendMcpAuditLog(options.groupPath, "rejected", rejection);
+      appendProcessAuditLog(options.groupPath, "rejected", rejection);
       continue;
     }
     if (FULL_PERMISSION_TOOLS.has(normalized.tool) && permissionTier !== "full") {
@@ -138,6 +143,7 @@ export async function executeToolRequests(options = {}) {
       appendBrowserAuditLog(options.groupPath, "rejected", rejection);
       appendDatabaseAuditLog(options.groupPath, "rejected", rejection);
       appendMcpAuditLog(options.groupPath, "rejected", rejection);
+      appendProcessAuditLog(options.groupPath, "rejected", rejection);
       continue;
     }
     if (isRepeatedFailedCommand(normalized, [...(options.previousResults || []), ...results])) {
@@ -182,6 +188,7 @@ export async function executeToolRequests(options = {}) {
     appendBrowserAuditLog(options.groupPath, "completed", result);
     appendDatabaseAuditLog(options.groupPath, "completed", result);
     appendMcpAuditLog(options.groupPath, "completed", result);
+    appendProcessAuditLog(options.groupPath, "completed", result);
   }
 
   return { accepted, rejected, results, events };
@@ -307,6 +314,15 @@ async function executeOne(request, options) {
         managedToolRoots: options.managedToolRoots,
         signal: options.signal
       });
+      return resultRecord(request, {
+        status: result.ok ? "completed" : "failed",
+        code: result.code,
+        error: result.error,
+        result
+      });
+    }
+    if (request.tool === "process_control") {
+      const result = await processControlTool(request, { groupPath: options.groupPath });
       return resultRecord(request, {
         status: result.ok ? "completed" : "failed",
         code: result.code,
@@ -576,6 +592,9 @@ function normalizeToolRequest(item, index) {
     sessionId: stringField(item.sessionId || item.session_id),
     method: stringField(item.method),
     action: stringField(item.action || item.operation),
+    processId: stringField(item.processId || item.process_id || item.backgroundProcessId || item.background_process_id),
+    stream: stringField(item.stream),
+    offset: normalizeOptionalNumber(item.offset),
     branch: stringField(item.branch),
     remote: stringField(item.remote),
     message: stringField(item.message || item.commitMessage || item.commit_message),
@@ -640,6 +659,9 @@ function reject(request, code, reason) {
     sessionId: request.sessionId,
     method: request.method,
     action: request.action,
+    processId: request.processId,
+    stream: request.stream,
+    offset: request.offset,
     branch: request.branch,
     remote: request.remote,
     message: request.message,
@@ -705,6 +727,9 @@ function resultRecord(request, extra) {
     sessionId: request.sessionId,
     method: request.method,
     action: request.action,
+    processId: request.processId,
+    stream: request.stream,
+    offset: request.offset,
     branch: request.branch,
     remote: request.remote,
     message: request.message,
@@ -754,7 +779,8 @@ function stringField(value) {
 
 function normalizeCount(value, tool) {
   const count = Number(value);
-  if (!Number.isFinite(count)) return FILE_TOOLS.has(tool) || ARCHIVE_TOOLS.has(tool) || CODE_TOOLS.has(tool) || PACKAGE_TOOLS.has(tool) || TEST_TOOLS.has(tool) || API_TOOLS.has(tool) || GIT_TOOLS.has(tool) || BROWSER_TOOLS.has(tool) || DATABASE_TOOLS.has(tool) ? undefined : 5;
+  if (!Number.isFinite(count)) return FILE_TOOLS.has(tool) || ARCHIVE_TOOLS.has(tool) || PROCESS_TOOLS.has(tool) || CODE_TOOLS.has(tool) || PACKAGE_TOOLS.has(tool) || TEST_TOOLS.has(tool) || API_TOOLS.has(tool) || GIT_TOOLS.has(tool) || BROWSER_TOOLS.has(tool) || DATABASE_TOOLS.has(tool) ? undefined : 5;
+  if (PROCESS_TOOLS.has(tool)) return Math.max(1, Math.min(100, Math.floor(count)));
   if (ARCHIVE_TOOLS.has(tool)) return Math.max(1, Math.min(1000, Math.floor(count)));
   const max = FILE_TOOLS.has(tool) ? 300 : CONTEXT_TOOLS.has(tool) ? 20 : 8;
   return Math.max(1, Math.min(max, Math.floor(count)));
@@ -797,6 +823,9 @@ function toolEvent(type, request, extra = {}) {
     sessionId: request.sessionId,
     method: request.method,
     action: request.action,
+    processId: request.processId,
+    stream: request.stream,
+    offset: request.offset,
     branch: request.branch,
     remote: request.remote,
     message: request.message,
@@ -877,6 +906,7 @@ function summarizeToolResult(record = {}) {
       cwd: record.result?.cwd || record.cwd || ".",
       shell: record.result?.shell || record.shell || "system",
       background: Boolean(record.result?.background || record.background),
+      processId: record.result?.processId || "",
       exitCode: record.result?.exitCode,
       timedOut: Boolean(record.result?.timedOut),
       stdoutBytes: record.result?.stdout?.length || 0,
@@ -895,6 +925,19 @@ function summarizeToolResult(record = {}) {
         beforeScanMs: workspaceChanges.before?.durationMs || 0,
         afterScanMs: workspaceChanges.after?.durationMs || 0
       }
+    };
+  }
+  if (record.tool === "process_control") {
+    return {
+      action: result.action || record.action || "",
+      processId: result.processId || result.process?.processId || record.processId || "",
+      status: result.process?.status || result.status || "",
+      processes: result.processes?.length || 0,
+      stream: result.stream || record.stream || "",
+      bytesRead: result.bytesRead || 0,
+      nextOffset: result.nextOffset,
+      truncated: Boolean(result.truncated),
+      exitCode: result.process?.exitCode
     };
   }
   if (record.tool === "run_code") {
@@ -1079,6 +1122,9 @@ function appendToolAuditLog(groupPath, action, item) {
       background: item.background,
       timeoutMs: item.timeoutMs,
       action: item.action,
+      processId: item.processId,
+      stream: item.stream,
+      offset: item.offset,
       branch: item.branch,
       remote: item.remote,
       message: item.message,
@@ -1146,6 +1192,36 @@ function appendCommandAuditLog(groupPath, action, item) {
     fs.appendFileSync(filePath, `${JSON.stringify(record)}\n`, "utf8");
   } catch {
     // Command audit is best-effort; never hide the actual command result because logging failed.
+  }
+}
+
+function appendProcessAuditLog(groupPath, action, item) {
+  if (!groupPath || item.tool !== "process_control") return;
+  try {
+    const filePath = path.join(groupPath, "shared", "logs", "processes.jsonl");
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    const record = {
+      action,
+      id: item.id,
+      tool: item.tool,
+      status: item.status,
+      code: item.code,
+      error: item.error,
+      round: item.round,
+      source_agent_id: item.source_agent_id,
+      source_agent_name: item.source_agent_name,
+      processAction: item.result?.action || item.action,
+      processId: item.result?.processId || item.result?.process?.processId || item.processId,
+      processStatus: item.result?.process?.status || item.result?.status,
+      stream: item.result?.stream || item.stream,
+      offset: item.result?.offset ?? item.offset,
+      nextOffset: item.result?.nextOffset,
+      bytesRead: item.result?.bytesRead,
+      createdAt: nowIso()
+    };
+    fs.appendFileSync(filePath, `${JSON.stringify(record)}\n`, "utf8");
+  } catch {
+    // Process audit is best-effort; never hide the actual process result because logging failed.
   }
 }
 
@@ -1417,6 +1493,9 @@ function safeRequestForStorage(request) {
     packageName: safePackageForStorage(request.packageName),
     runner: request.runner,
     action: request.action,
+    processId: request.processId,
+    stream: request.stream,
+    offset: request.offset,
     branch: request.branch,
     remote: request.remote,
     message: request.message,

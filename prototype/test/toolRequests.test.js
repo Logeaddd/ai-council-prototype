@@ -370,9 +370,224 @@ test("execute_command supports pipes redirection and background processes", asyn
   assert.equal(pipeResult.results[0].result.workspaceChanges.complete, true);
   assert.equal(backgroundResult.results[0].status, "completed");
   assert.equal(backgroundResult.results[0].result.background, true);
+  assert.match(backgroundResult.results[0].result.processId, /^proc_/);
   assert.ok(backgroundResult.results[0].result.pid > 0);
   assert.equal(backgroundResult.results[0].result.workspaceChanges.status, "not_observed_background");
   assert.equal(backgroundResult.results[0].result.workspaceChanges.complete, false);
+});
+
+test("background process output status list and stop remain available across tool calls", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-process-control-"));
+  const secretSuffix = ["background", "secret", "value"].join("-");
+  const secret = `sk-${secretSuffix}`;
+  const script = [
+    `console.log(${JSON.stringify(`FIRST ${secret}`)})`,
+    `console.error(${JSON.stringify("ERR_FACT")})`,
+    `setTimeout(()=>console.log(${JSON.stringify("SECOND_FACT")}), 180)`,
+    "setInterval(()=>{},1000)"
+  ].join(";");
+  const started = await executeToolRequests({
+    permissionTier: "full",
+    groupPath: tmp,
+    agent: { id: "full", name: "Full" },
+    round: 1,
+    requests: [{
+      tool: "execute_command",
+      command: nodeCommand(script),
+      shell: shellForNodeCommand(),
+      background: true,
+      maxOutputBytes: 8192,
+      reason: "Start a managed background process."
+    }]
+  });
+  const processId = started.results[0].result.processId;
+  assert.match(processId, /^proc_/);
+
+  await waitFor(async () => {
+    const output = await processTool(tmp, { action: "output", processId, stream: "stdout", maxBytes: 4096 });
+    return output.results[0]?.result?.output?.includes("SECOND_FACT");
+  }, 5000);
+
+  const listed = await processTool(tmp, { action: "list", count: 10 });
+  const status = await processTool(tmp, { action: "status", processId });
+  const stdout = await processTool(tmp, { action: "output", processId, stream: "stdout", offset: 0, maxBytes: 4096 });
+  const stderr = await processTool(tmp, { action: "output", processId, stream: "stderr", offset: 0, maxBytes: 4096 });
+
+  assert.equal(listed.results[0].result.processes.some((item) => item.processId === processId), true);
+  assert.equal(status.results[0].result.process.status, "running");
+  assert.match(stdout.results[0].result.output, /FIRST sk-\[redacted\]/);
+  assert.equal(stdout.results[0].result.output.includes(secretSuffix), false);
+  assert.match(stdout.results[0].result.output, /SECOND_FACT/);
+  assert.equal(stdout.results[0].result.nextOffset, stdout.results[0].result.totalBytes);
+  assert.match(stderr.results[0].result.output, /ERR_FACT/);
+  const rawStdout = fs.readFileSync(path.join(tmp, "shared", "logs", "processes", processId, "stdout.log"), "utf8");
+  assert.match(rawStdout, /sk-\[redacted\]/);
+  assert.equal(rawStdout.includes(secretSuffix), false);
+
+  const stopped = await processTool(tmp, { action: "stop", processId, timeoutMs: 10000 });
+  assert.equal(stopped.results[0].status, "completed");
+  assert.equal(stopped.results[0].result.process.status, "stopped");
+
+  const persisted = await processTool(tmp, { action: "status", processId });
+  assert.equal(persisted.results[0].result.process.status, "stopped");
+  assert.equal(fs.existsSync(path.join(tmp, "shared", "logs", "processes.jsonl")), true);
+  assert.equal(fs.existsSync(path.join(tmp, "shared", "logs", "processes", processId, "state.json")), true);
+});
+
+test("process control requires full permission and rejects unknown ids", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-process-permission-"));
+  const denied = await executeToolRequests({
+    permissionTier: "tool",
+    groupPath: tmp,
+    agent: { id: "tool", name: "Tool" },
+    round: 1,
+    requests: [{ tool: "process_control", action: "list", reason: "List processes." }]
+  });
+  const missing = await processTool(tmp, { action: "status", processId: "proc_missing" });
+
+  assert.equal(denied.rejected[0].code, "permission_denied");
+  assert.equal(missing.results[0].status, "failed");
+  assert.equal(missing.results[0].code, "process_not_found");
+});
+
+test("background process records natural exit and bounded paged output", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-process-exit-"));
+  const script = [
+    "console.log('A'.repeat(3000))",
+    "setTimeout(()=>{console.log('EXIT_FACT');process.exit(0)},120)"
+  ].join(";");
+  const started = await executeToolRequests({
+    permissionTier: "full",
+    groupPath: tmp,
+    agent: { id: "full", name: "Full" },
+    round: 1,
+    requests: [{
+      tool: "execute_command",
+      command: nodeCommand(script),
+      shell: shellForNodeCommand(),
+      background: true,
+      maxOutputBytes: 2048,
+      reason: "Run a bounded background command."
+    }]
+  });
+  const processId = started.results[0].result.processId;
+
+  const finalStatus = await waitForResult(async () => {
+    const result = await processTool(tmp, { action: "status", processId });
+    return result.results[0]?.result?.process?.status === "exited" ? result : undefined;
+  }, 5000);
+  const firstPage = await processTool(tmp, { action: "output", processId, stream: "stdout", offset: 0, maxBytes: 1024 });
+  const secondPage = await processTool(tmp, {
+    action: "output",
+    processId,
+    stream: "stdout",
+    offset: firstPage.results[0].result.nextOffset,
+    maxBytes: 1024
+  });
+
+  assert.equal(finalStatus.results[0].result.process.exitCode, 0);
+  assert.equal(finalStatus.results[0].result.process.stdoutTruncated, true);
+  assert.equal(firstPage.results[0].result.bytesRead, 1024);
+  assert.equal(firstPage.results[0].result.truncated, true);
+  assert.equal(secondPage.results[0].result.nextOffset, 2048);
+  assert.equal(secondPage.results[0].result.eof, true);
+  assert.equal(secondPage.results[0].result.logTruncated, true);
+  assert.equal(firstPage.results[0].result.output.length + secondPage.results[0].result.output.length, 2048);
+});
+
+test("stale persisted process state becomes unknown instead of pretending to run", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-process-stale-"));
+  const processId = "proc_stale_state";
+  const processDir = path.join(tmp, "shared", "logs", "processes", processId);
+  fs.mkdirSync(processDir, { recursive: true });
+  fs.writeFileSync(path.join(processDir, "state.json"), JSON.stringify({
+    processId,
+    source: "managed_background_process",
+    status: "running",
+    command: "old-command",
+    supervisorPid: 2147483647,
+    pid: 2147483646,
+    createdAt: new Date(Date.now() - 60_000).toISOString(),
+    heartbeatAt: new Date(Date.now() - 60_000).toISOString()
+  }), "utf8");
+
+  const result = await processTool(tmp, { action: "status", processId });
+
+  assert.equal(result.results[0].status, "completed");
+  assert.equal(result.results[0].result.process.status, "unknown");
+  assert.equal(result.results[0].result.process.code, "process_state_unknown");
+});
+
+test("process logs are internal and unavailable through ordinary file tools", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-process-private-log-"));
+  const processId = "proc_private_log";
+  const processDir = path.join(tmp, "shared", "logs", "processes", processId);
+  fs.mkdirSync(processDir, { recursive: true });
+  fs.writeFileSync(path.join(processDir, "state.json"), "{}", "utf8");
+  fs.writeFileSync(path.join(processDir, "stdout.log"), "PRIVATE_PROCESS_FACT", "utf8");
+
+  const result = await executeToolRequests({
+    permissionTier: "tool",
+    groupPath: tmp,
+    agent: { id: "reader", name: "Reader" },
+    round: 1,
+    requests: [{ tool: "read_file", path: `shared/logs/processes/${processId}/stdout.log`, reason: "Try direct log read." }]
+  });
+
+  assert.equal(result.results[0].status, "failed");
+  assert.equal(result.results[0].code, "forbidden_internal_path");
+});
+
+test("long background output without newlines becomes observable before exit", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-process-streaming-"));
+  const script = "process.stdout.write('STREAM_FACT'+'.'.repeat(900));setInterval(()=>{},1000)";
+  const started = await executeToolRequests({
+    permissionTier: "full",
+    groupPath: tmp,
+    agent: { id: "full", name: "Full" },
+    round: 1,
+    requests: [{ tool: "execute_command", command: nodeCommand(script), shell: shellForNodeCommand(), background: true, reason: "Stream output without newlines." }]
+  });
+  const processId = started.results[0].result.processId;
+
+  try {
+    const output = await waitForResult(async () => {
+      const result = await processTool(tmp, { action: "output", processId, stream: "stdout", maxBytes: 4096 });
+      return result.results[0]?.result?.output?.includes("STREAM_FACT") ? result : undefined;
+    }, 5000);
+    assert.match(output.results[0].result.output, /STREAM_FACT/);
+    assert.ok(output.results[0].result.bytesRead > 300);
+  } finally {
+    await processTool(tmp, { action: "stop", processId, timeoutMs: 10000 });
+  }
+});
+
+test("background process records nonzero exit as failed", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-process-failed-"));
+  const started = await executeToolRequests({
+    permissionTier: "full",
+    groupPath: tmp,
+    agent: { id: "full", name: "Full" },
+    round: 1,
+    requests: [{
+      tool: "execute_command",
+      command: nodeCommand("console.error('FAILED_FACT');process.exit(7)"),
+      shell: shellForNodeCommand(),
+      background: true,
+      reason: "Run a failing background command."
+    }]
+  });
+  const processId = started.results[0].result.processId;
+  const finalStatus = await waitForResult(async () => {
+    const result = await processTool(tmp, { action: "status", processId });
+    return result.results[0]?.result?.process?.status === "failed" ? result : undefined;
+  }, 5000);
+  const stderr = await processTool(tmp, { action: "output", processId, stream: "stderr", maxBytes: 4096 });
+
+  assert.equal(finalStatus.results[0].result.process.exitCode, 7);
+  assert.equal(finalStatus.results[0].result.process.code, "command_exit_nonzero");
+  assert.match(stderr.results[0].result.output, /FAILED_FACT/);
+  assert.equal(stderr.results[0].result.eof, true);
 });
 
 test("execute_command reports real net file changes without runtime or secret noise", async () => {
@@ -1186,6 +1401,35 @@ function shellForNodeCommand() {
 function nodeCommand(script) {
   const escapedScript = String(script).replace(/"/g, '\\"');
   return `"${process.execPath}" -e "${escapedScript}"`;
+}
+
+function processTool(groupPath, request) {
+  return executeToolRequests({
+    permissionTier: "full",
+    groupPath,
+    agent: { id: "full", name: "Full" },
+    round: 2,
+    requests: [{ tool: "process_control", reason: "Manage a background process.", ...request }]
+  });
+}
+
+async function waitFor(check, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await check()) return;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(`Condition was not met within ${timeoutMs}ms.`);
+}
+
+async function waitForResult(check, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const result = await check();
+    if (result) return result;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(`Result was not available within ${timeoutMs}ms.`);
 }
 
 function initGitRepo(dir) {

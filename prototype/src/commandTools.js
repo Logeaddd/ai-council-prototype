@@ -4,6 +4,7 @@ import path from "node:path";
 import { isInsidePath, normalizeWorkspacePathAlias } from "./pathGuards.js";
 import { buildCommandEnvironment, displayPath } from "./runtimeEnvironment.js";
 import { backgroundWorkspaceChanges, captureWorkspaceSnapshot, diffWorkspaceSnapshots } from "./workspaceChanges.js";
+import { startManagedBackgroundProcess } from "./processTools.js";
 
 const DEFAULT_TIMEOUT_MS = 60 * 1000;
 const MIN_TIMEOUT_MS = 1000;
@@ -34,6 +35,7 @@ export async function executeCommandTool(request, options = {}) {
       command,
       shell,
       timeoutMs,
+      maxOutputBytes,
       runtime,
       workspaceChanges: backgroundWorkspaceChanges(),
       startedAtMs
@@ -168,24 +170,26 @@ function runForegroundCommand(options) {
   });
 }
 
-function startBackgroundCommand(options) {
-  const child = spawn(options.invocation.file, options.invocation.args, {
+async function startBackgroundCommand(options) {
+  const managed = await startManagedBackgroundProcess({
+    groupRoot: options.groupRoot,
     cwd: options.cwd,
-    windowsHide: true,
-    windowsVerbatimArguments: Boolean(options.invocation.windowsVerbatimArguments),
-    detached: true,
+    command: options.command,
+    shell: options.shell,
+    invocation: options.invocation,
     env: options.runtime.env,
-    stdio: "ignore"
+    maxOutputBytes: options.maxOutputBytes
   });
-  child.on("error", () => {});
-  child.unref();
-  if (!child.pid) {
+  if (!managed.ok) {
     return commandResult(options, {
       ok: false,
       background: true,
-      code: "command_spawn_failed",
-      error: "Background command failed to start.",
-      pid: null,
+      code: managed.code || "command_spawn_failed",
+      error: managed.error || "Background command failed to start.",
+      processId: managed.processId,
+      process: managed.process,
+      pid: managed.pid,
+      supervisorPid: managed.supervisorPid,
       exitCode: null,
       signal: null,
       timedOut: false,
@@ -196,7 +200,10 @@ function startBackgroundCommand(options) {
   return commandResult(options, {
     ok: true,
     background: true,
-    pid: child.pid,
+    processId: managed.processId,
+    process: managed.process,
+    pid: managed.pid,
+    supervisorPid: managed.supervisorPid,
     exitCode: null,
     signal: null,
     timedOut: false,
@@ -216,7 +223,10 @@ function commandResult(options, state) {
     shell: options.shell,
     cwd: relativeCwd(options.groupRoot, options.cwd),
     background: Boolean(state.background),
+    processId: state.processId,
+    process: state.process,
     pid: state.pid,
+    supervisorPid: state.supervisorPid,
     exitCode: state.exitCode,
     signal: state.signal || "",
     timedOut: Boolean(state.timedOut),

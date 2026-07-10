@@ -288,6 +288,7 @@ test("round prompt advertises artifacts in speak schema", () => {
   assert.match(messages[0].content, /load_context/);
   assert.match(messages[0].content, /extract_archive/);
   assert.match(messages[0].content, /execute_command/);
+  assert.match(messages[0].content, /process_control/);
   assert.match(messages[0].content, /run_code/);
   assert.match(messages[0].content, /install_package/);
   assert.match(messages[0].content, /run_tests/);
@@ -346,7 +347,7 @@ test("text-only workspace round prompt does not ask the member to propose file_o
   });
 
   assert.match(messages[0].content, /text-only file permission/);
-  assert.match(messages[0].content, /Do not request .*api_request.*search_context.*load_context.*extract_archive.*execute_command.*run_code.*install_package.*run_tests.*git_operation.*browser_control.*database_query.*mcp_search_npm.*mcp_install_npm.*mcp_uninstall.*mcp_list_tools.*mcp_call.*mcp_list_resources.*mcp_read_resource.*mcp_list_prompts.*mcp_get_prompt/);
+  assert.match(messages[0].content, /Do not request .*api_request.*search_context.*load_context.*extract_archive.*execute_command.*process_control.*run_code.*install_package.*run_tests.*git_operation.*browser_control.*database_query.*mcp_search_npm.*mcp_install_npm.*mcp_uninstall.*mcp_list_tools.*mcp_call.*mcp_list_resources.*mcp_read_resource.*mcp_list_prompts.*mcp_get_prompt/);
   assert.match(messages[0].content, /do not propose file_operations yourself/);
   assert.doesNotMatch(messages[0].content, /MUST propose the change in file_operations/);
 });
@@ -371,6 +372,8 @@ test("full tool prompt advertises full-only tools while tool tier does not", () 
 
   assert.match(full[0].content, /extract_archive for zip files/);
   assert.match(full[0].content, /execute_command for real shell commands/);
+  assert.match(full[0].content, /process_control for listing background processes/);
+  assert.match(full[0].content, /background execute_command result means started, not completed/);
   assert.match(full[0].content, /api_request for real HTTP API calls/);
   assert.match(full[0].content, /pipes, redirection, curl \| bash/);
   assert.match(full[0].content, /run_code for real JavaScript\/Node, Python, PowerShell, or shell snippets/);
@@ -391,9 +394,10 @@ test("full tool prompt advertises full-only tools while tool tier does not", () 
   assert.doesNotMatch(full[0].content, /external MCP/);
   assert.match(tool[0].content, /database_query for read-only SQLite SELECT queries/);
   assert.match(tool[0].content, /database_query write operations require full permission/);
-  assert.match(tool[0].content, /extract_archive, execute_command, run_code, install_package, run_tests, git_operation, browser_control, mcp_search_npm, mcp_install_npm, mcp_uninstall, mcp_list_tools, mcp_call, mcp_list_resources, mcp_read_resource, mcp_list_prompts, and mcp_get_prompt require full permission/);
+  assert.match(tool[0].content, /extract_archive, execute_command, process_control, run_code, install_package, run_tests, git_operation, browser_control, mcp_search_npm, mcp_install_npm, mcp_uninstall, mcp_list_tools, mcp_call, mcp_list_resources, mcp_read_resource, mcp_list_prompts, and mcp_get_prompt require full permission/);
   assert.doesNotMatch(tool[0].content, /extract_archive for zip files inside the group workspace/);
   assert.doesNotMatch(tool[0].content, /execute_command for real shell commands/);
+  assert.doesNotMatch(tool[0].content, /process_control for listing background processes/);
   assert.doesNotMatch(tool[0].content, /run_code for real/);
   assert.doesNotMatch(tool[0].content, /install_package for real/);
   assert.doesNotMatch(tool[0].content, /run_tests for real/);
