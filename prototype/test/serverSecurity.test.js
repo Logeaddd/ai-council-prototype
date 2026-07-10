@@ -205,6 +205,8 @@ test("server exposes guarded file operation endpoints", () => {
   assert.match(serverJs, /rejectPendingFileOperation/);
   assert.match(serverJs, /autoApprovePendingFileOperation/);
   assert.match(serverJs, /executeApprovedFileOperation/);
+  assert.match(serverJs, /restoreDeletedFileOperation/);
+  assert.match(serverJs, /\/api\/file-operations\/restore/);
   assert.match(serverJs, /resolveWorkspacePath\(requireQuery\(url, "groupPath"\), "groupPath"\)/);
   assert.match(serverJs, /resolveWorkspacePath\(body\.groupPath, "groupPath"\)/);
 });
@@ -296,7 +298,7 @@ test("server capability gates cover direct web, MCP runtime, and file execution 
     const escaped = route.replace("/", "\\/");
     assert.match(serverJs, new RegExp(`/api/mcp/${escaped}[^]*?requireCapability\\(\"mcp\"\\)`));
   }
-  for (const route of ["approve", "auto-approve", "execute"]) {
+  for (const route of ["approve", "auto-approve", "execute", "restore"]) {
     assert.match(serverJs, new RegExp(`/api/file-operations/${route}[^]*?requireCapability\\(\"files\"\\)`));
   }
   assert.match(serverJs, /error\.statusCode = 409/);

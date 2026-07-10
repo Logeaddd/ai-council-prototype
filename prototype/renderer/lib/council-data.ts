@@ -89,7 +89,7 @@ export interface Blocker {
   detail: string
 }
 
-export type FileOpStatus = "pending" | "approved" | "executed" | "rejected"
+export type FileOpStatus = "pending" | "approved" | "executed" | "restored" | "rejected"
 
 export interface FileOperation {
   id: string
@@ -98,6 +98,7 @@ export interface FileOperation {
   status: FileOpStatus
   proposedBy: string
   commit?: string
+  canRestore?: boolean
 }
 
 export interface UsageSummary {
@@ -173,6 +174,7 @@ export const FILEOP_STATUS_LABEL: Record<FileOpStatus, string> = {
   pending: "待审批",
   approved: "已批准",
   executed: "已执行",
+  restored: "已恢复",
   rejected: "已拒绝",
 }
 

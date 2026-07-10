@@ -1344,6 +1344,8 @@ test("controlled file tools hide internal workspace data", async () => {
   fs.mkdirSync(path.join(tmp, "members", "A", "inbox"), { recursive: true });
   fs.writeFileSync(path.join(tmp, "group.json"), JSON.stringify({ apiKey: "group-secret" }), "utf8");
   fs.writeFileSync(path.join(tmp, "members", "A", "inbox", "private-chat.jsonl"), "PRIVATE_CHAT_FACT", "utf8");
+  fs.mkdirSync(path.join(tmp, "shared", "file-ops", "recovery", "fop_1"), { recursive: true });
+  fs.writeFileSync(path.join(tmp, "shared", "file-ops", "recovery", "fop_1", "content.bin"), "RECOVERY_SECRET", "utf8");
   fs.writeFileSync(path.join(tmp, "public.md"), "public", "utf8");
 
   const list = executeFileTool(
@@ -1360,10 +1362,31 @@ test("controlled file tools hide internal workspace data", async () => {
     path: "members/A/inbox/private-chat.jsonl",
     reason: "Read private chat"
   }, tmp);
+  const readRecovery = executeFileToolResult({
+    tool: "read_file",
+    path: "shared/file-ops/recovery/fop_1/content.bin",
+    reason: "Read internal recovery data"
+  }, tmp);
+  const listShared = executeFileTool(
+    { tool: "list_directory", path: "shared", reason: "List shared workspace data" },
+    { groupPath: tmp }
+  );
+  const searchRecovery = executeFileTool(
+    { tool: "search_files", query: "content.bin", reason: "Search internal recovery data" },
+    { groupPath: tmp }
+  );
+  const grepRecovery = executeFileTool(
+    { tool: "grep_content", query: "RECOVERY_SECRET", reason: "Search internal recovery content" },
+    { groupPath: tmp }
+  );
 
-  assert.deepEqual(list.entries.map((entry) => entry.name), ["public.md"]);
+  assert.deepEqual(list.entries.map((entry) => entry.name), ["shared", "public.md"]);
+  assert.deepEqual(listShared.entries, []);
   assert.equal(readGroup.code, "forbidden_internal_file");
   assert.equal(readPrivate.code, "forbidden_internal_path");
+  assert.equal(readRecovery.code, "forbidden_internal_path");
+  assert.equal(searchRecovery.results.length, 0);
+  assert.equal(grepRecovery.results.length, 0);
 });
 
 test("file tools can read explicitly imported project roots", () => {

@@ -408,9 +408,17 @@ test("renderer does not seed undeletable demo council groups", () => {
 test("server exposes actual guarded file-operation APIs", () => {
   const live = read("renderer/lib/council-live.ts");
   const server = read("src/server.js");
+  const app = read("renderer/components/council/council-app.tsx");
+  const right = read("renderer/components/council/right-panel.tsx");
   assert.match(live, /\/api\/file-operations\/approve/);
   assert.match(live, /\/api\/file-operations\/reject/);
   assert.match(live, /\/api\/file-operations\/execute/);
+  assert.match(live, /\/api\/file-operations\/restore/);
+  assert.match(live, /canRestore/);
+  assert.match(app, /handleFileOperation\("restore"/);
+  assert.match(right, /onRestoreFileOp/);
+  assert.match(right, /RotateCcw/);
+  assert.match(right, /fileOp\.status === "approved" && !fileOp\.canRestore/);
   assert.match(server, /approvePendingFileOperation/);
   assert.match(server, /rejectPendingFileOperation/);
   assert.match(server, /executeApprovedFileOperation/);

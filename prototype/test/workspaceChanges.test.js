@@ -49,6 +49,7 @@ test("workspace snapshots exclude secrets dependencies and council runtime state
     ["shared/logs/commands.jsonl", "LOG"],
     ["shared/usage/usage.jsonl", "USAGE"],
     ["shared/environments/npm/tool.js", "MANAGED"],
+    ["shared/file-ops/recovery/fop_1/content.bin", "RECOVERY"],
     ["group.json", "{}"]
   ];
   const before = captureWorkspaceSnapshot(root);

@@ -210,8 +210,28 @@ function auditRecord(action, item) {
     reason: item.reason,
     source_agent_id: item.source_agent_id,
     source_agent_name: item.source_agent_name,
+    recovery: safeRecovery(item.recovery),
+    commitHash: item.commitHash,
     content_summary: item.content_summary || summarizeContent(item.content),
     createdAt: nowIso()
+  };
+}
+
+function safeRecovery(value = {}) {
+  if (!value?.backupId) return undefined;
+  return {
+    backupId: value.backupId,
+    status: value.status,
+    sourcePath: value.sourcePath,
+    backupPath: value.backupPath,
+    metadataPath: value.metadataPath,
+    sizeBytes: value.sizeBytes,
+    sha256: value.sha256,
+    backedUpAt: value.backedUpAt,
+    deletedAt: value.deletedAt,
+    restoredAt: value.restoredAt,
+    deleteCommitHash: value.deleteCommitHash,
+    restoreCommitHash: value.restoreCommitHash
   };
 }
 

@@ -14,6 +14,7 @@ import {
   GripVertical,
   KeyRound,
   Plus,
+  RotateCcw,
   Settings2,
   ShieldCheck,
   Volume2,
@@ -58,6 +59,7 @@ export function RightPanel({
   onApproveFileOp,
   onRejectFileOp,
   onExecuteFileOp,
+  onRestoreFileOp,
 }: {
   members: AgentMember[]
   blockers: Blocker[]
@@ -77,6 +79,7 @@ export function RightPanel({
   onApproveFileOp: (id: string) => void
   onRejectFileOp: (id: string) => void
   onExecuteFileOp: (id: string) => void
+  onRestoreFileOp: (id: string) => void
 }) {
   const [draggedMemberId, setDraggedMemberId] = useState<string | null>(null)
   const [dragOverMemberId, setDragOverMemberId] = useState<string | null>(null)
@@ -168,6 +171,7 @@ export function RightPanel({
           onApprove={onApproveFileOp}
           onReject={onRejectFileOp}
           onExecute={onExecuteFileOp}
+          onRestore={onRestoreFileOp}
         />
       </Section>
       <Section title="用量与成本">
@@ -455,6 +459,7 @@ const FILEOP_STYLE: Record<FileOpStatus, { icon: typeof Check; tone: Tone }> = {
   pending: { icon: Clock, tone: "warning" },
   approved: { icon: Check, tone: "info" },
   executed: { icon: GitCommitHorizontal, tone: "success" },
+  restored: { icon: RotateCcw, tone: "info" },
   rejected: { icon: X, tone: "danger" },
 }
 
@@ -463,11 +468,13 @@ function FileOpsList({
   onApprove,
   onReject,
   onExecute,
+  onRestore,
 }: {
   fileOps: FileOperation[]
   onApprove: (id: string) => void
   onReject: (id: string) => void
   onExecute: (id: string) => void
+  onRestore: (id: string) => void
 }) {
   if (!fileOps.length) return <EmptyLine>暂无文件操作提案</EmptyLine>
   return (
@@ -518,13 +525,24 @@ function FileOpsList({
                 </button>
               </div>
             ) : null}
-            {fileOp.status === "approved" ? (
+            {fileOp.status === "approved" && !fileOp.canRestore ? (
               <button
                 type="button"
                 onClick={() => onExecute(fileOp.id)}
                 className="rounded-md bg-primary px-2 py-1 text-[11px] font-medium text-primary-foreground transition-opacity hover:opacity-90"
               >
                 执行
+              </button>
+            ) : null}
+            {fileOp.canRestore ? (
+              <button
+                type="button"
+                onClick={() => onRestore(fileOp.id)}
+                className="rounded p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                aria-label="恢复文件"
+                title="恢复文件"
+              >
+                <RotateCcw className="size-3.5" />
               </button>
             ) : null}
           </div>

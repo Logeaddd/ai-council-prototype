@@ -116,6 +116,10 @@ function walk(current, relative, state, options) {
     const normalizedRelative = childRelative.replaceAll("\\", "/");
     const absolute = path.join(current, entry.name);
     if (entry.isDirectory()) {
+      if (normalizedRelative.toLowerCase() === "shared/file-ops") {
+        state.skippedDirs += 1;
+        continue;
+      }
       if (SKIP_DIRS.has(entry.name)) {
         state.skippedDirs += 1;
         continue;

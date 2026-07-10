@@ -887,6 +887,15 @@ export async function executeFileOperation(groupPath: string, proposalId: string
   })
 }
 
+export async function restoreFileOperation(groupPath: string, proposalId: string) {
+  return api<unknown>("/api/file-operations/restore", {
+    groupPath,
+    proposalId,
+    restoredBy: "user",
+    confirmed: true,
+  })
+}
+
 export function fileOperationsToUi(data?: { pending?: unknown[]; audit?: unknown[] } | null): FileOperation[] {
   const pending = data?.pending || []
   const audit = data?.audit || []
@@ -918,6 +927,12 @@ interface RawFileOperation {
   agentName?: string
   commitHash?: string
   commit?: string
+  recovery?: {
+    backupId?: string
+    status?: string
+    sha256?: string
+    sizeBytes?: number
+  }
 }
 
 function parseSseChunk(chunk: string): CouncilEvent | null {
@@ -1010,12 +1025,17 @@ function fileOperationToUi(raw: unknown, index: number, auditOnly: boolean): Fil
     status,
     proposedBy: item.source_agent_name || item.source_agent_id || item.agentName || "AI",
     commit: item.commitHash || item.commit,
+    canRestore: item.op === "delete"
+      && ["executed", "approved"].includes(String(item.status || ""))
+      && ["prepared", "deleted"].includes(String(item.recovery?.status || ""))
+      && Boolean(item.recovery?.backupId),
   }
 }
 
 function fileOpStatus(status?: string): FileOpStatus {
   if (status === "approved") return "approved"
   if (status === "executed" || status === "committed") return "executed"
+  if (status === "restored") return "restored"
   if (status === "rejected" || status === "superseded" || status === "unsafe_op") return "rejected"
   return "pending"
 }
@@ -1023,6 +1043,7 @@ function fileOpStatus(status?: string): FileOpStatus {
 function terminalAuditFileOpStatus(status?: string, action?: string): FileOpStatus | null {
   const value = status || action
   if (value === "executed" || value === "committed") return "executed"
+  if (value === "restored") return "restored"
   if (value === "rejected" || value === "superseded" || value === "unsafe_op") return "rejected"
   return null
 }

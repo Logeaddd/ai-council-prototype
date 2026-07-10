@@ -292,7 +292,8 @@ test("root artifacts are detected while secret and internal paths are rejected",
         deliverables: [
           { path: ".env.local", claim: "existing" },
           { path: "sessions/private.json", claim: "existing" },
-          { path: "shared/logs/commands.jsonl", claim: "existing" }
+          { path: "shared/logs/commands.jsonl", claim: "existing" },
+          { path: "shared/file-ops/recovery/fop_1/content.bin", claim: "existing" }
         ]
       },
       toolExecutionResults: [],
@@ -302,7 +303,7 @@ test("root artifacts are detected while secret and internal paths are rejected",
 
   assert.equal(rootReport.claims[0].normalized_path, "app.exe");
   assert.equal(rootReport.claims[0].status, "exists_unverified");
-  assert.deepEqual(blockedReport.claims.map((item) => item.status), ["invalid_path", "invalid_path", "invalid_path"]);
+  assert.deepEqual(blockedReport.claims.map((item) => item.status), ["invalid_path", "invalid_path", "invalid_path", "invalid_path"]);
 });
 
 test("a deliverable symlink cannot escape the group workspace", () => {

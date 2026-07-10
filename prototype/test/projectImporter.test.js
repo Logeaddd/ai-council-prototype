@@ -13,6 +13,8 @@ test("project importer reads a real folder into prompt attachments", () => {
   fs.writeFileSync(path.join(root, "src", "story.json"), JSON.stringify({ secret: "PET_RABBIT_WORLDVIEW" }), "utf8");
   fs.writeFileSync(path.join(root, "node_modules", "ignored", "skip.js"), "SHOULD_NOT_APPEAR", "utf8");
   fs.writeFileSync(path.join(root, "image.png"), Buffer.from([0, 1, 2, 3]));
+  fs.mkdirSync(path.join(root, "shared", "file-ops", "recovery", "fop_1"), { recursive: true });
+  fs.writeFileSync(path.join(root, "shared", "file-ops", "recovery", "fop_1", "record.json"), "RECOVERY_IMPORT_SECRET", "utf8");
 
   const result = importProjectFolder(root);
   const merged = result.attachments.map((item) => `${item.name}\n${item.content}`).join("\n\n");
@@ -24,6 +26,7 @@ test("project importer reads a real folder into prompt attachments", () => {
   assert.match(merged, /src\/story\.json/);
   assert.match(merged, /PET_RABBIT_WORLDVIEW/);
   assert.doesNotMatch(merged, /SHOULD_NOT_APPEAR/);
+  assert.doesNotMatch(merged, /RECOVERY_IMPORT_SECRET|file-ops\/recovery/);
 });
 
 test("project importer limits large files and marks truncation", () => {

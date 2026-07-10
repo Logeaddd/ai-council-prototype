@@ -51,7 +51,8 @@ test("persisted capability switches block direct server execution routes", async
       "/api/mcp/prompts/get",
       "/api/file-operations/approve",
       "/api/file-operations/auto-approve",
-      "/api/file-operations/execute"
+      "/api/file-operations/execute",
+      "/api/file-operations/restore"
     ]) {
       const response = await requestJson(port, route, {});
       assert.equal(response.status, 409, route);

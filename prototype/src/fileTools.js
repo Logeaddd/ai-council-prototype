@@ -17,6 +17,7 @@ const SCAN_SKIP_DIRS = new Set([
   ".idea",
   ".vscode",
   "node_modules",
+  "file-ops",
   "dist",
   "build",
   "out",
@@ -45,7 +46,7 @@ const DIRECT_FORBIDDEN_DIRS = new Set([
   "__pycache__"
 ]);
 const INTERNAL_WORKSPACE_SEGMENTS = new Set(["members", "sessions", "approvals"]);
-const INTERNAL_SHARED_SEGMENTS = new Set(["logs", "memory", "memory_pending", "inbox"]);
+const INTERNAL_SHARED_SEGMENTS = new Set(["logs", "memory", "memory_pending", "inbox", "file-ops"]);
 
 const TEXT_EXTENSIONS = new Set([
   ".txt", ".md", ".markdown", ".json", ".jsonl", ".js", ".jsx", ".ts", ".tsx",
@@ -131,7 +132,7 @@ function searchFiles(request, roots, options) {
   let scannedFiles = 0;
 
   for (const base of baseTargets) {
-    for (const item of walkFiles(base.path, base.root, options)) {
+    for (const item of walkFiles(base.path, base.root, { ...options, protectInternal: base.protectInternal })) {
       scannedFiles += 1;
       if (item.relativePath.toLowerCase().includes(query)) {
         results.push({
@@ -165,7 +166,7 @@ function grepContent(request, roots, options) {
   let scannedFiles = 0;
 
   for (const base of baseTargets) {
-    for (const item of walkFiles(base.path, base.root, options)) {
+    for (const item of walkFiles(base.path, base.root, { ...options, protectInternal: base.protectInternal })) {
       scannedFiles += 1;
       const stat = fs.statSync(item.path);
       if (!isTextCandidate(item.path) || stat.size > maxFileBytes) continue;

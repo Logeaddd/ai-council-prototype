@@ -32,6 +32,7 @@ import {
   groupRecordToUiGroup,
   messageToTranscriptItem,
   rejectFileOperation,
+  restoreFileOperation,
   reorderSeats,
   saveAppSettings,
   saveGroupSettings,
@@ -566,7 +567,7 @@ export function CouncilApp() {
     })
   }
 
-  async function handleFileOperation(action: "approve" | "reject" | "execute", id: string) {
+  async function handleFileOperation(action: "approve" | "reject" | "execute" | "restore", id: string) {
     if (!group.path) return
     try {
       if (action === "approve") {
@@ -575,11 +576,16 @@ export function CouncilApp() {
       } else if (action === "reject") {
         await rejectFileOperation(group.path, id)
         addSystemItem(`文件提案 ${id} 已拒绝。`)
-      } else {
+      } else if (action === "execute") {
         const ok = window.confirm("执行会写入文件并尝试生成 git commit，确认继续？")
         if (!ok) return
         await executeFileOperation(group.path, id)
         addSystemItem(`文件提案 ${id} 已执行。`)
+      } else {
+        const ok = window.confirm("恢复会把删除前的原文件写回，并生成 git commit，确认继续？")
+        if (!ok) return
+        await restoreFileOperation(group.path, id)
+        addSystemItem(`文件提案 ${id} 已恢复。`)
       }
       await refreshUsageAndFiles(group.path)
     } catch (error) {
@@ -929,6 +935,7 @@ export function CouncilApp() {
             onApproveFileOp={(id) => handleFileOperation("approve", id)}
             onRejectFileOp={(id) => handleFileOperation("reject", id)}
             onExecuteFileOp={(id) => handleFileOperation("execute", id)}
+            onRestoreFileOp={(id) => handleFileOperation("restore", id)}
           />
         ) : null}
       </div>

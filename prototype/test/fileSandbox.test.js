@@ -45,6 +45,31 @@ test("file sandbox rejects .git internals after realpath resolution", () => {
   assert.throws(() => validateFileOperationPath(groupRoot, ".git/objects/x"), /Forbidden path segment/);
 });
 
+test("file sandbox rejects internal recovery files", () => {
+  const groupRoot = makeGroupRoot();
+  fs.mkdirSync(path.join(groupRoot, "shared", "file-ops", "recovery", "fop_1"), { recursive: true });
+  fs.writeFileSync(path.join(groupRoot, "shared", "file-ops", "recovery", "fop_1", "content.bin"), "secret");
+  assert.throws(
+    () => validateFileOperationPath(groupRoot, "shared/file-ops/recovery/fop_1/content.bin"),
+    /Forbidden internal path/
+  );
+});
+
+test("file sandbox rejects council runtime and private state", () => {
+  const groupRoot = makeGroupRoot();
+  for (const relativePath of [
+    "group.json",
+    "members/A/private_memory/summary.md",
+    "sessions/session.json",
+    "approvals/approval.json",
+    "shared/logs/commands.jsonl",
+    "shared/cache/shared-summary.md",
+    "shared/task_state.json"
+  ]) {
+    assert.throws(() => validateFileOperationPath(groupRoot, relativePath), /Forbidden internal/);
+  }
+});
+
 test("file sandbox rejects symlink escape using realpath", { skip: process.platform === "win32" && !canSymlink() }, () => {
   const groupRoot = makeGroupRoot();
   const outside = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-outside-"));

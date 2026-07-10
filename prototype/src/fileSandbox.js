@@ -5,6 +5,10 @@ import { isInsidePath, normalizeWorkspacePathAlias } from "./pathGuards.js";
 const FORBIDDEN_SEGMENTS = new Set([".git", "node_modules"]);
 const FORBIDDEN_BASENAMES = new Set([".env", "credentials", "credentials.json", "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"]);
 const FORBIDDEN_EXTENSIONS = new Set([".key", ".pem", ".p12", ".pfx"]);
+const INTERNAL_ROOT_SEGMENTS = new Set(["members", "sessions", "approvals", "_supervisor"]);
+const INTERNAL_SHARED_SEGMENTS = new Set(["file-ops", "logs", "memory", "memory_pending", "cache", "usage", "inbox", "environments"]);
+const INTERNAL_ROOT_FILES = new Set(["group.json"]);
+const INTERNAL_SHARED_FILES = new Set(["task_state.json"]);
 
 export function validateFileOperationPath(groupRoot, relativePath, options = {}) {
   const rootRealPath = realpathExisting(groupRoot);
@@ -80,6 +84,19 @@ function assertInside(rootRealPath, resolvedRealPath) {
 function assertNotForbidden(rootRealPath, resolvedRealPath) {
   const relative = normalizeRelative(rootRealPath, resolvedRealPath);
   const parts = relative.split(/[\\/]+/).filter(Boolean);
+  const first = parts[0]?.toLowerCase();
+  if (parts.length === 1 && INTERNAL_ROOT_FILES.has(first)) {
+    throw sandboxError("forbidden_internal_path", `Forbidden internal file: ${parts[0]}`, 403);
+  }
+  if (INTERNAL_ROOT_SEGMENTS.has(first)) {
+    throw sandboxError("forbidden_internal_path", `Forbidden internal path: ${parts[0]}`, 403);
+  }
+  if (first === "shared" && INTERNAL_SHARED_SEGMENTS.has(parts[1]?.toLowerCase())) {
+    throw sandboxError("forbidden_internal_path", `Forbidden internal path: shared/${parts[1]}`, 403);
+  }
+  if (first === "shared" && parts.length === 2 && INTERNAL_SHARED_FILES.has(parts[1]?.toLowerCase())) {
+    throw sandboxError("forbidden_internal_path", `Forbidden internal file: shared/${parts[1]}`, 403);
+  }
   for (const part of parts) {
     if (FORBIDDEN_SEGMENTS.has(part)) {
       throw sandboxError("forbidden_segment", `Forbidden path segment: ${part}`, 403);

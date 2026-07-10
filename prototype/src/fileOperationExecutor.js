@@ -1,9 +1,16 @@
 import { execFileSync } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { validateFileOperationPath } from "./fileSandbox.js";
 import { appendFileOperationAuditLog, readPendingFileOperationProposal, updatePendingFileOperationProposal } from "./fileOperationQueue.js";
 import { nowIso } from "./types.js";
+import {
+  createDeletionBackup,
+  readVerifiedBackupContent,
+  recoverySummary,
+  updateDeletionBackup
+} from "./fileRecovery.js";
 
 const WRITE_OPS = new Set(["write", "append"]);
 const DANGEROUS_OPS = new Set(["delete"]);
@@ -88,21 +95,136 @@ export function executeApprovedFileOperation(options = {}) {
   assertDangerousOperationConfirmed(proposal, target.path, options);
 
   const beforeExists = fs.existsSync(target.path);
+  let recovery;
+  if (proposal.op === "delete") {
+    let backup;
+    try {
+      backup = createDeletionBackup({
+        groupPath,
+        proposalId: proposal.id,
+        sourcePath: proposal.path,
+        sourceAbsolutePath: target.path,
+        maxBackupBytes: options.maxBackupBytes,
+        maxTotalBytes: options.maxRecoveryBytes,
+        maxBackups: options.maxRecoveryBackups
+      });
+    } catch (error) {
+      appendFileOperationAuditLog(groupPath, "delete_backup_failed", {
+        ...proposal,
+        code: error.code || "delete_backup_failed",
+        reason: String(error.message || "delete_backup_failed")
+      });
+      throw error;
+    }
+    recovery = recoverySummary(backup);
+    const prepared = { ...proposal, recovery };
+    updatePendingFileOperationProposal(groupPath, prepared);
+    appendFileOperationAuditLog(groupPath, "delete_backup_prepared", prepared);
+    const currentContent = fs.readFileSync(target.path);
+    if (currentContent.length !== recovery.sizeBytes || sha256(currentContent) !== recovery.sha256) {
+      const changed = {
+        ...prepared,
+        code: "delete_source_changed_after_backup",
+        reason: "The source file changed after backup; deletion was stopped."
+      };
+      appendFileOperationAuditLog(groupPath, "delete_source_changed_after_backup", changed);
+      throw new Error(changed.code);
+    }
+  }
   applyProposal(target.path, proposal);
   const verification = verifyApplied(target.path, proposal, beforeExists);
+  if (proposal.op === "delete") {
+    const deletedBackup = updateDeletionBackup(groupPath, proposal.id, {
+      status: "deleted",
+      deletedAt: nowIso()
+    });
+    recovery = recoverySummary(deletedBackup);
+  }
   const completed = {
     ...proposal,
     status: "executed",
     executedAt: nowIso(),
-    verification
+    verification,
+    ...(recovery ? { recovery } : {})
   };
   updatePendingFileOperationProposal(groupPath, completed);
   appendFileOperationAuditLog(groupPath, "executed", completed);
   const commitHash = commitExecutedProposal(groupPath, completed);
+  if (recovery) {
+    const committedBackup = updateDeletionBackup(groupPath, proposal.id, { deleteCommitHash: commitHash });
+    recovery = recoverySummary(committedBackup);
+  }
   return {
     ...completed,
+    ...(recovery ? { recovery } : {}),
     commitHash
   };
+}
+
+export function restoreDeletedFileOperation(options = {}) {
+  const groupPath = requirePath(options.groupPath, "groupPath");
+  assertGitRepository(groupPath);
+  const proposal = readPendingFileOperationProposal(groupPath, options.proposalId);
+  if (proposal.op !== "delete") throw new Error(`File operation ${proposal.id} is not a deletion`);
+  if (!proposal.recovery?.backupId) throw new Error(`File operation ${proposal.id} has no delete backup`);
+  if (!options.confirmed) throw new Error("restore_requires_confirmation");
+  if (proposal.status === "restored") throw new Error(`File operation ${proposal.id} is already restored`);
+  assertNoUnrelatedDirtyFiles(groupPath, proposal);
+  const target = validateFileOperationPath(groupPath, proposal.path);
+  const interruptedDeletion = proposal.status === "approved"
+    && ["prepared", "deleted"].includes(proposal.recovery.status)
+    && !fs.existsSync(target.path);
+  if (proposal.status !== "executed" && !interruptedDeletion) {
+    throw new Error(`File operation ${proposal.id} has not completed deletion`);
+  }
+  if (fs.existsSync(target.path)) throw new Error("restore_target_exists");
+  const { record, content } = readVerifiedBackupContent(groupPath, proposal.recovery.backupId);
+  if (record.sourcePath !== proposal.path || record.proposalId !== proposal.id) {
+    throw new Error("restore_backup_source_mismatch");
+  }
+
+  fs.mkdirSync(path.dirname(target.path), { recursive: true });
+  fs.writeFileSync(target.path, content, { flag: "wx" });
+  let verification;
+  try {
+    if (Number.isInteger(record.sourceMode)) fs.chmodSync(target.path, record.sourceMode);
+    const restoredContent = fs.readFileSync(target.path);
+    verification = {
+      ok: restoredContent.length === record.sizeBytes && sha256(restoredContent) === record.sha256,
+      sizeBytes: restoredContent.length,
+      sha256: sha256(restoredContent),
+      expectedSizeBytes: record.sizeBytes,
+      expectedSha256: record.sha256
+    };
+    if (!verification.ok) throw new Error("restore_verification_failed");
+  } catch (error) {
+    fs.rmSync(target.path, { force: true });
+    appendFileOperationAuditLog(groupPath, "restore_failed", {
+      ...proposal,
+      code: "restore_failed",
+      reason: String(error.message || "restore_failed")
+    });
+    throw error;
+  }
+
+  const restoredBackup = updateDeletionBackup(groupPath, record.backupId, {
+    status: "restored",
+    restoredAt: nowIso(),
+    restoredBy: String(options.restoredBy || "user")
+  });
+  const restored = {
+    ...proposal,
+    status: "restored",
+    restoredAt: restoredBackup.restoredAt,
+    restoredBy: restoredBackup.restoredBy,
+    verification,
+    recovery: recoverySummary(restoredBackup)
+  };
+  updatePendingFileOperationProposal(groupPath, restored);
+  appendFileOperationAuditLog(groupPath, "restored", restored);
+  const commitHash = commitRestoredProposal(groupPath, restored);
+  const committedBackup = updateDeletionBackup(groupPath, record.backupId, { restoreCommitHash: commitHash });
+  return { ...restored, recovery: recoverySummary(committedBackup), commitHash };
 }
 
 
@@ -188,6 +310,7 @@ function isRuntimeStateFile(file) {
   const isMemberPrivateMemory = parts[0] === "members" && parts.includes("private_memory");
   return normalized.startsWith("_supervisor/")
     || normalized.startsWith("sessions/")
+    || normalized.startsWith("shared/file-ops/recovery/")
     || normalized.startsWith("shared/logs/")
     || normalized.startsWith("shared/cache/")
     || normalized.startsWith("shared/usage/")
@@ -226,6 +349,31 @@ function commitExecutedProposal(groupPath, proposal) {
   execFileSync("git", ["add", "--", ...files], { cwd: groupPath, stdio: "pipe" });
   const message = commitMessage(groupPath, proposal);
   execFileSync("git", ["commit", "-m", message.title, "-m", message.body], { cwd: groupPath, stdio: "pipe" });
+  return execFileSync("git", ["rev-parse", "--short", "HEAD"], { cwd: groupPath, encoding: "utf8" }).trim();
+}
+
+function commitRestoredProposal(groupPath, proposal) {
+  const files = commitFileList(groupPath, proposal);
+  execFileSync("git", ["add", "--", ...files], { cwd: groupPath, stdio: "pipe" });
+  execFileSync("git", [
+    "commit",
+    "-m", `files: restore ${proposal.path}`,
+    "-m", [
+      "Add:",
+      `- ${proposal.path}`,
+      "",
+      "Change:",
+      `- shared/file-ops/pending/${proposal.id}.json`,
+      "- shared/logs/file-ops.jsonl",
+      "",
+      "Remove:",
+      "- none",
+      "",
+      "Limits:",
+      "- restored from a verified internal delete backup",
+      "- recovery content remains outside Git and ordinary file tools"
+    ].join("\n")
+  ], { cwd: groupPath, stdio: "pipe" });
   return execFileSync("git", ["rev-parse", "--short", "HEAD"], { cwd: groupPath, encoding: "utf8" }).trim();
 }
 
@@ -285,6 +433,10 @@ function parsePorcelainPath(line) {
 
 function normalizeGitPath(value) {
   return String(value || "").replaceAll("\\", "/");
+}
+
+function sha256(content) {
+  return crypto.createHash("sha256").update(content).digest("hex");
 }
 
 function requirePath(value, name) {

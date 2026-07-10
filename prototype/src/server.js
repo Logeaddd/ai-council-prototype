@@ -8,7 +8,7 @@ import { readAppSettings, redactAppSettingsForClient, updateAppSettings, userDat
 import { loadJson, validateGroupConfig, validateRuntimeEnv } from "./config.js";
 import { runCouncil, runCouncilEvents } from "./discussionEngine.js";
 import { approveExecutionStandards, prepareExecutionStandards, readExecutionStandards } from "./executionStandards.js";
-import { approvePendingFileOperation, autoApprovePendingFileOperation, executeApprovedFileOperation, rejectPendingFileOperation } from "./fileOperationExecutor.js";
+import { approvePendingFileOperation, autoApprovePendingFileOperation, executeApprovedFileOperation, rejectPendingFileOperation, restoreDeletedFileOperation } from "./fileOperationExecutor.js";
 import { listFileOperationReviewItems, readFileOperationAuditLog } from "./fileOperationQueue.js";
 import { readGroupIndex, recordIdForPath, removeGroupIndexRecord, updateGroupIndexRecord, upsertGroupIndexRecord } from "./groupIndex.js";
 import { resolveInside } from "./pathGuards.js";
@@ -637,6 +637,13 @@ async function handleApi(req, res, url) {
     sendJson(res, 200, executeApprovedFileOperation(body));
     return;
   }
+  if (req.method === "POST" && url.pathname === "/api/file-operations/restore") {
+    requireCapability("files");
+    const body = await readBody(req);
+    body.groupPath = resolveWorkspacePath(body.groupPath, "groupPath");
+    sendJson(res, 200, restoreDeletedFileOperation(body));
+    return;
+  }
   if (req.method === "POST" && url.pathname === "/api/council/run") {
     const body = await readBody(req);
     const group = loadCouncilGroupFromRequest(body);
@@ -676,7 +683,6 @@ async function handleApi(req, res, url) {
     sendJson(res, 200, { ok: true, group });
     return;
   }
-
   if (req.method === "POST" && url.pathname === "/api/group/settings") {
     const body = await readBody(req);
     const groupPath = resolveWorkspacePath(body.groupPath, "groupPath");

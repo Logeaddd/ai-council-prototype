@@ -346,7 +346,7 @@ function assertSafeDeliverablePath(relativePath) {
     || [".pem", ".key", ".p12", ".pfx"].includes(path.extname(basename))) {
     throw new Error("Secret or credential files cannot be declared as deliverables.");
   }
-  if (parts[0]?.toLowerCase() === "shared" && ["logs", "memory", "memory_pending", "inbox"].includes(parts[1]?.toLowerCase())) {
+  if (parts[0]?.toLowerCase() === "shared" && ["logs", "memory", "memory_pending", "inbox", "file-ops"].includes(parts[1]?.toLowerCase())) {
     throw new Error("Internal shared data cannot be declared as a deliverable.");
   }
 }
