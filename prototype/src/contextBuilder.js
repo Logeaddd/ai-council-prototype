@@ -190,9 +190,46 @@ function selectVisibleToolResults(results, agent, visibility) {
 }
 
 function compactToolResultsForContext(results) {
-  return (Array.isArray(results) ? results : [])
+  return dedupeSimilarToolResults(Array.isArray(results) ? results : [])
     .slice(-MAX_TOOL_RESULTS_IN_CONTEXT)
     .map((item) => compactContextValue(item));
+}
+
+function dedupeSimilarToolResults(results) {
+  const seen = new Set();
+  const kept = [];
+  for (let index = results.length - 1; index >= 0; index -= 1) {
+    const item = results[index];
+    const signature = toolResultSignature(item);
+    if (signature && seen.has(signature)) continue;
+    if (signature) seen.add(signature);
+    kept.push(item);
+  }
+  return kept.reverse();
+}
+
+function toolResultSignature(item = {}) {
+  const tool = String(item.tool || "");
+  if (!tool) return "";
+  const source = String(item.source_agent_id || item.sourceAgentId || item.agentId || "");
+  const keyParts = [
+    item.path,
+    item.query,
+    item.url,
+    item.command,
+    item.cwd,
+    item.shell,
+    item.databasePath,
+    item.sql,
+    item.sessionId,
+    item.serverId,
+    item.mcpToolName,
+    item.packageName,
+    item.manager,
+    item.runner
+  ].map((value) => String(value || "").trim()).filter(Boolean);
+  if (!keyParts.length) return "";
+  return [source, tool, ...keyParts].join("\u001f");
 }
 
 function compactContextValue(value, depth = 0) {

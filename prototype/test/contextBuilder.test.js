@@ -272,6 +272,39 @@ test("context prompt sections compact large tool outputs", () => {
   assert.ok(core.length < largeStdout.length);
 });
 
+test("context prompt sections keep only the latest repeated tool result", () => {
+  const context = buildMemberContext(agent, {
+    question: "Use the latest file read.",
+    unresolvedObjections: {},
+    artifacts: [],
+    toolExecutionResults: [
+      {
+        tool: "read_file",
+        status: "completed",
+        source_agent_id: "critic",
+        source_agent_name: "Critic",
+        path: "build.gradle",
+        result: { content: "OLD_BUILD_CONTENT_SHOULD_DROP" }
+      },
+      {
+        tool: "read_file",
+        status: "completed",
+        source_agent_id: "critic",
+        source_agent_name: "Critic",
+        path: "build.gradle",
+        result: { content: "LATEST_BUILD_CONTENT_SHOULD_STAY" }
+      }
+    ],
+    messages: []
+  });
+  const sections = buildContextPromptSections(context);
+  const core = sections.find((section) => section.title === "Non-compressible core")?.content || "";
+
+  assert.match(core, /LATEST_BUILD_CONTENT_SHOULD_STAY/);
+  assert.doesNotMatch(core, /OLD_BUILD_CONTENT_SHOULD_DROP/);
+  assert.equal(context.core.toolExecutionResults.length, 1);
+});
+
 test("context prompt sections include rejected tool request reasons", () => {
   const context = buildMemberContext(agent, {
     question: "Use tools only when allowed.",
