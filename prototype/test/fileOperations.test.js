@@ -58,7 +58,7 @@ test("file operation parser extracts proposals from file operation artifacts", (
   assert.equal(operations[0].op, "read");
 });
 
-test("file operation parser rejects missing fields and invalid ops", () => {
+test("file operation parser rejects required missing fields and invalid ops", () => {
   const groupRoot = makeGroupRoot();
   const result = parseFileOperationProposals({
     groupRoot,
@@ -68,7 +68,6 @@ test("file operation parser rejects missing fields and invalid ops", () => {
         { op: "run", path: "src/a.js", reason: "Bad op.", expected_effect: "No effect." },
         { op: "read", reason: "Missing path.", expected_effect: "No effect." },
         { op: "read", path: "src/a.js", expected_effect: "Missing reason." },
-        { op: "read", path: "src/a.js", reason: "Missing expected effect." },
         { op: "write", path: "src/a.js", reason: "Missing content.", expected_effect: "No file." }
       ]
     }
@@ -79,10 +78,25 @@ test("file operation parser rejects missing fields and invalid ops", () => {
     "invalid_op",
     "missing_path",
     "missing_reason",
-    "missing_expected_effect",
     "missing_content"
   ]);
   assert.equal(result.accepted.length, 0);
+});
+
+test("file operation parser fills missing expected effect from reason", () => {
+  const groupRoot = makeGroupRoot();
+  const result = parseFileOperationProposals({
+    groupRoot,
+    source: {
+      file_operations: [
+        { op: "read", path: "src/a.js", reason: "Read source file." }
+      ]
+    }
+  });
+
+  assert.equal(result.rejected.length, 0);
+  assert.equal(result.accepted.length, 1);
+  assert.equal(result.accepted[0].expected_effect, "Read source file.");
 });
 
 test("file operation parser rejects sandbox escape and forbidden secret paths", () => {

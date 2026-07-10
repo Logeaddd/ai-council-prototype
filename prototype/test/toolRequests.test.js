@@ -323,6 +323,26 @@ test("execute_command supports pipes redirection and background processes", asyn
   assert.ok(backgroundResult.results[0].result.pid > 0);
 });
 
+test("execute_command default shell supports common shell operators", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-command-default-shell-"));
+  const command = process.platform === "win32"
+    ? "no_such_command_abc123 > missing.txt 2>&1 || echo FALLBACK_FACT > fallback.txt"
+    : "no_such_command_abc123 > missing.txt 2>&1 || printf FALLBACK_FACT > fallback.txt";
+
+  const result = await executeToolRequests({
+    permissionTier: "full",
+    groupPath: tmp,
+    agent: { id: "full", name: "Full" },
+    round: 1,
+    requests: [
+      { tool: "execute_command", command, reason: "Use default shell operators." }
+    ]
+  });
+
+  assert.equal(result.results[0].status, "completed");
+  assert.match(fs.readFileSync(path.join(tmp, "fallback.txt"), "utf8"), /FALLBACK_FACT/);
+});
+
 test("execute_command keeps cwd inside workspace and reports timeouts", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-command-guard-"));
   const escaped = await executeToolRequests({

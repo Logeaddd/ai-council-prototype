@@ -192,6 +192,7 @@ function commandResult(options, state) {
 }
 
 function buildShellInvocation(command, shell) {
+  if (shell === "system") return buildShellInvocation(command, defaultSystemShell());
   if (shell === "powershell") {
     return {
       file: process.platform === "win32" ? "powershell.exe" : "pwsh",
@@ -201,10 +202,7 @@ function buildShellInvocation(command, shell) {
   if (shell === "cmd") return { file: "cmd.exe", args: ["/d", "/c", wrapCmdCommand(command)], windowsVerbatimArguments: true };
   if (shell === "bash") return { file: "bash", args: ["-lc", command] };
   if (shell === "sh") return { file: "sh", args: ["-lc", command] };
-  if (process.platform === "win32") {
-    return { file: "powershell.exe", args: ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command] };
-  }
-  return { file: "sh", args: ["-lc", command] };
+  return buildShellInvocation(command, defaultSystemShell());
 }
 
 function wrapCmdCommand(command) {
@@ -216,6 +214,10 @@ function normalizeShell(value) {
   const shell = String(value || "system").trim().toLowerCase();
   if (["system", "powershell", "cmd", "bash", "sh"].includes(shell)) return shell;
   return "system";
+}
+
+function defaultSystemShell() {
+  return process.platform === "win32" ? "cmd" : "sh";
 }
 
 function resolveGroupRoot(groupPath) {

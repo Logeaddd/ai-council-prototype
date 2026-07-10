@@ -49,8 +49,7 @@ function normalizeFileOperation({ groupRoot, operation, index, proposedBy }) {
   const reason = stringField(operation.reason);
   if (!reason) return reject(index, "missing_reason", "File operation reason is required.");
 
-  const expectedEffect = stringField(operation.expected_effect);
-  if (!expectedEffect) return reject(index, "missing_expected_effect", "File operation expected_effect is required.");
+  const expectedEffect = stringField(operation.expected_effect) || reason;
 
   const content = contentField(operation.content);
   if (WRITE_LIKE_OPS.has(op) && content === undefined) {
