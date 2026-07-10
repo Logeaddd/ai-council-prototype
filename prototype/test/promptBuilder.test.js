@@ -378,6 +378,25 @@ test("full tool prompt advertises full-only tools while tool tier does not", () 
   assert.doesNotMatch(tool[0].content, /mcp_read_resource for configured/);
 });
 
+test("round prompt tells members the real tool runtime environment", () => {
+  const messages = buildRoundPrompt({
+    id: "executor",
+    name: "Executor",
+    role: "Executor"
+  }, "Run build tools", { messages: [] }, 1, {
+    fileOperationContext: true,
+    fileOperationPermissionTier: "full"
+  });
+
+  assert.match(messages[0].content, /Tool runtime environment:/);
+  if (process.platform === "win32") {
+    assert.match(messages[0].content, /Windows/);
+    assert.match(messages[0].content, /shell=cmd/);
+    assert.match(messages[0].content, /shell=powershell/);
+    assert.match(messages[0].content, /apt-get/);
+  }
+});
+
 test("reviewer prompt includes intensity, scope gate, duplicate gate, and open ledger", () => {
   const messages = buildRoundPrompt({
     id: "reviewer",

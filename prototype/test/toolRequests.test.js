@@ -391,6 +391,27 @@ test("execute_command default shell supports common shell operators", async () =
   assert.match(fs.readFileSync(path.join(tmp, "fallback.txt"), "utf8"), /FALLBACK_FACT/);
 });
 
+test("execute_command explains bash shell failures on Windows", async (t) => {
+  if (process.platform !== "win32") {
+    t.skip("Windows-specific shell guidance");
+    return;
+  }
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-command-bash-hint-"));
+  const result = await executeToolRequests({
+    permissionTier: "full",
+    groupPath: tmp,
+    agent: { id: "full", name: "Full" },
+    round: 1,
+    requests: [
+      { tool: "execute_command", command: "exit 7", shell: "bash", reason: "Show shell guidance." }
+    ]
+  });
+
+  assert.equal(result.results[0].status, "failed");
+  assert.match(result.results[0].error, /Windows host/);
+  assert.match(result.results[0].result.environmentHint, /shell=cmd/);
+});
+
 test("execute_command keeps cwd inside workspace and reports timeouts", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-command-guard-"));
   const escaped = await executeToolRequests({

@@ -170,6 +170,7 @@ function startBackgroundCommand(options) {
 function commandResult(options, state) {
   const stdout = state.stdout?.text?.() || "";
   const stderr = state.stderr?.text?.() || "";
+  const environmentHint = commandEnvironmentHint(options, state);
   return {
     ok: Boolean(state.ok),
     source: "local_command_tool",
@@ -186,9 +187,16 @@ function commandResult(options, state) {
     stderr: redactSecrets(stderr),
     stdoutTruncated: Boolean(state.stdout?.truncated),
     stderrTruncated: Boolean(state.stderr?.truncated),
+    environmentHint,
     code: state.code,
-    error: state.error || ""
+    error: [state.error || "", environmentHint].filter(Boolean).join(" ")
   };
+}
+
+function commandEnvironmentHint(options, state) {
+  if (state.ok || process.platform !== "win32") return "";
+  if (!["bash", "sh"].includes(options.shell)) return "";
+  return "This command requested bash/sh on a Windows host; use shell=system, shell=cmd, or shell=powershell unless bash/sh has been verified available.";
 }
 
 function buildShellInvocation(command, shell) {
