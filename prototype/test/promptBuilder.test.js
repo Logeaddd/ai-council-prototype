@@ -396,6 +396,8 @@ test("round prompt tells members the real tool runtime environment", () => {
     assert.match(messages[0].content, /shell=cmd/);
     assert.match(messages[0].content, /shell=powershell/);
     assert.match(messages[0].content, /apt-get/);
+    assert.match(messages[0].content, /mkdir -p/);
+    assert.match(messages[0].content, /New-Item -ItemType Directory -Force/);
   }
 });
 

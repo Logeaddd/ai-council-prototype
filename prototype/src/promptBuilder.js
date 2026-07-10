@@ -150,7 +150,7 @@ function toolRequestProtocolLine(options = {}) {
 
 function toolRuntimeEnvironmentLine() {
   if (process.platform === "win32") {
-    return "Tool runtime environment: Windows. Prefer shell=system, shell=cmd, or shell=powershell for execute_command. Use bash/sh only after a real tool result proves that bash/sh works in this workspace; Linux-only commands such as apt-get are not valid unless the tool result proves a Linux shell is available.";
+    return "Tool runtime environment: Windows. Prefer shell=system, shell=cmd, or shell=powershell for execute_command. Use bash/sh only after a real tool result proves that bash/sh works in this workspace; Linux-only commands such as apt-get or mkdir -p are not valid unless the tool result proves a Linux shell is available. For directory creation on Windows, use PowerShell New-Item -ItemType Directory -Force or cmd mkdir.";
   }
   return `Tool runtime environment: ${process.platform}. Prefer shell=system unless a task requires a specific shell.`;
 }
