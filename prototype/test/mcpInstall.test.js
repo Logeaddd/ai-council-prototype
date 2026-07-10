@@ -40,6 +40,25 @@ test("built-in web MCP tools can be joined without npm install", async () => {
   assert.match(installed.server.args[0], /mcpServer\.js/);
 });
 
+test("built-in web MCP tools can be removed without pretending npm uninstall happened", async () => {
+  const userDataBase = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-built-in-mcp-remove-"));
+  await installMcpNpmServer(userDataBase, {
+    catalogId: "web-tools"
+  });
+
+  const removed = uninstallManagedMcpServer(userDataBase, { serverId: "web-tools" });
+  const catalog = listMcpInstallCatalog(userDataBase);
+
+  assert.equal(removed.ok, true);
+  assert.equal(removed.source, "built_in_mcp_uninstall");
+  assert.equal(removed.serverConfigured, true);
+  assert.equal(removed.serverSource, "built_in");
+  assert.equal(removed.removedInstallDir, false);
+  assert.equal(removed.config.deleted, true);
+  assert.equal(catalog.catalog.find((item) => item.id === "web-tools").installed, false);
+  assert.equal(catalog.catalog.find((item) => item.id === "web-tools").runtimeStatus, "not_installed");
+});
+
 test("MCP catalog separates package files from joined server config", async () => {
   const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-mcp-catalog-state-"));
   const packageDir = writeFakeMcpPackage(baseDir);

@@ -317,15 +317,19 @@ function catalogRuntimeStatus({ builtIn, packageInstalled, serverConfigured, ser
 export function uninstallManagedMcpServer(baseDir, input = {}) {
   const id = normalizeManagedId(input.serverId || input.id);
   const installDir = resolveInstallDir(baseDir, id);
+  const server = readMcpServerConfigs(baseDir).find((item) => item.id === id);
   const existed = fs.existsSync(installDir);
   if (existed) removeInstallDirWithRetry(installDir);
   const configResult = input.deleteConfig === false
     ? { ok: true, deleted: false, id }
     : deleteMcpServerConfig(baseDir, id);
+  const source = server?.source === "built_in" ? "built_in_mcp_uninstall" : "mcp_npm_uninstall";
   return {
     ok: true,
-    source: "mcp_npm_uninstall",
+    source,
     id,
+    serverConfigured: Boolean(server),
+    serverSource: server?.source || "",
     removedInstallDir: existed,
     installDir,
     config: configResult

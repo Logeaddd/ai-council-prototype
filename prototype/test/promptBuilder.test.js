@@ -352,7 +352,8 @@ test("full tool prompt advertises full-only tools while tool tier does not", () 
   assert.match(full[0].content, /browser_control for opening a real browser page/);
   assert.match(full[0].content, /database_query for reading or writing SQLite/);
   assert.match(full[0].content, /mcp_search_npm for real npm registry search/);
-  assert.match(full[0].content, /mcp_install_npm and mcp_uninstall for managed npm MCP servers/);
+  assert.match(full[0].content, /mcp_install_npm for built-in or npm MCP servers/);
+  assert.match(full[0].content, /mcp_uninstall for configured MCP servers/);
   assert.match(full[0].content, /mcp_list_tools and mcp_call for configured external MCP tools/);
   assert.match(full[0].content, /mcp_call can infer the server when the tool name is unique/);
   assert.match(full[0].content, /include serverId for ambiguous tool names/);
