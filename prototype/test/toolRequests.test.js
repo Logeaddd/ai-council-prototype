@@ -40,6 +40,28 @@ test("controlled file tool requests list, read, search, and grep real workspace 
   assert.equal(fs.existsSync(path.join(tmp, "shared", "logs", "tools.jsonl")), true);
 });
 
+test("controlled file tools can read common build configuration files", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-build-files-"));
+  fs.writeFileSync(path.join(tmp, "build.gradle"), "plugins { id 'fabric-loom' }\n", "utf8");
+  fs.writeFileSync(path.join(tmp, "settings.gradle.kts"), "pluginManagement { repositories { gradlePluginPortal() } }\n", "utf8");
+
+  const result = await executeToolRequests({
+    permissionTier: "tool",
+    groupPath: tmp,
+    agent: { id: "reader", name: "Reader" },
+    round: 1,
+    requests: [
+      { tool: "read_file", path: "build.gradle", reason: "Read Gradle build file" },
+      { tool: "read_file", path: "settings.gradle.kts", reason: "Read Kotlin Gradle settings" }
+    ]
+  });
+
+  assert.equal(result.rejected.length, 0);
+  assert.equal(result.results.every((item) => item.status === "completed"), true);
+  assert.match(result.results[0].result.content, /fabric-loom/);
+  assert.match(result.results[1].result.content, /pluginManagement/);
+});
+
 test("workspace path aliases work across local agent tools", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-workspace-alias-"));
   fs.mkdirSync(path.join(tmp, "docs"), { recursive: true });

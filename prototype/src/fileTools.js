@@ -31,6 +31,7 @@ const INTERNAL_SHARED_SEGMENTS = new Set(["logs", "memory", "memory_pending", "i
 const TEXT_EXTENSIONS = new Set([
   ".txt", ".md", ".markdown", ".json", ".jsonl", ".js", ".jsx", ".ts", ".tsx",
   ".css", ".scss", ".html", ".htm", ".xml", ".yaml", ".yml", ".py", ".java",
+  ".kt", ".kts", ".gradle", ".groovy",
   ".c", ".cpp", ".cs", ".go", ".rs", ".php", ".rb", ".sh", ".ps1", ".sql",
   ".csv", ".toml", ".properties", ".mcmeta", ".mcfunction", ".lang"
 ]);
