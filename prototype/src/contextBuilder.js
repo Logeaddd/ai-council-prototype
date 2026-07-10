@@ -6,6 +6,8 @@ import { formatTaskStateForPrompt } from "./taskState.js";
 const DEFAULT_RECENT_MESSAGES = 6;
 const DEFAULT_ARCHIVE_CONTEXT_ITEMS = 5;
 const DEFAULT_ARCHIVE_CONTEXT_TOKENS = 900;
+const MAX_TOOL_RESULTS_IN_CONTEXT = 20;
+const MAX_TOOL_CONTEXT_STRING_CHARS = 4000;
 
 export function buildMemberContext(agent, session, options = {}) {
   const limits = resolveEffectiveLimits(agent, options.groupSettings || {});
@@ -180,11 +182,39 @@ function selectVisibleFileOperationResults(results, agent, visibility) {
 }
 
 function selectVisibleToolResults(results, agent, visibility) {
-  if (visibility === "full") return results;
-  return results.filter((item) => {
+  const visible = visibility === "full" ? results : results.filter((item) => {
     const source = item.source_agent_id || item.sourceAgentId || item.proposedBy?.seatId || item.proposedBy?.id;
     return source === agent.id;
   });
+  return compactToolResultsForContext(visible);
+}
+
+function compactToolResultsForContext(results) {
+  return (Array.isArray(results) ? results : [])
+    .slice(-MAX_TOOL_RESULTS_IN_CONTEXT)
+    .map((item) => compactContextValue(item));
+}
+
+function compactContextValue(value, depth = 0) {
+  if (typeof value === "string") return compactContextString(value);
+  if (!value || typeof value !== "object") return value;
+  if (Array.isArray(value)) {
+    const kept = value.slice(0, 20).map((item) => compactContextValue(item, depth + 1));
+    if (value.length > kept.length) kept.push(`[truncated ${value.length - kept.length} items]`);
+    return kept;
+  }
+  if (depth > 5) return "[truncated nested object]";
+  return Object.fromEntries(
+    Object.entries(value).map(([key, item]) => [key, compactContextValue(item, depth + 1)])
+  );
+}
+
+function compactContextString(value) {
+  const text = String(value || "");
+  if (text.length <= MAX_TOOL_CONTEXT_STRING_CHARS) return text;
+  const headLength = 1000;
+  const tailLength = MAX_TOOL_CONTEXT_STRING_CHARS - headLength - 80;
+  return `${text.slice(0, headLength)}\n...[tool output truncated ${text.length - headLength - tailLength} chars]...\n${text.slice(text.length - tailLength)}`;
 }
 
 function selectRecentTranscript(messages, limit = DEFAULT_RECENT_MESSAGES) {

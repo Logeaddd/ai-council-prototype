@@ -6,7 +6,7 @@ import { isInsidePath, normalizeWorkspacePathAlias } from "./pathGuards.js";
 const DEFAULT_TIMEOUT_MS = 60 * 1000;
 const MIN_TIMEOUT_MS = 1000;
 const MAX_TIMEOUT_MS = 60 * 60 * 1000;
-const DEFAULT_MAX_OUTPUT_BYTES = 128 * 1024;
+const DEFAULT_MAX_OUTPUT_BYTES = 32 * 1024;
 const MAX_OUTPUT_BYTES = 1024 * 1024;
 
 export async function executeCommandTool(request, options = {}) {

@@ -243,6 +243,35 @@ test("context prompt sections include web tool execution results", () => {
   assert.match(core, /https:\/\/example\.com/);
 });
 
+test("context prompt sections compact large tool outputs", () => {
+  const largeStdout = `${"A".repeat(12000)}TAIL_FACT`;
+  const context = buildMemberContext(agent, {
+    question: "Use command output.",
+    unresolvedObjections: {},
+    artifacts: [],
+    toolExecutionResults: [
+      {
+        tool: "execute_command",
+        status: "completed",
+        source_agent_id: "critic",
+        source_agent_name: "Critic",
+        result: {
+          command: "dir /s",
+          stdout: largeStdout,
+          stderr: ""
+        }
+      }
+    ],
+    messages: []
+  });
+  const sections = buildContextPromptSections(context);
+  const core = sections.find((section) => section.title === "Non-compressible core")?.content || "";
+
+  assert.match(core, /tool output truncated/);
+  assert.match(core, /TAIL_FACT/);
+  assert.ok(core.length < largeStdout.length);
+});
+
 test("context prompt sections include rejected tool request reasons", () => {
   const context = buildMemberContext(agent, {
     question: "Use tools only when allowed.",
