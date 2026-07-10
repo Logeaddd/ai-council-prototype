@@ -574,6 +574,23 @@ test("context prompt sections include cycle continuation memory", () => {
   assert.match(continuation, /Define timeout defaults/);
 });
 
+test("context prompt sections expose enabled skill metadata without loading skill instructions", () => {
+  const context = buildMemberContext(agent, {
+    question: "Use a relevant skill.",
+    unresolvedObjections: {},
+    artifacts: [],
+    messages: []
+  }, {
+    enabledSkills: "Enabled skill packs (metadata only):\n- code-agent: 代码助手 - 工程任务\nUse skill_read for full instructions."
+  });
+  const section = buildContextPromptSections(context).find((item) => item.title === "Enabled skills")?.content || "";
+
+  assert.match(section, /code-agent/);
+  assert.match(section, /skill_read/);
+  assert.doesNotMatch(section, /FULL_SKILL_BODY_SHOULD_NOT_LOAD/);
+  assert.ok(context.tokenEstimate.summaries > 0);
+});
+
 test("context prompt sections include retrieved archive snippets with source pointers", () => {
   const context = buildMemberContext(agent, {
     question: "Use the saved archive.",

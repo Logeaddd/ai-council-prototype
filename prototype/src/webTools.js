@@ -25,6 +25,23 @@ export async function fetchPublicUrl(input, options = {}) {
   };
 }
 
+export async function fetchPublicText(input, options = {}) {
+  const url = await assertSafePublicUrl(input, options);
+  const timeoutMs = normalizeTimeoutMs(options.timeoutMs);
+  const maxBytes = normalizeMaxBytes(options.maxBytes);
+  const response = await fetchWithRedirects(url, { timeoutMs, maxBytes, signal: options.signal });
+  return {
+    ok: true,
+    source: "real_response",
+    url: response.url,
+    status: response.status,
+    contentType: response.contentType,
+    text: response.text,
+    bytes: Buffer.byteLength(response.text, "utf8"),
+    truncated: response.truncated
+  };
+}
+
 export async function searchWeb(query, options = {}) {
   const text = String(query || "").trim();
   if (!text) throw new Error("Missing search query");

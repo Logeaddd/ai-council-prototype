@@ -22,6 +22,7 @@ import { normalizeFileAttachments } from "./attachments.js";
 import { readTaskState, updateTaskStateFromSession } from "./taskState.js";
 import { discoverRuntimeEnvironment, formatRuntimeEnvironment } from "./runtimeEnvironment.js";
 import { applyDeliverableVerification, verifyFinalDeliverables } from "./deliverableVerification.js";
+import { formatEnabledSkillMetadataForPrompt, listEnabledSkillMetadata } from "./skillPacks.js";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -101,6 +102,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
         attachments,
         taskState,
         retrievedContext,
+        enabledSkills: loadEnabledSkills(baseDir, options.groupPath),
         ...loadSummaryContext(options.groupPath, agent),
         privateBossMessages: loadPrivateBossMessages(options.groupPath, agent)
       });
@@ -264,6 +266,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
           attachments,
           taskState,
           retrievedContext,
+          enabledSkills: loadEnabledSkills(baseDir, options.groupPath),
           ...loadSummaryContext(options.groupPath, agent),
           privateBossMessages: loadPrivateBossMessages(options.groupPath, agent)
         });
@@ -363,6 +366,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
     attachments,
     taskState,
     retrievedContext,
+    enabledSkills: loadEnabledSkills(baseDir, options.groupPath),
     ...loadSummaryContext(options.groupPath, judge),
     privateBossMessages: loadPrivateBossMessages(options.groupPath, judge)
   });
@@ -990,6 +994,15 @@ function formatCompressedTranscriptChunks(chunks = []) {
     .slice(-3)
     .map((chunk) => `Compressed rounds ${chunk.fromRound ?? "?"}-${chunk.toRound ?? "?"}: ${chunk.summary}`);
   return summaries.join("\n");
+}
+
+function loadEnabledSkills(baseDir, groupPath) {
+  if (!groupPath) return "";
+  try {
+    return formatEnabledSkillMetadataForPrompt(listEnabledSkillMetadata(baseDir, groupPath));
+  } catch {
+    return "Enabled skill metadata could not be read. Do not claim any skill instructions are available.";
+  }
 }
 
 function buildToolFollowupInstruction(results = [], rejected = []) {

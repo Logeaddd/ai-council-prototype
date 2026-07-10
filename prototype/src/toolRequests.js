@@ -20,6 +20,18 @@ import {
   readConfiguredMcpResource
 } from "./mcpClient.js";
 import { installMcpNpmServer, searchMcpNpmPackages, uninstallManagedMcpServer } from "./mcpInstall.js";
+import {
+  disableSkillForGroup,
+  enableSkillForGroup,
+  installBuiltInSkillPack,
+  installRemoteSkillPack,
+  installSkillMarkdown,
+  listEnabledSkillMetadata,
+  listSkillPacksForGroup,
+  readSkillPackChunk,
+  removeSkillPack,
+  searchSkillCandidates
+} from "./skillPacks.js";
 import { loadSessionContextArchiveItem, searchSessionContextArchive } from "./storage.js";
 import fs from "node:fs";
 import path from "node:path";
@@ -51,7 +63,14 @@ const ALLOWED_TOOLS = new Set([
   "mcp_get_prompt",
   "mcp_search_npm",
   "mcp_install_npm",
-  "mcp_uninstall"
+  "mcp_uninstall",
+  "skill_read",
+  "skill_list",
+  "skill_search",
+  "skill_install",
+  "skill_enable",
+  "skill_disable",
+  "skill_remove"
 ]);
 const FILE_TOOLS = new Set(["list_directory", "read_file", "search_files", "grep_content"]);
 const CONTEXT_TOOLS = new Set(["search_context", "load_context"]);
@@ -66,7 +85,8 @@ const GIT_TOOLS = new Set(["git_operation"]);
 const BROWSER_TOOLS = new Set(["browser_control"]);
 const DATABASE_TOOLS = new Set(["database_query"]);
 const MCP_TOOLS = new Set(["mcp_list_tools", "mcp_call", "mcp_list_resources", "mcp_read_resource", "mcp_list_prompts", "mcp_get_prompt", "mcp_search_npm", "mcp_install_npm", "mcp_uninstall"]);
-const FULL_PERMISSION_TOOLS = new Set(["extract_archive", "execute_command", "process_control", "run_code", "install_package", "run_tests", "git_operation", "browser_control", "mcp_list_tools", "mcp_call", "mcp_list_resources", "mcp_read_resource", "mcp_list_prompts", "mcp_get_prompt", "mcp_search_npm", "mcp_install_npm", "mcp_uninstall"]);
+const SKILL_TOOLS = new Set(["skill_read", "skill_list", "skill_search", "skill_install", "skill_enable", "skill_disable", "skill_remove"]);
+const FULL_PERMISSION_TOOLS = new Set(["extract_archive", "execute_command", "process_control", "run_code", "install_package", "run_tests", "git_operation", "browser_control", "mcp_list_tools", "mcp_call", "mcp_list_resources", "mcp_read_resource", "mcp_list_prompts", "mcp_get_prompt", "mcp_search_npm", "mcp_install_npm", "mcp_uninstall", "skill_list", "skill_search", "skill_install", "skill_enable", "skill_disable", "skill_remove"]);
 
 export function normalizeToolRequests(value) {
   if (!Array.isArray(value)) return [];
@@ -96,7 +116,7 @@ export async function executeToolRequests(options = {}) {
     };
 
     if (!ALLOWED_TOOLS.has(normalized.tool)) {
-      const rejection = reject(base, "invalid_tool", "Tool must be one of web_search, fetch_url, list_directory, read_file, search_files, grep_content, search_context, load_context, extract_archive, execute_command, process_control, run_code, install_package, run_tests, api_request, git_operation, browser_control, database_query, mcp_list_tools, mcp_call, mcp_list_resources, mcp_read_resource, mcp_list_prompts, mcp_get_prompt, mcp_search_npm, mcp_install_npm, mcp_uninstall.");
+      const rejection = reject(base, "invalid_tool", "Unknown tool. Use one of the tool values listed in the software protocol, including skill_read and the skill management tools.");
       rejected.push(rejection);
       events.push(toolEvent("tool_failure", base, { status: "rejected", code: rejection.code, error: rejection.error }));
       appendToolAuditLog(options.groupPath, "rejected", rejection);
@@ -292,6 +312,50 @@ async function executeOne(request, options) {
       }, {
         maxBytes: request.maxBytes || options.maxArchiveLoadBytes
       });
+      return resultRecord(request, { status: "completed", result });
+    }
+    if (request.tool === "skill_read") {
+      if (!options.groupPath) {
+        return resultRecord(request, { status: "failed", code: "group_context_unavailable", error: "skill_read requires a group workspace." });
+      }
+      const skillId = request.skillId;
+      const enabled = listEnabledSkillMetadata(options.baseDir, options.groupPath);
+      if (!enabled.skills.some((item) => item.id === skillId)) {
+        return resultRecord(request, { status: "failed", code: "skill_not_enabled", error: `Skill pack ${skillId || "(missing)"} is not enabled for this group.` });
+      }
+      const result = readSkillPackChunk(options.baseDir, skillId, { offset: request.offset, maxBytes: request.maxBytes });
+      return resultRecord(request, { status: "completed", result });
+    }
+    if (request.tool === "skill_list") {
+      if (!options.groupPath) return resultRecord(request, { status: "failed", code: "group_context_unavailable", error: "skill_list requires a group workspace." });
+      return resultRecord(request, { status: "completed", result: { ok: true, source: "local_skill_store", ...listSkillPacksForGroup(options.baseDir, options.groupPath) } });
+    }
+    if (request.tool === "skill_search") {
+      const result = await searchSkillCandidates(request.query || request.reason, { timeoutMs: request.timeoutMs || options.timeoutMs, signal: options.signal });
+      return resultRecord(request, { status: result.ok ? "completed" : "failed", code: result.code, error: result.error, result });
+    }
+    if (request.tool === "skill_install") {
+      let result;
+      if (request.skillMarkdown) {
+        result = installSkillMarkdown(options.baseDir, request.skillMarkdown, { id: request.skillId, overwrite: request.overwrite, source: "agent_direct_markdown" });
+      } else if (request.skillUrl) {
+        result = await installRemoteSkillPack(options.baseDir, { url: request.skillUrl, skillId: request.skillId, overwrite: request.overwrite, timeoutMs: request.timeoutMs }, { signal: options.signal });
+      } else {
+        result = installBuiltInSkillPack(options.baseDir, request.skillId || request.catalogId, { overwrite: request.overwrite });
+      }
+      return resultRecord(request, { status: result.ok ? "completed" : "failed", code: result.code, error: result.error, result });
+    }
+    if (request.tool === "skill_enable") {
+      const result = enableSkillForGroup(options.baseDir, options.groupPath, request.skillId);
+      return resultRecord(request, { status: "completed", result });
+    }
+    if (request.tool === "skill_disable") {
+      const result = disableSkillForGroup(options.baseDir, options.groupPath, request.skillId);
+      return resultRecord(request, { status: "completed", result });
+    }
+    if (request.tool === "skill_remove") {
+      if (options.groupPath) disableSkillForGroup(options.baseDir, options.groupPath, request.skillId);
+      const result = removeSkillPack(options.baseDir, request.skillId);
       return resultRecord(request, { status: "completed", result });
     }
     if (request.tool === "extract_archive") {
@@ -618,6 +682,9 @@ function normalizeToolRequest(item, index) {
     resourceUri: stringField(item.uri || item.resourceUri || item.resource_uri),
     promptName: stringField(item.promptName || item.prompt_name || item.prompt || item.name),
     promptArguments: objectField(item.promptArguments || item.prompt_arguments || item.arguments || item.input),
+    skillId: stringField(item.skillId || item.skill_id || item.catalogId || item.catalog_id),
+    skillUrl: stringField(item.skillUrl || item.skill_url || item.url),
+    skillMarkdown: stringField(item.skillMarkdown || item.skill_markdown || item.markdown),
     mode: stringField(item.mode),
     maxRows: normalizeOptionalNumber(item.maxRows || item.max_rows),
     headers: objectField(item.headers),
@@ -685,6 +752,9 @@ function reject(request, code, reason) {
     resourceUri: request.resourceUri,
     promptName: request.promptName,
     promptArguments: request.promptArguments ? summarizeBodyForStorage(request.promptArguments) : undefined,
+    skillId: request.skillId,
+    skillUrl: request.skillUrl,
+    skillMarkdown: request.skillMarkdown ? summarizeBodyForStorage(request.skillMarkdown) : undefined,
     mode: request.mode,
     maxRows: request.maxRows,
     headers: safeHeadersForStorage(request.headers),
@@ -753,6 +823,9 @@ function resultRecord(request, extra) {
     resourceUri: request.resourceUri,
     promptName: request.promptName,
     promptArguments: request.promptArguments ? summarizeBodyForStorage(request.promptArguments) : undefined,
+    skillId: request.skillId,
+    skillUrl: request.skillUrl,
+    skillMarkdown: request.skillMarkdown ? summarizeBodyForStorage(request.skillMarkdown) : undefined,
     mode: request.mode,
     maxRows: request.maxRows,
     headers: safeHeadersForStorage(request.headers),
@@ -849,6 +922,9 @@ function toolEvent(type, request, extra = {}) {
     resourceUri: request.resourceUri,
     promptName: request.promptName,
     promptArguments: request.promptArguments ? summarizeBodyForStorage(request.promptArguments) : undefined,
+    skillId: request.skillId,
+    skillUrl: request.skillUrl,
+    skillMarkdown: request.skillMarkdown ? summarizeBodyForStorage(request.skillMarkdown) : undefined,
     mode: request.mode,
     maxRows: request.maxRows,
     headers: safeHeadersForStorage(request.headers),
@@ -888,6 +964,31 @@ function summarizeToolResult(record = {}) {
       round: record.archiveRound,
       sourceType: result.sourceType,
       truncated: result.truncated
+    };
+  }
+  if (record.tool === "skill_read") {
+    return {
+      skillId: result.skill?.id || record.skillId || "",
+      sha256: result.skill?.sha256 || "",
+      offset: result.skill?.instructionOffset || 0,
+      nextOffset: result.skill?.nextOffset || 0,
+      bytes: result.skill?.instructionsBytes || 0,
+      totalBytes: result.skill?.totalInstructionsBytes || 0,
+      truncated: Boolean(result.skill?.truncated)
+    };
+  }
+  if (record.tool === "skill_list") {
+    return { skills: result.skills?.length || 0, enabledMissing: result.enabledMissing?.length || 0 };
+  }
+  if (record.tool === "skill_search") {
+    return { query: result.query || record.query || "", source: result.source, results: result.results?.length || 0 };
+  }
+  if (["skill_install", "skill_enable", "skill_disable", "skill_remove"].includes(record.tool)) {
+    return {
+      skillId: result.skill?.id || result.id || record.skillId || "",
+      enabled: result.enabled,
+      deleted: result.deleted,
+      sha256: result.skill?.sha256 || ""
     };
   }
   if (record.tool === "extract_archive") {
@@ -1163,6 +1264,33 @@ function appendToolAuditLog(groupPath, action, item) {
     fs.appendFileSync(filePath, `${JSON.stringify(record)}\n`, "utf8");
   } catch {
     // Tool audit is best-effort; never hide the actual tool result because logging failed.
+  }
+  appendSkillToolAuditLog(groupPath, action, item);
+}
+
+function appendSkillToolAuditLog(groupPath, action, item) {
+  if (!groupPath || !SKILL_TOOLS.has(item.tool)) return;
+  try {
+    const filePath = path.join(groupPath, "shared", "logs", "skills.jsonl");
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.appendFileSync(filePath, `${JSON.stringify({
+      action,
+      id: item.id,
+      tool: item.tool,
+      status: item.status,
+      code: item.code,
+      error: item.error,
+      round: item.round,
+      source_agent_id: item.source_agent_id,
+      source_agent_name: item.source_agent_name,
+      skillId: item.result?.skill?.id || item.result?.id || item.skillId,
+      skillUrl: safeUrlForEvent(item.skillUrl),
+      query: item.query,
+      resultSummary: summarizeToolResult(item),
+      createdAt: nowIso()
+    })}\n`, "utf8");
+  } catch {
+    // Skill audit is best-effort; tool result remains authoritative.
   }
 }
 
@@ -1531,6 +1659,9 @@ function safeRequestForStorage(request) {
     resourceUri: request.resourceUri,
     promptName: request.promptName,
     promptArguments: request.promptArguments ? summarizeBodyForStorage(request.promptArguments) : undefined,
+    skillId: request.skillId,
+    skillUrl: safeUrlForEvent(request.skillUrl),
+    skillMarkdown: request.skillMarkdown ? summarizeBodyForStorage(request.skillMarkdown) : undefined,
     mode: request.mode,
     maxRows: request.maxRows,
     headers: safeHeadersForStorage(request.headers),

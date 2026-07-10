@@ -382,6 +382,9 @@ test("full tool prompt advertises full-only tools while tool tier does not", () 
   assert.match(full[0].content, /git_operation for real Git status/);
   assert.match(full[0].content, /browser_control for opening a real browser page/);
   assert.match(full[0].content, /database_query for reading or writing SQLite/);
+  assert.match(full[0].content, /skill_read for loading the full instructions/);
+  assert.match(full[0].content, /skill_install for validated text-only SKILL\.md installation/);
+  assert.match(full[0].content, /Installing a skill stores instructions and never executes downloaded scripts implicitly/);
   assert.match(full[0].content, /mcp_search_npm for real npm registry search/);
   assert.match(full[0].content, /mcp_install_npm for built-in or npm MCP servers/);
   assert.match(full[0].content, /mcp_uninstall for configured MCP servers/);
@@ -393,6 +396,8 @@ test("full tool prompt advertises full-only tools while tool tier does not", () 
   assert.match(full[0].content, /mcp_list_prompts and mcp_get_prompt for configured MCP prompts/);
   assert.doesNotMatch(full[0].content, /external MCP/);
   assert.match(tool[0].content, /database_query for read-only SQLite SELECT queries/);
+  assert.match(tool[0].content, /skill_read for loading an enabled skill's instructions/);
+  assert.match(tool[0].content, /skill_list, skill_search, skill_install, skill_enable, skill_disable, skill_remove.*require full permission/);
   assert.match(tool[0].content, /database_query write operations require full permission/);
   assert.match(tool[0].content, /extract_archive, execute_command, process_control, run_code, install_package, run_tests, git_operation, browser_control, mcp_search_npm, mcp_install_npm, mcp_uninstall, mcp_list_tools, mcp_call, mcp_list_resources, mcp_read_resource, mcp_list_prompts, and mcp_get_prompt require full permission/);
   assert.doesNotMatch(tool[0].content, /extract_archive for zip files inside the group workspace/);

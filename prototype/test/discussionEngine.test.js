@@ -13,6 +13,7 @@ import { approveExecutionStandards, prepareExecutionStandards } from "../src/exe
 import { appendPrivateChatMessage } from "../src/privateChat.js";
 import { upsertPublicMemory } from "../src/publicMemory.js";
 import { writeContextArchive } from "../src/storage.js";
+import { enableSkillForGroup, installSkillMarkdown } from "../src/skillPacks.js";
 
 
 test("onModelCall records round and final model payloads", async () => {
@@ -199,6 +200,53 @@ test("tool requests execute and return results to the same member follow-up prom
     assert.match(result.session.messages[0].response.argument, /guarded tool result/);
   } finally {
     await close(server);
+  }
+});
+
+test("discussion engine exposes enabled skill metadata then loads full instructions through skill_read", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-skill-followup-"));
+  const dataDir = path.join(tmp, "data");
+  const previousDataDir = process.env.AI_COUNCIL_DATA_DIR;
+  process.env.AI_COUNCIL_DATA_DIR = dataDir;
+  fs.writeFileSync(path.join(tmp, "group.json"), JSON.stringify({
+    settings: {},
+    permissions: { defaultTier: "tool", seatTiers: { researcher: "tool" } }
+  }), "utf8");
+  installSkillMarkdown(tmp, "---\nname: engine-skill\ndescription: Engine skill metadata marker.\n---\n\n# Workflow\n\n- ENGINE_SKILL_FULL_BODY_MARKER\n");
+  enableSkillForGroup(tmp, tmp, "engine-skill");
+  const requestBodies = [];
+  const server = http.createServer(async (req, res) => {
+    const body = JSON.parse(await readRequestBody(req));
+    requestBodies.push(body);
+    const prompt = JSON.stringify(body.messages || []);
+    if (prompt.includes("FinalDecision JSON object")) {
+      writeOpenAiStream(res, JSON.stringify({ answer: "Skill used.", consensus_score: 1, supporting_agents: ["Researcher"], dissenting_agents: [], minority_report: "", risks: [], next_actions: [], selected_file_operation_ids: [], memory_candidates: [] }));
+    } else if (requestBodies.length === 1) {
+      writeOpenAiStream(res, JSON.stringify({ status: "speak", argument: "Load the enabled skill.", tool_requests: [{ tool: "skill_read", skillId: "engine-skill", reason: "Read its full workflow." }], objections: [], confidence: 0.5, memory_candidates: [] }));
+    } else {
+      writeOpenAiStream(res, JSON.stringify({ status: "speak", argument: "Used the loaded skill instructions.", objections: [], confidence: 0.9, memory_candidates: [] }));
+    }
+  });
+  await listen(server);
+  try {
+    const group = validateGroupConfig({
+      id: "skill-followup", name: "Skill Followup",
+      settings: { maxRounds: 1, minConsensusWeight: 1, stopWhenAllSkip: true, agentTimeoutMs: 3000, allowSoloCouncil: true },
+      agents: [{ id: "researcher", name: "Researcher", role: "Researcher", provider: "openai-compatible", apiBaseUrl: `http://127.0.0.1:${server.address().port}/v1`, allowUnsafePrivateNetwork: true, apiKey: "test-runtime-key", model: "skill-model", weight: 1, enabled: true }]
+    });
+    const result = await runCouncil("Use the enabled skill.", group, tmp, { groupPath: tmp });
+    const firstPrompt = JSON.stringify(requestBodies[0]?.messages || []);
+    const followupPrompt = JSON.stringify(requestBodies[1]?.messages || []);
+
+    assert.match(firstPrompt, /Engine skill metadata marker/);
+    assert.doesNotMatch(firstPrompt, /ENGINE_SKILL_FULL_BODY_MARKER/);
+    assert.match(followupPrompt, /ENGINE_SKILL_FULL_BODY_MARKER/);
+    assert.equal(result.session.toolExecutionResults[0].tool, "skill_read");
+    assert.equal(result.session.toolExecutionResults[0].status, "completed");
+  } finally {
+    await close(server);
+    if (previousDataDir === undefined) delete process.env.AI_COUNCIL_DATA_DIR;
+    else process.env.AI_COUNCIL_DATA_DIR = previousDataDir;
   }
 });
 

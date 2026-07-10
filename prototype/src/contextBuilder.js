@@ -53,7 +53,8 @@ export function buildMemberContext(agent, session, options = {}) {
       maxItems: options.retrievedContextLimit || options.groupSettings?.contextArchiveInjectionLimit || options.groupSettings?.contextSearchLimit,
       maxTokens: options.retrievedContextMaxTokens || options.groupSettings?.contextArchiveInjectionTokens
     }),
-    privateBossMessages: Array.isArray(options.privateBossMessages) ? options.privateBossMessages : []
+    privateBossMessages: Array.isArray(options.privateBossMessages) ? options.privateBossMessages : [],
+    enabledSkills: String(options.enabledSkills || "").trim()
   };
   const stableMessages = contextMessagesFromStable(stable);
   const executionEvidenceBudget = resolveExecutionEvidenceBudget({
@@ -156,6 +157,7 @@ export function buildContextPromptSections(context) {
     ["Relevant archived context", formatRetrievedContext(context.summaries.retrievedContext)],
     ["Cycle continuation", formatContinuationContext(context.summaries.continuationContext)],
     ["Private boss messages", context.summaries.privateBossMessages.map(formatPrivateBossMessage)],
+    ["Enabled skills", context.summaries.enabledSkills ? [context.summaries.enabledSkills] : []],
     ["Recent transcript", context.recentTranscript.map(formatTranscriptMessage)]
   ].map(([title, lines]) => ({
     title,
@@ -395,8 +397,36 @@ function toolEvidenceRecord(item = {}, rejected = false) {
     timeoutMs: item.timeoutMs,
     createdAt: item.createdAt
   });
-  const result = removeDuplicateEvidenceValues(removeEmptyEvidenceValues(item.result || {}), request);
+  const rawResult = item.tool === "skill_read" ? skillReadEvidenceResult(item.result || {}) : item.result || {};
+  const result = removeDuplicateEvidenceValues(removeEmptyEvidenceValues(rawResult), request);
   return removeEmptyEvidenceValues({ ...request, result });
+}
+
+function skillReadEvidenceResult(result = {}) {
+  const skill = result.skill || {};
+  return {
+    ok: result.ok,
+    source: result.source,
+    skill: {
+      id: skill.id,
+      name: skill.name,
+      description: skill.description,
+      sha256: skill.sha256,
+      instructionOffset: skill.instructionOffset,
+      nextOffset: skill.nextOffset,
+      instructionsBytes: skill.instructionsBytes,
+      totalInstructionsBytes: skill.totalInstructionsBytes,
+      truncated: skill.truncated,
+      instructionChunks: chunkContextText(skill.instructions, 1200)
+    }
+  };
+}
+
+function chunkContextText(value, maxChars) {
+  const text = String(value || "");
+  const chunks = [];
+  for (let offset = 0; offset < text.length; offset += maxChars) chunks.push(text.slice(offset, offset + maxChars));
+  return chunks;
 }
 
 function removeDuplicateEvidenceValues(value, request) {
@@ -605,6 +635,7 @@ function contextMessagesFromSummaries(summaries) {
   return [
     { role: "user", content: summaries.memberShortSummary },
     { role: "user", content: summaries.groupSharedSummary },
+    { role: "user", content: summaries.enabledSkills },
     { role: "user", content: formatRetrievedContext(summaries.retrievedContext).join("\n") },
     { role: "user", content: formatContinuationContext(summaries.continuationContext).join("\n") },
     ...summaries.privateBossMessages.map((message) => ({
