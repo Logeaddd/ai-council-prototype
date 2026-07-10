@@ -441,6 +441,125 @@ test("execute_command keeps cwd inside workspace and reports timeouts", async ()
   assert.equal(timedOut.results[0].result.timedOut, true);
 });
 
+test("execute_command rejects an identical command after it already failed in the same loop", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-command-repeat-"));
+  const marker = path.join(tmp, "should-not-run.txt");
+  const command = nodeCommand(`require('fs').writeFileSync(${JSON.stringify(marker)}, 'RAN'); process.exit(7)`);
+  const result = await executeToolRequests({
+    permissionTier: "full",
+    groupPath: tmp,
+    agent: { id: "full", name: "Full" },
+    round: 1,
+    previousResults: [{
+      tool: "execute_command",
+      command,
+      status: "failed",
+      result: { command, exitCode: 7 }
+    }],
+    requests: [
+      { tool: "execute_command", command, shell: shellForNodeCommand(), reason: "Repeat failed command." }
+    ]
+  });
+
+  assert.equal(result.accepted.length, 0);
+  assert.equal(result.rejected[0].code, "repeated_failed_command");
+  assert.equal(fs.existsSync(marker), false);
+});
+
+test("tool loop limits repeated download failures without limiting build retries", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-command-budget-"));
+  const previousDownloads = ["one", "two", "three"].map((name) => ({
+    tool: "execute_command",
+    command: `curl https://example.invalid/${name}.zip`,
+    status: "failed",
+    result: { exitCode: 1 }
+  }));
+  const blocked = await executeToolRequests({
+    permissionTier: "full",
+    groupPath: tmp,
+    agent: { id: "full", name: "Full" },
+    round: 1,
+    previousResults: previousDownloads,
+    requests: [{ tool: "execute_command", command: "curl https://mirror.invalid/four.zip", reason: "Try another mirror." }]
+  });
+  const buildRetry = await executeToolRequests({
+    permissionTier: "full",
+    groupPath: tmp,
+    agent: { id: "full", name: "Full" },
+    round: 1,
+    previousResults: ["one", "two", "three"].map((name) => ({
+      tool: "execute_command",
+      command: `build-tool ${name}`,
+      status: "failed",
+      result: { exitCode: 1 }
+    })),
+    requests: [{ tool: "execute_command", command: nodeCommand("console.log('BUILD_RETRY_ALLOWED')"), shell: shellForNodeCommand(), reason: "Retry after changing code." }]
+  });
+
+  assert.equal(blocked.accepted.length, 0);
+  assert.equal(blocked.rejected[0].code, "failed_strategy_budget_exhausted");
+  assert.equal(buildRetry.results[0].status, "completed");
+  assert.match(buildRetry.results[0].result.stdout, /BUILD_RETRY_ALLOWED/);
+});
+
+test("execute_command can invoke a managed tool by name", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-managed-command-"));
+  const group = path.join(root, "group");
+  const toolBin = path.join(root, "tools", "managed", "bin");
+  fs.mkdirSync(group, { recursive: true });
+  fs.mkdirSync(toolBin, { recursive: true });
+  const toolName = process.platform === "win32" ? "managed-hello.cmd" : "managed-hello";
+  const toolPath = path.join(toolBin, toolName);
+  fs.writeFileSync(toolPath, process.platform === "win32" ? "@echo MANAGED_TOOL_FACT\r\n" : "#!/bin/sh\necho MANAGED_TOOL_FACT\n", "utf8");
+  if (process.platform !== "win32") fs.chmodSync(toolPath, 0o755);
+
+  const result = await executeToolRequests({
+    permissionTier: "full",
+    groupPath: group,
+    agent: { id: "full", name: "Full" },
+    round: 1,
+    requests: [{ tool: "execute_command", command: "managed-hello", reason: "Use an existing managed tool." }]
+  });
+
+  assert.equal(result.results[0].status, "completed");
+  assert.match(result.results[0].result.stdout, /MANAGED_TOOL_FACT/);
+  assert.equal(result.results[0].result.environment.pathAdditions.some((item) => item.includes("tools")), true);
+});
+
+test("file tools can inspect generated output directories without recursively scanning them", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-output-files-"));
+  fs.mkdirSync(path.join(tmp, "build", "libs"), { recursive: true });
+  fs.mkdirSync(path.join(tmp, "node_modules", "hidden-package"), { recursive: true });
+  fs.writeFileSync(path.join(tmp, "build", "libs", "artifact.txt"), "OUTPUT_FACT", "utf8");
+
+  const listed = await executeToolRequests({
+    permissionTier: "full",
+    groupPath: tmp,
+    agent: { id: "full", name: "Full" },
+    round: 1,
+    requests: [{ tool: "list_directory", path: "build/libs", reason: "Inspect generated artifacts." }]
+  });
+  const searched = await executeToolRequests({
+    permissionTier: "full",
+    groupPath: tmp,
+    agent: { id: "full", name: "Full" },
+    round: 1,
+    requests: [{ tool: "search_files", path: ".", query: "artifact.txt", reason: "Search source tree." }]
+  });
+  const hidden = await executeToolRequests({
+    permissionTier: "full",
+    groupPath: tmp,
+    agent: { id: "full", name: "Full" },
+    round: 1,
+    requests: [{ tool: "list_directory", path: "node_modules", reason: "Try dependency internals." }]
+  });
+
+  assert.equal(listed.results[0].status, "completed");
+  assert.deepEqual(listed.results[0].result.entries.map((entry) => entry.name), ["artifact.txt"]);
+  assert.deepEqual(searched.results[0].result.results, []);
+  assert.equal(hidden.results[0].code, "forbidden_path");
+});
+
 test("run_code executes real snippets for full permission only", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-run-code-"));
   const source = "const value = 20 + 22;\nconsole.log('RUN_CODE_FACT:' + value);";

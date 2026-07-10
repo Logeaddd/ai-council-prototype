@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { isInsidePath, normalizeWorkspacePathAlias } from "./pathGuards.js";
+import { buildCommandEnvironment, displayPath } from "./runtimeEnvironment.js";
 
 const DEFAULT_TIMEOUT_MS = 60 * 1000;
 const MIN_TIMEOUT_MS = 1000;
@@ -17,6 +18,7 @@ export async function executeCommandTool(request, options = {}) {
   const timeoutMs = clampNumber(request.timeoutMs || options.commandTimeoutMs || options.timeoutMs, DEFAULT_TIMEOUT_MS, MIN_TIMEOUT_MS, MAX_TIMEOUT_MS);
   const maxOutputBytes = clampNumber(request.maxOutputBytes || options.maxCommandOutputBytes, DEFAULT_MAX_OUTPUT_BYTES, 1024, MAX_OUTPUT_BYTES);
   const invocation = buildShellInvocation(command, shell);
+  const runtime = buildCommandEnvironment(groupRoot, { managedToolRoots: options.managedToolRoots });
   const startedAtMs = Date.now();
 
   if (request.background) {
@@ -27,6 +29,7 @@ export async function executeCommandTool(request, options = {}) {
       command,
       shell,
       timeoutMs,
+      runtime,
       startedAtMs
     });
   }
@@ -40,6 +43,7 @@ export async function executeCommandTool(request, options = {}) {
     timeoutMs,
     maxOutputBytes,
     signal: options.signal,
+    runtime,
     startedAtMs
   });
 }
@@ -51,6 +55,7 @@ function runForegroundCommand(options) {
       windowsHide: true,
       windowsVerbatimArguments: Boolean(options.invocation.windowsVerbatimArguments),
       detached: process.platform !== "win32",
+      env: options.runtime.env,
       stdio: ["ignore", "pipe", "pipe"]
     });
     const stdout = outputBuffer(options.maxOutputBytes);
@@ -137,6 +142,7 @@ function startBackgroundCommand(options) {
     windowsHide: true,
     windowsVerbatimArguments: Boolean(options.invocation.windowsVerbatimArguments),
     detached: true,
+    env: options.runtime.env,
     stdio: "ignore"
   });
   child.on("error", () => {});
@@ -188,9 +194,24 @@ function commandResult(options, state) {
     stdoutTruncated: Boolean(state.stdout?.truncated),
     stderrTruncated: Boolean(state.stderr?.truncated),
     environmentHint,
+    environment: {
+      pathAdditions: (options.runtime?.pathAdditions || []).map(displayPath),
+      corrections: (options.runtime?.corrections || []).map(redactEmbeddedHomePath)
+    },
     code: state.code,
     error: [state.error || "", environmentHint].filter(Boolean).join(" ")
   };
+}
+
+function redactEmbeddedHomePath(value) {
+  const text = String(value || "");
+  const home = String(process.env.USERPROFILE || process.env.HOME || "");
+  if (!home) return text;
+  const comparisonText = process.platform === "win32" ? text.toLowerCase() : text;
+  const comparisonHome = process.platform === "win32" ? home.toLowerCase() : home;
+  const index = comparisonText.indexOf(comparisonHome);
+  if (index < 0) return text;
+  return `${text.slice(0, index)}~${text.slice(index + home.length)}`;
 }
 
 function commandEnvironmentHint(options, state) {

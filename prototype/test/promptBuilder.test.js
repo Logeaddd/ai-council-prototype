@@ -409,6 +409,21 @@ test("round prompt tells members the real tool runtime environment", () => {
   }
 });
 
+test("round prompt accepts a discovered local runtime summary", () => {
+  const messages = buildRoundPrompt({
+    id: "executor",
+    name: "Executor",
+    role: "Executor"
+  }, "Run build tools", { messages: [] }, 1, {
+    fileOperationContext: true,
+    fileOperationPermissionTier: "full",
+    runtimeEnvironment: "Detected tool runtime (real local discovery): java=C:/jdk/bin/java.exe; managed Gradle=F:/tools/gradle/bin/gradle.bat."
+  });
+
+  assert.match(messages[0].content, /Detected tool runtime \(real local discovery\)/);
+  assert.match(messages[0].content, /managed Gradle/);
+});
+
 test("reviewer prompt includes intensity, scope gate, duplicate gate, and open ledger", () => {
   const messages = buildRoundPrompt({
     id: "reviewer",

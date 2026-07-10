@@ -20,6 +20,7 @@ import { enqueueFileOperationProposals } from "./fileOperationQueue.js";
 import { readPrivateContextMessages } from "./privateChat.js";
 import { normalizeFileAttachments } from "./attachments.js";
 import { readTaskState, updateTaskStateFromSession } from "./taskState.js";
+import { discoverRuntimeEnvironment, formatRuntimeEnvironment } from "./runtimeEnvironment.js";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -47,6 +48,8 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
   const continuationContext = normalizeContinuationContext(options.continuationContext);
   const workspaceGroup = options.groupPath ? readWorkspaceGroup(options.groupPath) : undefined;
   const taskState = options.groupPath ? readTaskState(options.groupPath) : undefined;
+  const runtimeDiscoveryOptions = { managedToolRoots: [path.join(baseDir, "tools")] };
+  const runtimeEnvironment = formatRuntimeEnvironment(discoverRuntimeEnvironment(options.groupPath || baseDir, runtimeDiscoveryOptions));
   const retrievedContext = options.groupPath
     ? searchSessionContextArchive(options.groupPath, [question, options.latestBossInstruction].filter(Boolean).join("\n"), {
       limit: options.contextSearchLimit || group.settings?.contextSearchLimit || 5
@@ -159,7 +162,8 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
         fileOperationPermissionTier,
         groupSettings: group.settings,
         independentAnswerMode: transcriptVisibility === "own",
-        hideOpenObjectionLedger: transcriptVisibility === "own"
+        hideOpenObjectionLedger: transcriptVisibility === "own",
+        runtimeEnvironment
       };
       const messages = buildRoundPrompt(agent, question, session, round, {
         ...promptOptions,
@@ -230,7 +234,9 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
           maxGrepFileBytes: group.settings.maxToolGrepFileBytes,
           maxCommandOutputBytes: group.settings.maxToolOutputBytes,
           maxGitOutputBytes: group.settings.maxToolOutputBytes,
-          signal: options.signal
+          managedToolRoots: runtimeDiscoveryOptions.managedToolRoots,
+          signal: options.signal,
+          previousResults: accumulatedToolResults
         });
         accumulatedToolRequests.push(...toolResult.accepted);
         accumulatedToolResults.push(...toolResult.results);
@@ -244,7 +250,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
 
         if (!toolResult.results.length && !toolResult.rejected.length) break;
 
-        const toolFollowupInstruction = buildToolFollowupInstruction(toolResult.results, toolResult.rejected);
+        const toolFollowupInstruction = buildToolFollowupInstruction(accumulatedToolResults, accumulatedRejectedToolRequests);
         const followupContext = buildMemberContext(agent, session, {
           question,
           groupSettings: group.settings,
@@ -260,6 +266,10 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
         });
         const followupMessages = buildRoundPrompt(agent, question, session, round, {
           ...promptOptions,
+          runtimeEnvironment: formatRuntimeEnvironment(discoverRuntimeEnvironment(options.groupPath || baseDir, {
+            ...runtimeDiscoveryOptions,
+            refresh: true
+          })),
           resumeInstruction: toolFollowupInstruction,
           contextSections: buildContextPromptSections(followupContext),
         });
@@ -972,6 +982,14 @@ function buildToolFollowupInstruction(results = [], rejected = []) {
     "Tool results from your previous request are now available in context. Use the real tool results to continue this round. Request another tool only when a real next step still requires it; otherwise finish with speak or skip JSON."
   ];
   const completed = (Array.isArray(results) ? results : []).filter((item) => item?.status === "completed" && item.result?.ok !== false);
+  const failedCommands = (Array.isArray(results) ? results : []).filter((item) => item?.tool === "execute_command" && item?.status === "failed");
+  if (failedCommands.length) {
+    lines.push(`Failed command attempts this round: ${failedCommands.length}. Do not repeat an identical failed command. Read its stdout, stderr, exit code, timeout state, and environment hint before choosing a materially different next action.`);
+  }
+  const repeatedFamilies = repeatedFailedCommandFamilies(failedCommands);
+  if (repeatedFamilies.length) {
+    lines.push(`Repeated failed command strategies: ${repeatedFamilies.join(", ")}. Stop retrying that strategy for now; inspect existing files, detected runtimes, and generated artifacts before another install or download attempt.`);
+  }
   const searchResults = completed.filter((item) => item.tool === "mcp_search_npm");
   for (const item of searchResults) {
     const packages = (item.result?.results || [])
@@ -1031,6 +1049,22 @@ function buildToolFollowupInstruction(results = [], rejected = []) {
     lines.push("Some tool requests were rejected. Read the rejected tool request reasons in context before choosing the next step.");
   }
   return lines.join("\n");
+}
+
+function repeatedFailedCommandFamilies(items = []) {
+  const counts = new Map();
+  for (const item of items) {
+    const command = String(item?.command || item?.result?.command || "").toLowerCase();
+    const family = /curl|wget|invoke-webrequest|download|https?:\/\//.test(command)
+      ? "download"
+      : /\b(?:npm|pip|cargo|gem|go)\s+(?:install|add|get)\b/.test(command)
+        ? "package install"
+        : /\b(?:gradle|gradlew|mvn|mvnw|npm|cargo|dotnet)\b[^\r\n]*(?:build|test|package|assemble)/.test(command)
+          ? "build/test"
+          : "";
+    if (family) counts.set(family, (counts.get(family) || 0) + 1);
+  }
+  return [...counts.entries()].filter(([, count]) => count >= 2).map(([family, count]) => `${family} (${count})`);
 }
 
 function buildUnavailableMessage(agent, round, reason, contextStatus, timing = {}) {

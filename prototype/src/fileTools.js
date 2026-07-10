@@ -9,7 +9,7 @@ const DEFAULT_MAX_GREP_RESULTS = 80;
 const DEFAULT_MAX_SCAN_FILES = 3000;
 const DEFAULT_MAX_GREP_FILE_BYTES = 256 * 1024;
 
-const SKIP_DIRS = new Set([
+const SCAN_SKIP_DIRS = new Set([
   ".git",
   ".hg",
   ".svn",
@@ -23,6 +23,25 @@ const SKIP_DIRS = new Set([
   "target",
   "bin",
   "obj",
+  "__pycache__"
+]);
+const HIDDEN_LISTING_DIRS = new Set([
+  ".git",
+  ".hg",
+  ".svn",
+  ".next",
+  ".idea",
+  ".vscode",
+  "node_modules",
+  "__pycache__"
+]);
+const DIRECT_FORBIDDEN_DIRS = new Set([
+  ".git",
+  ".hg",
+  ".svn",
+  ".idea",
+  ".vscode",
+  "node_modules",
   "__pycache__"
 ]);
 const INTERNAL_WORKSPACE_SEGMENTS = new Set(["members", "sessions", "approvals"]);
@@ -214,7 +233,8 @@ function* walkFiles(basePath, root, options = {}) {
     }
     entries.sort((a, b) => b.name.localeCompare(a.name));
     for (const entry of entries) {
-      if (isForbiddenName(entry.name)) continue;
+      if (isSecretName(entry.name)) continue;
+      if (entry.isDirectory() && SCAN_SKIP_DIRS.has(entry.name.toLowerCase())) continue;
       const absolute = path.join(current, entry.name);
       let real;
       try {
@@ -350,7 +370,7 @@ function assertNotForbidden(root, candidate, options = {}) {
   if (options.protectInternal) assertNotInternalWorkspacePath(parts);
   for (const part of parts) {
     const lower = part.toLowerCase();
-    if (SKIP_DIRS.has(lower)) throw toolError("forbidden_path", `Forbidden path segment: ${part}`);
+    if (DIRECT_FORBIDDEN_DIRS.has(lower)) throw toolError("forbidden_path", `Forbidden path segment: ${part}`);
     if (isSecretBasename(lower)) throw toolError("forbidden_secret_file", `Forbidden secret file: ${part}`);
   }
   const base = path.basename(candidate).toLowerCase();
@@ -377,7 +397,12 @@ function assertNotInternalWorkspacePath(parts) {
 
 function isForbiddenName(name) {
   const lower = String(name || "").toLowerCase();
-  return SKIP_DIRS.has(lower) || isSecretBasename(lower) || lower.endsWith(".pem") || lower.endsWith(".key");
+  return HIDDEN_LISTING_DIRS.has(lower) || isSecretName(lower);
+}
+
+function isSecretName(name) {
+  const lower = String(name || "").toLowerCase();
+  return isSecretBasename(lower) || lower.endsWith(".pem") || lower.endsWith(".key");
 }
 
 function isInternalListingName(target, name) {

@@ -140,6 +140,24 @@ export async function executeToolRequests(options = {}) {
       appendMcpAuditLog(options.groupPath, "rejected", rejection);
       continue;
     }
+    if (isRepeatedFailedCommand(normalized, [...(options.previousResults || []), ...results])) {
+      const rejection = reject(base, "repeated_failed_command", "This exact command already failed in the current tool loop. Inspect the recorded failure and choose a materially different action instead of repeating it.");
+      rejected.push(rejection);
+      events.push(toolEvent("tool_failure", base, { status: "rejected", code: rejection.code, error: rejection.error }));
+      appendToolAuditLog(options.groupPath, "rejected", rejection);
+      appendCommandAuditLog(options.groupPath, "rejected", rejection);
+      continue;
+    }
+    const exhaustedStrategy = exhaustedFailureStrategy(normalized, [...(options.previousResults || []), ...results]);
+    if (exhaustedStrategy) {
+      const rejection = reject(base, "failed_strategy_budget_exhausted", `The ${exhaustedStrategy} strategy already failed 3 times in the current tool loop. Inspect existing runtimes, files, artifacts, and prior errors before trying that strategy again in a later round.`);
+      rejected.push(rejection);
+      events.push(toolEvent("tool_failure", base, { status: "rejected", code: rejection.code, error: rejection.error }));
+      appendToolAuditLog(options.groupPath, "rejected", rejection);
+      appendCommandAuditLog(options.groupPath, "rejected", rejection);
+      appendPackageAuditLog(options.groupPath, "rejected", rejection);
+      continue;
+    }
 
     accepted.push(safeRequestForStorage(base));
     const start = Date.now();
@@ -167,6 +185,39 @@ export async function executeToolRequests(options = {}) {
   }
 
   return { accepted, rejected, results, events };
+}
+
+function isRepeatedFailedCommand(request, previousResults = []) {
+  if (request.tool !== "execute_command") return false;
+  const signature = commandSignature(request.command);
+  if (!signature) return false;
+  return (Array.isArray(previousResults) ? previousResults : []).some((item) => (
+    item?.tool === "execute_command"
+    && item?.status === "failed"
+    && commandSignature(item.command || item.result?.command) === signature
+  ));
+}
+
+function commandSignature(value) {
+  return String(value || "").trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+function exhaustedFailureStrategy(request, previousResults = []) {
+  const family = failureStrategyFamily(request);
+  if (!family) return "";
+  const failures = (Array.isArray(previousResults) ? previousResults : [])
+    .filter((item) => item?.status === "failed" && failureStrategyFamily(item) === family)
+    .length;
+  return failures >= 3 ? family : "";
+}
+
+function failureStrategyFamily(item = {}) {
+  if (item.tool === "install_package") return "package installation";
+  if (item.tool !== "execute_command") return "";
+  const command = String(item.command || item.result?.command || "").toLowerCase();
+  if (/curl|wget|invoke-webrequest|start-bitstransfer|https?:\/\//.test(command)) return "download";
+  if (/\b(?:npm|pnpm|yarn|pip|cargo|gem|go)\s+(?:install|add|get)\b/.test(command)) return "package installation";
+  return "";
 }
 
 async function executeOne(request, options) {
@@ -251,6 +302,7 @@ async function executeOne(request, options) {
         timeoutMs: options.timeoutMs,
         commandTimeoutMs: options.commandTimeoutMs,
         maxCommandOutputBytes: options.maxCommandOutputBytes,
+        managedToolRoots: options.managedToolRoots,
         signal: options.signal
       });
       return resultRecord(request, {
