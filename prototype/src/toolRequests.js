@@ -32,7 +32,7 @@ import {
   removeSkillPack,
   searchSkillCandidates
 } from "./skillPacks.js";
-import { loadSessionContextArchiveItem, searchSessionContextArchive } from "./storage.js";
+import { loadLiveSessionContext, loadSessionContextArchiveItem, searchLiveSessionContext, searchSessionContextArchive } from "./storage.js";
 import { disabledCapabilityForRequest } from "./capabilityPolicy.js";
 import fs from "node:fs";
 import path from "node:path";
@@ -298,14 +298,22 @@ async function executeOne(request, options) {
         });
       }
       const query = request.query || request.reason;
-      const results = searchSessionContextArchive(options.groupPath, query, {
+      const archiveResults = searchSessionContextArchive(options.groupPath, query, {
         limit: request.count || 5
       });
+      const liveResults = searchLiveSessionContext(options.currentSession, query, {
+        limit: request.count || 5,
+        agent: options.agent,
+        transcriptVisibility: options.transcriptVisibility
+      });
+      const results = [...liveResults, ...archiveResults]
+        .sort((a, b) => Number(b.score || 0) - Number(a.score || 0))
+        .slice(0, Math.max(1, Math.min(20, Number(request.count || 5))));
       return resultRecord(request, {
         status: "completed",
         result: {
           ok: true,
-          source: "local_context_archive",
+          source: liveResults.length ? "group_history_with_live_session" : "local_context_archive",
           query,
           results
         }
@@ -326,12 +334,21 @@ async function executeOne(request, options) {
           error: "load_context requires sessionId."
         });
       }
-      const result = loadSessionContextArchiveItem(options.groupPath, {
-        ...request,
-        round: request.archiveRound
-      }, {
-        maxBytes: request.maxBytes || options.maxArchiveLoadBytes
-      });
+      const result = request.sessionId === options.currentSession?.id
+        ? loadLiveSessionContext(options.currentSession, {
+          ...request,
+          round: request.archiveRound
+        }, {
+          maxBytes: request.maxBytes || options.maxArchiveLoadBytes,
+          agent: options.agent,
+          transcriptVisibility: options.transcriptVisibility
+        })
+        : loadSessionContextArchiveItem(options.groupPath, {
+          ...request,
+          round: request.archiveRound
+        }, {
+          maxBytes: request.maxBytes || options.maxArchiveLoadBytes
+        });
       return resultRecord(request, { status: "completed", result });
     }
     if (request.tool === "skill_read") {

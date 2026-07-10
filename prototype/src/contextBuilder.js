@@ -53,6 +53,7 @@ export function buildMemberContext(agent, session, options = {}) {
       maxItems: options.retrievedContextLimit || options.groupSettings?.contextArchiveInjectionLimit || options.groupSettings?.contextSearchLimit,
       maxTokens: options.retrievedContextMaxTokens || options.groupSettings?.contextArchiveInjectionTokens
     }),
+    historyCatalogue: normalizeHistoryCatalogue(options.historyCatalogue),
     privateBossMessages: Array.isArray(options.privateBossMessages) ? options.privateBossMessages : [],
     enabledSkills: String(options.enabledSkills || "").trim()
   };
@@ -155,6 +156,7 @@ export function buildContextPromptSections(context) {
       context.summaries.groupSharedSummary ? `Group summary: ${context.summaries.groupSharedSummary}` : ""
     ]],
     ["Relevant archived context", formatRetrievedContext(context.summaries.retrievedContext)],
+    ["Group history catalogue", formatHistoryCatalogue(context.summaries.historyCatalogue)],
     ["Cycle continuation", formatContinuationContext(context.summaries.continuationContext)],
     ["Private boss messages", context.summaries.privateBossMessages.map(formatPrivateBossMessage)],
     ["Enabled skills", context.summaries.enabledSkills ? [context.summaries.enabledSkills] : []],
@@ -637,12 +639,32 @@ function contextMessagesFromSummaries(summaries) {
     { role: "user", content: summaries.groupSharedSummary },
     { role: "user", content: summaries.enabledSkills },
     { role: "user", content: formatRetrievedContext(summaries.retrievedContext).join("\n") },
+    { role: "user", content: formatHistoryCatalogue(summaries.historyCatalogue).join("\n") },
     { role: "user", content: formatContinuationContext(summaries.continuationContext).join("\n") },
     ...summaries.privateBossMessages.map((message) => ({
       role: isFromBoss(message) ? "user" : "assistant",
       content: formatPrivateBossMessage(message)
     }))
   ].filter((message) => message.content);
+}
+
+function normalizeHistoryCatalogue(items) {
+  return (Array.isArray(items) ? items : []).slice(0, 20).map((item) => ({
+    sessionId: String(item?.sessionId || "").trim(),
+    question: String(item?.question || "").trim().slice(0, 220),
+    roundCount: Number(item?.roundCount || 0),
+    finalState: String(item?.finalState || "").trim(),
+    completedAt: String(item?.completedAt || item?.createdAt || "").trim()
+  })).filter((item) => item.sessionId && item.question);
+}
+
+function formatHistoryCatalogue(items) {
+  const normalized = normalizeHistoryCatalogue(items);
+  if (!normalized.length) return [];
+  return [
+    "Saved public group discussions are available on demand. Use search_context to find details by words, or load_context with a sessionId and optional round to read the full public record, including shared tool and file-operation results. Do not claim an older discussion was read unless its tool result is present.",
+    ...normalized.map((item, index) => `${index + 1}. session=${item.sessionId} rounds=${item.roundCount || 0}${item.finalState ? ` state=${item.finalState}` : ""}${item.completedAt ? ` completed=${item.completedAt}` : ""}\nQuestion: ${item.question}`)
+  ];
 }
 
 function buildRetrievedContextPack(items, options = {}) {

@@ -621,6 +621,28 @@ test("context prompt sections include retrieved archive snippets with source poi
   assert.match(archived, /round_2_summary\.json/);
 });
 
+test("context prompt sections expose a bounded public group history catalogue", () => {
+  const context = buildMemberContext(agent, {
+    question: "Continue prior work.",
+    unresolvedObjections: {},
+    artifacts: [],
+    messages: []
+  }, {
+    historyCatalogue: [{
+      sessionId: "session_prior_work_1",
+      question: "Build the Minecraft artifact.",
+      roundCount: 12,
+      finalState: "needs_revision",
+      completedAt: "2026-07-08T10:00:00.000Z"
+    }]
+  });
+  const catalogue = buildContextPromptSections(context).find((section) => section.title === "Group history catalogue")?.content || "";
+
+  assert.match(catalogue, /session=session_prior_work_1/);
+  assert.match(catalogue, /Build the Minecraft artifact/);
+  assert.match(catalogue, /load_context/);
+});
+
 test("retrieved archive context is budgeted and keeps load pointers", () => {
   const context = buildMemberContext(agent, {
     question: "Use compact archive context.",

@@ -164,6 +164,97 @@ export function searchSessionContextArchive(groupPath, query, options = {}) {
     .slice(0, limit);
 }
 
+export function listSessionHistoryCatalogue(groupPath, options = {}) {
+  const sessionsDir = path.resolve(groupPath, "sessions");
+  if (!fs.existsSync(sessionsDir)) return [];
+  const limit = clampNumber(options.limit || 12, 1, 40);
+  return readSessionIndexRecords(sessionsDir)
+    .sort((a, b) => new Date(b.completedAt || b.createdAt || 0).getTime() - new Date(a.completedAt || a.createdAt || 0).getTime())
+    .slice(0, limit)
+    .map((record) => ({
+      sessionId: String(record.sessionId || ""),
+      question: truncate(record.question || "", 180),
+      createdAt: String(record.createdAt || ""),
+      completedAt: String(record.completedAt || ""),
+      finalState: String(record.finalState || ""),
+      roundCount: Number(record.roundCount || 0),
+      messageCount: Number(record.messageCount || 0)
+    }))
+    .filter((record) => record.sessionId && record.question);
+}
+
+export function searchLiveSessionContext(session, query, options = {}) {
+  const terms = tokenizeSearchQuery(query);
+  if (!terms.length || !session?.id) return [];
+  const record = liveSessionRecord(session);
+  const visible = visibleLiveSession(session, options.agent, options.transcriptVisibility);
+  const candidates = [];
+  candidates.push(makeLiveSearchHit({
+    record,
+    sourceType: "live_session_question",
+    sourcePath: `live:${record.sessionId}`,
+    text: [record.question, session.finalDecision?.answer].filter(Boolean).join("\n"),
+    terms
+  }));
+  for (const round of liveRoundNumbers(visible.messages)) {
+    const text = liveRoundSearchText(visible, round);
+    candidates.push(makeLiveSearchHit({
+      record,
+      round,
+      sourceType: "live_round",
+      sourcePath: `live:${record.sessionId}:round:${round}`,
+      text,
+      terms
+    }));
+  }
+  const limit = clampNumber(options.limit || 6, 1, 20);
+  return candidates
+    .filter(Boolean)
+    .sort((a, b) => b.score - a.score || new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime())
+    .slice(0, limit);
+}
+
+export function loadLiveSessionContext(session, request = {}, options = {}) {
+  const requestedId = String(request.sessionId || request.session_id || "").trim();
+  if (!session?.id || requestedId !== session.id) throw new Error("Unknown live session id");
+  const round = normalizeRoundNumber(request.round);
+  const visible = visibleLiveSession(session, options.agent, options.transcriptVisibility);
+  const payload = round
+    ? {
+      source: "live_session_context",
+      sourceType: "live_round_full",
+      sessionId: session.id,
+      round,
+      sourcePath: `live:${session.id}:round:${round}`,
+      content: {
+        schema: "ai-council.live-round.v1",
+        sessionId: session.id,
+        round,
+        messages: visible.messages.filter((message) => Number(message.round || 0) === round),
+        toolExecutionResults: filterByRound(visible.toolExecutionResults, round),
+        fileOperationExecutionResults: filterByRound(visible.fileOperationExecutionResults, round),
+        fileOperationProposals: filterByRound(visible.fileOperationProposals, round)
+      }
+    }
+    : {
+      source: "live_session_context",
+      sourceType: "live_session",
+      sessionId: session.id,
+      sourcePath: `live:${session.id}`,
+      content: {
+        schema: "ai-council.live-session.v1",
+        sessionId: session.id,
+        question: session.question || "",
+        status: session.status || "running",
+        messages: visible.messages,
+        toolExecutionResults: visible.toolExecutionResults,
+        fileOperationExecutionResults: visible.fileOperationExecutionResults,
+        fileOperationProposals: visible.fileOperationProposals
+      }
+    };
+  return limitArchivePayload(payload, clampNumber(options.maxBytes || request.maxBytes || request.max_bytes || 128 * 1024, 4096, 512 * 1024));
+}
+
 function writeRoundArchives(archiveDir, session) {
   const messages = Array.isArray(session?.messages) ? session.messages : [];
   const roundNumbers = [...new Set(messages.map((message) => Number(message.round || 0)).filter((round) => round > 0))]
@@ -361,6 +452,15 @@ function buildSearchCandidates(root, record, terms) {
       text: summaryText,
       terms
     }));
+    const full = readRelativeJson(root, roundRef.fullPath);
+    candidates.push(makeSearchHit({
+      record,
+      round: Number(full?.round || roundRef.round || 0),
+      sourceType: "round_full",
+      sourcePath: roundRef.fullPath,
+      text: archivedRoundSearchText(full),
+      terms
+    }));
   }
 
   const manifest = readRelativeJson(root, record.fileManifestPath);
@@ -375,6 +475,77 @@ function buildSearchCandidates(root, record, terms) {
   }
 
   return candidates.filter(Boolean);
+}
+
+function archivedRoundSearchText(round = {}) {
+  return [
+    ...(Array.isArray(round.messages) ? round.messages.map(formatPublicMessageForSearch) : []),
+    ...compactSearchRecords(round.toolExecutionResults, "tool"),
+    ...compactSearchRecords(round.fileOperationExecutionResults, "file operation"),
+    ...compactSearchRecords(round.fileOperationProposals, "file proposal")
+  ].filter(Boolean).join("\n");
+}
+
+function liveSessionRecord(session) {
+  return {
+    sessionId: String(session.id || ""),
+    question: String(session.question || ""),
+    createdAt: String(session.createdAt || session.startedAt || ""),
+    completedAt: String(session.completedAt || ""),
+    finalState: String(session.finalDecision?.final_state || "")
+  };
+}
+
+function visibleLiveSession(session, agent = {}, visibility = "full") {
+  const ownOnly = visibility === "own";
+  const owns = (item = {}) => String(item.agentId || item.source_agent_id || item.sourceAgentId || item.proposedBy?.seatId || item.proposedBy?.id || "") === String(agent.id || "");
+  return {
+    messages: (Array.isArray(session.messages) ? session.messages : []).filter((item) => !ownOnly || owns(item)),
+    toolExecutionResults: (Array.isArray(session.toolExecutionResults) ? session.toolExecutionResults : []).filter((item) => !ownOnly || owns(item)),
+    fileOperationExecutionResults: (Array.isArray(session.fileOperationExecutionResults) ? session.fileOperationExecutionResults : []).filter((item) => !ownOnly || owns(item)),
+    fileOperationProposals: (Array.isArray(session.fileOperationProposals) ? session.fileOperationProposals : []).filter((item) => !ownOnly || owns(item))
+  };
+}
+
+function liveRoundNumbers(messages = []) {
+  return [...new Set(messages.map((message) => Number(message.round || 0)).filter((round) => round > 0))].sort((a, b) => a - b);
+}
+
+function liveRoundSearchText(visible, round) {
+  return [
+    ...(visible.messages || []).filter((message) => Number(message.round || 0) === round).map(formatPublicMessageForSearch),
+    ...compactSearchRecords(filterByRound(visible.toolExecutionResults, round), "tool"),
+    ...compactSearchRecords(filterByRound(visible.fileOperationExecutionResults, round), "file operation"),
+    ...compactSearchRecords(filterByRound(visible.fileOperationProposals, round), "file proposal")
+  ].filter(Boolean).join("\n");
+}
+
+function formatPublicMessageForSearch(message = {}) {
+  return [message.agentName, message.response?.status, message.response?.argument, message.response?.reason, message.displayText].filter(Boolean).join(": ");
+}
+
+function compactSearchRecords(records, label) {
+  return (Array.isArray(records) ? records : []).map((record) => `${label}: ${redactArchiveSearchText(JSON.stringify(record))}`);
+}
+
+function makeLiveSearchHit({ record, round, sourceType, sourcePath, text, terms }) {
+  const cleanText = redactArchiveSearchText(text);
+  const score = scoreSearchText(cleanText, terms);
+  if (!score) return null;
+  return {
+    source: "live_session_context",
+    sourceType,
+    sessionId: record.sessionId,
+    question: truncate(record.question, 220),
+    createdAt: record.createdAt,
+    completedAt: record.completedAt,
+    finalState: record.finalState,
+    round: round || undefined,
+    score,
+    matchedTerms: terms.filter((term) => cleanText.toLowerCase().includes(term)),
+    snippet: truncate(cleanText, 700),
+    sourcePath
+  };
 }
 
 function makeSearchHit({ record, round, sourceType, sourcePath, text, terms }) {

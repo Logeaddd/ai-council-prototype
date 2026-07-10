@@ -4,7 +4,7 @@ import { buildContextPromptSections, buildMemberContext } from "./contextBuilder
 import { parseFinalDecision, parseRoundResponse } from "./responseParser.js";
 import { makeId, nowIso } from "./types.js";
 import { isConsensusParticipant, scoreConsensus, shouldStop, updateUnresolvedObjections } from "./consensusEngine.js";
-import { appendMemoryCandidates, searchSessionContextArchive, writeContextArchive, writeGroupSession, writeSession } from "./storage.js";
+import { appendMemoryCandidates, listSessionHistoryCatalogue, searchSessionContextArchive, writeContextArchive, writeGroupSession, writeSession } from "./storage.js";
 import { assessBudgetUsage, assessSizeUsage } from "./tokenLimits.js";
 import { appendSessionTranscriptChunk, readSummaryCache, updateDeterministicSummaries } from "./summaryCache.js";
 import { appendSessionUsage, estimateCost, estimateMemberAccruedCost } from "./usageStats.js";
@@ -59,6 +59,9 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
       limit: options.contextSearchLimit || group.settings?.contextSearchLimit || 5
     })
     : [];
+  const historyCatalogue = options.groupPath && memoryEnabled
+    ? listSessionHistoryCatalogue(options.groupPath, { limit: group.settings?.historyCatalogueLimit || 12 })
+    : [];
   const session = {
     id: makeId("session"),
     question,
@@ -104,6 +107,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
         attachments,
         taskState,
         retrievedContext,
+        historyCatalogue,
         enabledSkills: loadEnabledSkills(baseDir, options.groupPath, options.appSettings),
         ...loadSummaryContext(options.groupPath, agent, options.appSettings),
         privateBossMessages: loadPrivateBossMessages(options.groupPath, agent, options.appSettings)
@@ -211,6 +215,8 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
         session.rejectedFileOperationProposals.push(...queueResult.rejected);
         const autoFileExecutionResults = executeRoundAutoFileOperations({
           groupPath: options.groupPath,
+          currentSession: session,
+          transcriptVisibility,
           session,
           group: workspaceGroup || group,
           permissionTier: fileOperationPermissionTier,
@@ -271,6 +277,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
           attachments,
           taskState,
           retrievedContext,
+          historyCatalogue,
           enabledSkills: loadEnabledSkills(baseDir, options.groupPath, options.appSettings),
           ...loadSummaryContext(options.groupPath, agent, options.appSettings),
           privateBossMessages: loadPrivateBossMessages(options.groupPath, agent, options.appSettings)

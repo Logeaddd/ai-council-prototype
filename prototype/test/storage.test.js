@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { listGroupSessions, loadSessionContextArchiveItem, readGroupSession, readSessionContextArchive, searchSessionContextArchive, writeContextArchive, writeGroupSession } from "../src/storage.js";
+import { listGroupSessions, listSessionHistoryCatalogue, loadLiveSessionContext, loadSessionContextArchiveItem, readGroupSession, readSessionContextArchive, searchLiveSessionContext, searchSessionContextArchive, writeContextArchive, writeGroupSession } from "../src/storage.js";
 
 test("group session history lists real saved sessions and reads details", () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-history-"));
@@ -211,4 +211,54 @@ test("context archive item loader reads public round by session and round only",
   assert.match(summaryText, /round_1_summary\.json/);
   assert.throws(() => loadSessionContextArchiveItem(tmp, { sessionId: "../bad", round: 1 }), /Invalid session id/);
   assert.throws(() => loadSessionContextArchiveItem(tmp, { sessionId: "session_load_1", round: "../1" }), /Invalid archive round/);
+});
+
+test("history catalogue and archive search expose public execution records", () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-history-catalogue-"));
+  const session = {
+    id: "session_history_catalogue_1",
+    question: "Build the prior artifact.",
+    createdAt: "2026-07-08T10:00:00.000Z",
+    completedAt: "2026-07-08T10:02:00.000Z",
+    status: "completed",
+    messages: [{ round: 1, agentId: "builder", agentName: "Builder", response: { status: "speak", argument: "The task is complete." } }],
+    fileOperationExecutionResults: [{ round: 1, source_agent_id: "builder", action: "write", path: "build/prior-artifact.jar", result: { status: "written" } }],
+    finalDecision: { final_state: "ready_to_execute", answer: "Stored." }
+  };
+  writeGroupSession(session, tmp);
+  writeContextArchive(session, tmp);
+
+  const catalogue = listSessionHistoryCatalogue(tmp);
+  const hits = searchSessionContextArchive(tmp, "prior artifact", { limit: 5 });
+  const loaded = loadSessionContextArchiveItem(tmp, { sessionId: session.id, round: 1 });
+
+  assert.equal(catalogue[0].sessionId, session.id);
+  assert.equal(catalogue[0].question, "Build the prior artifact.");
+  assert.ok(hits.some((hit) => hit.sourceType === "round_full" && /prior-artifact\.jar/.test(hit.snippet)));
+  assert.match(JSON.stringify(loaded), /prior-artifact\.jar/);
+});
+
+test("live session history searches and loads only visible public discussion", () => {
+  const session = {
+    id: "session_live_history_1",
+    question: "Current long-running task.",
+    createdAt: "2026-07-08T10:00:00.000Z",
+    status: "running",
+    messages: [
+      { round: 1, agentId: "builder", agentName: "Builder", response: { status: "speak", argument: "LIVE_PUBLIC_FACT from the first round." } },
+      { round: 2, agentId: "reviewer", agentName: "Reviewer", response: { status: "speak", argument: "REVIEWER_ONLY_FACT." } }
+    ],
+    toolExecutionResults: [{ round: 1, source_agent_id: "builder", tool: "run_tests", result: { stdout: "LIVE_TEST_FACT" } }]
+  };
+
+  const allHits = searchLiveSessionContext(session, "live public", { agent: { id: "reviewer" }, transcriptVisibility: "full" });
+  const ownHits = searchLiveSessionContext(session, "live public", { agent: { id: "reviewer" }, transcriptVisibility: "own" });
+  const fullRound = loadLiveSessionContext(session, { sessionId: session.id, round: 1 }, { agent: { id: "reviewer" }, transcriptVisibility: "full" });
+  const ownSession = loadLiveSessionContext(session, { sessionId: session.id }, { agent: { id: "reviewer" }, transcriptVisibility: "own" });
+
+  assert.ok(allHits.some((hit) => /LIVE_PUBLIC_FACT/.test(hit.snippet)));
+  assert.equal(ownHits.length, 0);
+  assert.match(JSON.stringify(fullRound), /LIVE_PUBLIC_FACT/);
+  assert.doesNotMatch(JSON.stringify(ownSession), /LIVE_PUBLIC_FACT/);
+  assert.match(JSON.stringify(ownSession), /REVIEWER_ONLY_FACT/);
 });

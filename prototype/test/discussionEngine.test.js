@@ -5505,8 +5505,10 @@ test("saved public archive snippets are retrieved and injected into later prompt
 
   assert.equal(result.session.contextRetrievalResults.length >= 1, true);
   assert.match(roundPrompt, /Relevant archived context/);
+  assert.match(roundPrompt, /Group history catalogue/);
   assert.match(roundPrompt, /ARCHIVE_RUNTIME_FACT/);
   assert.match(roundPrompt, /session_archive_runtime_1/);
+  assert.match(roundPrompt, /Earlier retrieval planning/);
   assert.doesNotMatch(roundPrompt, /PRIVATE_ARCHIVE_RUNTIME_FACT/);
   assert.doesNotMatch(roundPrompt, /private-chat\.jsonl/);
 });

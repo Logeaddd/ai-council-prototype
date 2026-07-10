@@ -248,6 +248,42 @@ test("context load tool reads a public archived round", async () => {
   assert.equal(result.events.some((event) => event.type === "tool_success" && event.tool === "load_context"), true);
 });
 
+test("context tools search and load earlier rounds from the active session", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-live-context-tool-"));
+  const currentSession = {
+    id: "session_live_context_tool_1",
+    question: "Current council task.",
+    status: "running",
+    messages: [{ round: 1, agentId: "builder", agentName: "Builder", response: { status: "speak", argument: "LIVE_CONTEXT_TOOL_FACT from an earlier round." } }],
+    toolExecutionResults: [],
+    fileOperationExecutionResults: [],
+    fileOperationProposals: []
+  };
+
+  const searched = await executeToolRequests({
+    permissionTier: "tool",
+    groupPath: tmp,
+    currentSession,
+    transcriptVisibility: "full",
+    agent: { id: "reader", name: "Reader" },
+    round: 3,
+    requests: [{ tool: "search_context", query: "live context", reason: "Find an earlier current-session round." }]
+  });
+  const loaded = await executeToolRequests({
+    permissionTier: "tool",
+    groupPath: tmp,
+    currentSession,
+    transcriptVisibility: "full",
+    agent: { id: "reader", name: "Reader" },
+    round: 3,
+    requests: [{ tool: "load_context", sessionId: currentSession.id, round: 1, reason: "Load the earlier current-session round." }]
+  });
+
+  assert.match(JSON.stringify(searched.results[0].result), /LIVE_CONTEXT_TOOL_FACT/);
+  assert.equal(loaded.results[0].result.source, "live_session_context");
+  assert.match(JSON.stringify(loaded.results[0].result), /LIVE_CONTEXT_TOOL_FACT/);
+});
+
 test("extract_archive extracts safe zip files for full permission only", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-extract-tool-"));
   fs.writeFileSync(path.join(tmp, "sample.zip"), makeZip([
