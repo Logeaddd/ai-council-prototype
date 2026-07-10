@@ -59,7 +59,11 @@ export function runAutoFileOperations(options = {}) {
         approvedBy: "system:auto-runner",
         maxBatchSize: 1
       });
-      const executed = executeApprovedFileOperation({ groupPath, proposalId: proposal.id });
+      const executed = executeApprovedFileOperation({
+        groupPath,
+        proposalId: proposal.id,
+        allowUnrelatedDirtyFiles: true
+      });
       results.push({
         proposalId: proposal.id,
         path: proposal.path,

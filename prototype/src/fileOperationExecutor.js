@@ -83,7 +83,7 @@ export function executeApprovedFileOperation(options = {}) {
   assertGitRepository(groupPath);
   const proposal = readPendingFileOperationProposal(groupPath, options.proposalId);
   if (proposal.status !== "approved") throw new Error(`File operation ${proposal.id} is not approved`);
-  assertNoUnrelatedDirtyFiles(groupPath, proposal);
+  if (!options.allowUnrelatedDirtyFiles) assertNoUnrelatedDirtyFiles(groupPath, proposal);
   const target = validateFileOperationPath(groupPath, proposal.path);
   assertDangerousOperationConfirmed(proposal, target.path, options);
 
