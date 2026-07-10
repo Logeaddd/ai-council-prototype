@@ -3,8 +3,14 @@ import "./globals.css"
 
 export const metadata: Metadata = {
   title: "AI Council · 智能议会",
-  description: "运行一组 AI 成员进行协作讨论或独立作答，并产出可复查的结论。",
   generator: "v0.app",
+  icons: {
+    icon: [
+      { url: "/logo.png", type: "image/png" },
+      { url: "/icon-light-32x32.png", sizes: "32x32", type: "image/png" },
+    ],
+    apple: [{ url: "/apple-icon.png", sizes: "180x180", type: "image/png" }],
+  },
 }
 
 export const viewport: Viewport = {

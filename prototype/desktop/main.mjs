@@ -2,10 +2,12 @@ import http from "node:http";
 import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { app, BrowserWindow, Menu, shell } from "electron";
 
 const DEFAULT_PORT = Number(process.env.AI_COUNCIL_UI_PORT || 4317);
 const HOST = "127.0.0.1";
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 let mainWindow;
 
@@ -53,6 +55,7 @@ async function startDesktop() {
     minWidth: 1180,
     minHeight: 760,
     title: "AI Council",
+    icon: resolveAppIconPath(),
     backgroundColor: "#f3f4f5",
     show: false,
     webPreferences: {
@@ -90,6 +93,14 @@ async function startDesktop() {
     mainWindow = null;
   });
   await mainWindow.loadURL(`http://${HOST}:${port}`);
+}
+
+function resolveAppIconPath() {
+  const appRoot = path.resolve(__dirname, "..");
+  const iconName = process.platform === "win32" ? "icon.ico" : "icon.png";
+  const packagedIcon = path.join(appRoot, "build", iconName);
+  if (fs.existsSync(packagedIcon)) return packagedIcon;
+  return path.join(appRoot, "renderer", "public", "logo.png");
 }
 
 function configureDataDirectory() {

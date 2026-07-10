@@ -23,6 +23,8 @@ test("desktop shell disables browser context menu and keeps renderer isolated", 
   assert.match(main, /sandbox: true/);
   assert.match(main, /127\.0\.0\.1/);
   assert.match(main, /AI_COUNCIL_UI_PORT/);
+  assert.match(main, /resolveAppIconPath/);
+  assert.match(main, /build", iconName/);
 });
 
 test("desktop shell exposes a DevTools shortcut for debugging", () => {
@@ -92,12 +94,15 @@ test("installer build produces a normal NSIS setup with configurable install and
   assert.equal(pkg.build.directories.output, "dist-installer");
   assert.deepEqual(pkg.build.win.target, ["nsis"]);
   assert.equal(pkg.build.win.artifactName, "AI-Council-Setup-${version}.${ext}");
+  assert.equal(pkg.build.win.icon, "build/icon.ico");
   assert.equal(pkg.build.nsis.oneClick, false);
   assert.equal(pkg.build.nsis.allowToChangeInstallationDirectory, true);
   assert.equal(pkg.build.nsis.include, "build/installer.nsh");
   assert.ok(pkg.build.files.includes("renderer/out/**/*"));
   assert.ok(pkg.build.files.includes("desktop/**/*"));
   assert.ok(pkg.build.files.includes("src/**/*"));
+  assert.ok(pkg.build.files.includes("build/icon.ico"));
+  assert.ok(fs.existsSync(path.join(root, "build", "icon.ico")));
   assert.match(installer, /Page custom DataDirPageCreate DataDirPageLeave/);
   assert.match(installer, /数据保存位置/);
   assert.match(installer, /SelectFolderDialog/);

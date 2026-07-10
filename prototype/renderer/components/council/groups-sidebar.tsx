@@ -1,7 +1,7 @@
 "use client"
 
 import { useMemo, useState } from "react"
-import { Pin, Plus, Search, Sliders, Users, X } from "lucide-react"
+import { Pin, Plus, Search, Sliders, X } from "lucide-react"
 import { cn } from "@/lib/utils"
 import {
   WORK_MODE_LABEL,
@@ -41,9 +41,12 @@ export function GroupsSidebar({
   return (
     <nav className="flex h-full w-60 flex-col border-r border-sidebar-border bg-sidebar">
       <div className="flex items-center gap-2 px-3 py-3">
-        <div className="flex size-7 items-center justify-center rounded-md bg-primary/15 text-primary">
-          <Users className="size-4" />
-        </div>
+        <img
+          src="/logo.png"
+          alt=""
+          draggable={false}
+          className="size-7 rounded-md object-contain"
+        />
         <div className="min-w-0 flex-1">
           <p className="truncate text-sm font-semibold text-sidebar-foreground">
             AI Council

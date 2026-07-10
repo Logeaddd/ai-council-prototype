@@ -34,6 +34,28 @@ test("renderer build is static, type checked, and offline-friendly for Electron"
   assert.match(layout, /AI Council · 智能议会/);
 });
 
+test("renderer uses the provided logo asset for visible branding and icons", () => {
+  const sidebar = read("renderer/components/council/groups-sidebar.tsx");
+  const layout = read("renderer/app/layout.tsx");
+  assert.ok(fs.existsSync(path.join(root, "renderer", "public", "logo.png")));
+  assert.ok(fs.existsSync(path.join(root, "renderer", "public", "logo-256.png")));
+  assert.ok(fs.existsSync(path.join(root, "renderer", "public", "apple-icon.png")));
+  for (const staleAsset of [
+    "icon.svg",
+    "placeholder-logo.png",
+    "placeholder-logo.svg",
+    "placeholder-user.jpg",
+    "placeholder.jpg",
+    "placeholder.svg",
+  ]) {
+    assert.equal(fs.existsSync(path.join(root, "renderer", "public", staleAsset)), false);
+  }
+  assert.match(sidebar, /src="\/logo\.png"/);
+  assert.doesNotMatch(sidebar, /Users className/);
+  assert.match(layout, /\/logo\.png/);
+  assert.match(layout, /\/apple-icon\.png/);
+});
+
 test("renderer wires the real council APIs instead of mock-only UI state", () => {
   const live = read("renderer/lib/council-live.ts");
   const app = read("renderer/components/council/council-app.tsx");

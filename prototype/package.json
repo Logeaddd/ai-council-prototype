@@ -40,6 +40,8 @@
       "desktop/**/*",
       "src/**/*",
       "renderer/out/**/*",
+      "build/icon.ico",
+      "build/icon.png",
       "config/group.example.json",
       "config/group.real.example.json",
       "package.json",
@@ -47,6 +49,7 @@
       "README.md"
     ],
     "win": {
+      "icon": "build/icon.ico",
       "target": [
         "nsis"
       ],
