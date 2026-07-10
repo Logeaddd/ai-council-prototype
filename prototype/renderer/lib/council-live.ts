@@ -547,12 +547,6 @@ export interface SkillSearchResult {
   verifiedSkillFile?: boolean
 }
 
-export interface FolderPickerResult {
-  supported: boolean
-  path: string
-  containsGroup?: boolean
-}
-
 export interface ProjectImportResult {
   root: string
   totalTextFiles: number
@@ -747,10 +741,6 @@ export async function saveAppSettings(body: Partial<AppSettings> & {
   }
 }) {
   return api<AppSettings>("/api/app-settings", body)
-}
-
-export async function pickProjectFolder() {
-  return api<FolderPickerResult>("/api/project-folder-picker")
 }
 
 export async function importProjectFolder(folderPath: string) {

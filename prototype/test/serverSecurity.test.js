@@ -56,7 +56,7 @@ test("server validates user file attachments before sending them to agents", () 
 test("server exposes real project folder import for council context", () => {
   const serverJs = fs.readFileSync(path.join(root, "src", "server.js"), "utf8");
   const importerJs = fs.readFileSync(path.join(root, "src", "projectImporter.js"), "utf8");
-  assert.match(serverJs, /\/api\/project-folder-picker/);
+  assert.doesNotMatch(serverJs, /\/api\/project-folder-picker/);
   assert.match(serverJs, /\/api\/project\/import/);
   assert.match(serverJs, /importProjectFolder\(body\.folderPath/);
   assert.match(importerJs, /project-directory-tree\.txt/);

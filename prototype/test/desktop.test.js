@@ -14,6 +14,7 @@ test("desktop shell is wired through package scripts", () => {
 
 test("desktop shell disables browser context menu and keeps renderer isolated", () => {
   const main = fs.readFileSync(path.join(root, "desktop", "main.mjs"), "utf8");
+  const preload = fs.readFileSync(path.join(root, "desktop", "preload.cjs"), "utf8");
   assert.match(main, /BrowserWindow/);
   assert.match(main, /Menu\.setApplicationMenu\(null\)/);
   assert.match(main, /webContents\.on\("context-menu"/);
@@ -21,6 +22,10 @@ test("desktop shell disables browser context menu and keeps renderer isolated", 
   assert.match(main, /contextIsolation: true/);
   assert.match(main, /nodeIntegration: false/);
   assert.match(main, /sandbox: true/);
+  assert.match(main, /preload: path\.join\(__dirname, "preload\.cjs"\)/);
+  assert.match(preload, /contextBridge\.exposeInMainWorld\("aiCouncilDesktop"/);
+  assert.match(preload, /webUtils\.getPathForFile\(file\)/);
+  assert.doesNotMatch(preload, /ipcRenderer|node:fs|require\("fs"\)/);
   assert.match(main, /127\.0\.0\.1/);
   assert.match(main, /AI_COUNCIL_UI_PORT/);
   assert.match(main, /resolveAppIconPath/);

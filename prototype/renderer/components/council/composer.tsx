@@ -1,10 +1,11 @@
 "use client"
 
-import { useEffect, useState } from "react"
-import { ChevronDown, FileText, FolderOpen, Lock, Paperclip, Pause, Send, StepForward, X } from "lucide-react"
+import { useEffect, useRef, useState } from "react"
+import { ChevronDown, FileText, Lock, Paperclip, Pause, Send, StepForward, X } from "lucide-react"
 import { cn } from "@/lib/utils"
 import type { AgentMember, FileAttachment } from "@/lib/council-data"
-import { importProjectFolder, pickProjectFolder } from "@/lib/council-live"
+import { importProjectFolder } from "@/lib/council-live"
+import { readDroppedDirectory } from "@/lib/drop-import.mjs"
 
 const MAX_FILE_ATTACHMENTS = 8
 const MAX_ATTACHMENT_BYTES = 256 * 1024
@@ -45,6 +46,19 @@ const TEXT_EXTENSIONS = new Set([
 
 type LocalAttachment = FileAttachment & { id: string }
 
+type DroppedEntry = {
+  isDirectory: boolean
+  isFile: boolean
+  name: string
+  file?: (success: (file: File) => void, failure?: (error: DOMException) => void) => void
+  createReader?: () => {
+    readEntries: (
+      success: (entries: DroppedEntry[]) => void,
+      failure?: (error: DOMException) => void,
+    ) => void
+  }
+}
+
 function readDraft(draftKey: string) {
   if (!draftKey || typeof window === "undefined") return ""
   try {
@@ -78,6 +92,8 @@ export function Composer({
   const [fileError, setFileError] = useState("")
   const [fileNotice, setFileNotice] = useState("")
   const [importingProject, setImportingProject] = useState(false)
+  const [draggingFiles, setDraggingFiles] = useState(false)
+  const dragDepth = useRef(0)
 
   useEffect(() => {
     const frame = window.requestAnimationFrame(() => {
@@ -130,58 +146,70 @@ export function Composer({
     setFileError("")
     setFileNotice("")
     try {
-      const selected = Array.from(files)
-      if (attachments.length + selected.length > MAX_FILE_ATTACHMENTS) {
-        throw new Error(`一次最多添加 ${MAX_FILE_ATTACHMENTS} 个文件`)
-      }
-      let totalBytes = attachments.reduce((sum, file) => sum + file.sizeBytes, 0)
-      const nextFiles: LocalAttachment[] = []
-      for (const file of selected) {
-        if (!isTextFile(file)) throw new Error(`${file.name} 不是已支持的文本文件`)
-        if (file.size > MAX_ATTACHMENT_BYTES) throw new Error(`${file.name} 超过 256KB，先拆小一点再传`)
-        totalBytes += file.size
-        if (totalBytes > MAX_TOTAL_ATTACHMENT_BYTES) throw new Error("附件总大小超过 768KB，先减少文件数量")
-        const content = await file.text()
-        if (/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/.test(content)) {
-          throw new Error(`${file.name} 看起来不是纯文本，暂不读取`)
-        }
-        nextFiles.push({
-          id: `${file.name}-${file.lastModified}-${file.size}-${Math.random().toString(36).slice(2)}`,
-          name: file.name,
-          type: file.type || "text/plain",
-          sizeBytes: file.size,
-          content,
-        })
-      }
+      const nextFiles = await readLocalAttachments(Array.from(files), attachments)
       setAttachments((current) => [...current, ...nextFiles])
     } catch (error) {
       setFileError(error instanceof Error ? error.message : String(error))
     }
   }
 
-  async function handleProjectFolder() {
+  async function handleDrop(dataTransfer: DataTransfer) {
     if (running || sending || importingProject) return
     setFileError("")
     setFileNotice("")
     setImportingProject(true)
     try {
-      const picked = await pickProjectFolder()
-      if (!picked.supported) throw new Error("当前系统暂不支持选择项目文件夹")
-      if (!picked.path) return
-      const imported = await importProjectFolder(picked.path)
-      const files = imported.attachments.map((file, index) => ({
-        ...file,
-        id: `project-${picked.path}-${index}-${Math.random().toString(36).slice(2)}`,
-      }))
-      if (attachments.length + files.length > MAX_FILE_ATTACHMENTS) {
-        throw new Error(`导入项目会超过 ${MAX_FILE_ATTACHMENTS} 个附件，请先移除一些附件`)
+      const droppedFiles: File[] = []
+      const folderPaths: string[] = []
+      const browserFolders: DroppedEntry[] = []
+
+      for (const item of Array.from(dataTransfer.items || [])) {
+        if (item.kind !== "file") continue
+        const entry = getDroppedEntry(item)
+        const file = item.getAsFile()
+        if (entry?.isDirectory) {
+          const folderPath = file ? getDesktopFilePath(file) : ""
+          if (folderPath) folderPaths.push(folderPath)
+          else browserFolders.push(entry)
+        } else if (file) {
+          droppedFiles.push(file)
+        }
       }
-      const totalBytes = [...attachments, ...files].reduce((sum, file) => sum + file.sizeBytes, 0)
-      if (totalBytes > MAX_TOTAL_ATTACHMENT_BYTES) {
-        throw new Error("导入项目内容超过 768KB，请先减少已有附件")
+
+      if (!dataTransfer.items?.length) droppedFiles.push(...Array.from(dataTransfer.files || []))
+
+      const nextAttachments = [...attachments]
+      const notices: string[] = []
+
+      for (const folderPath of [...new Set(folderPaths)]) {
+        const imported = await importProjectFolder(folderPath)
+        const projectFiles = imported.attachments.map((file, index) => ({
+          ...file,
+          id: `project-${folderPath}-${index}-${Math.random().toString(36).slice(2)}`,
+        }))
+        validateAttachmentBatch(nextAttachments, projectFiles, "导入项目")
+        nextAttachments.push(...projectFiles)
+        notices.push(`已导入 ${shortPath(imported.root)}：${imported.importedFiles} 个文件`)
       }
-      setAttachments((current) => [...current, ...files])
-      setFileNotice(`已导入项目：${shortPath(imported.root)}，读取 ${imported.importedFiles} 个文件，目录${imported.treeTruncated ? "已截断" : "已载入"}`)
+
+      for (const entry of browserFolders) {
+        const remaining = Math.max(0, MAX_FILE_ATTACHMENTS - nextAttachments.length)
+        if (!remaining) throw new Error(`一次最多添加 ${MAX_FILE_ATTACHMENTS} 个文件`)
+        const folderFiles = await readDroppedDirectory(entry, remaining)
+        droppedFiles.push(...folderFiles.files)
+        notices.push(`${entry.name}：读取 ${folderFiles.files.length} 个文件${folderFiles.truncated ? "，其余未载入" : ""}`)
+      }
+
+      if (droppedFiles.length) {
+        const localFiles = await readLocalAttachments(droppedFiles, nextAttachments)
+        nextAttachments.push(...localFiles)
+      }
+
+      if (nextAttachments.length === attachments.length) {
+        throw new Error("没有读取到可导入的文件")
+      }
+      setAttachments(nextAttachments)
+      setFileNotice(notices.join("；"))
     } catch (error) {
       setFileError(error instanceof Error ? error.message : String(error))
     } finally {
@@ -248,9 +276,37 @@ export function Composer({
         </div>
 
         <div
+          onDragEnter={(event) => {
+            if (!hasDraggedFiles(event.dataTransfer)) return
+            event.preventDefault()
+            dragDepth.current += 1
+            setDraggingFiles(true)
+          }}
+          onDragOver={(event) => {
+            if (!hasDraggedFiles(event.dataTransfer)) return
+            event.preventDefault()
+            event.dataTransfer.dropEffect = "copy"
+          }}
+          onDragLeave={(event) => {
+            if (!hasDraggedFiles(event.dataTransfer)) return
+            event.preventDefault()
+            dragDepth.current = Math.max(0, dragDepth.current - 1)
+            if (!dragDepth.current) setDraggingFiles(false)
+          }}
+          onDrop={(event) => {
+            if (!hasDraggedFiles(event.dataTransfer)) return
+            event.preventDefault()
+            dragDepth.current = 0
+            setDraggingFiles(false)
+            handleDrop(event.dataTransfer)
+          }}
           className={cn(
             "flex items-end gap-2 rounded-lg border bg-background p-2 transition-colors focus-within:border-ring",
-            privateMode ? "border-info/40" : "border-border",
+            draggingFiles
+              ? "border-primary ring-2 ring-primary/20"
+              : privateMode
+                ? "border-info/40"
+                : "border-border",
           )}
         >
           <textarea
@@ -279,10 +335,10 @@ export function Composer({
             <label
               className={cn(
                 "inline-flex size-9 cursor-pointer items-center justify-center rounded-md border border-border text-muted-foreground transition-colors hover:bg-accent hover:text-foreground",
-                running || sending ? "pointer-events-none opacity-45" : "",
+                running || sending || importingProject ? "pointer-events-none opacity-45" : "",
               )}
-              title="添加文本文件"
-              aria-label="添加文本文件"
+              title="添加文件"
+              aria-label="添加文件"
             >
               <Paperclip className="size-4" />
               <input
@@ -290,23 +346,13 @@ export function Composer({
                 multiple
                 className="hidden"
                 accept=".txt,.md,.markdown,.json,.jsonl,.js,.jsx,.ts,.tsx,.css,.scss,.html,.htm,.xml,.yaml,.yml,.py,.java,.c,.cpp,.cs,.go,.rs,.php,.rb,.sh,.ps1,.sql,.csv,.log,text/*,application/json"
-                disabled={running || sending}
+                disabled={running || sending || importingProject}
                 onChange={(event) => {
                   handleFiles(event.target.files)
                   event.currentTarget.value = ""
                 }}
               />
             </label>
-            <button
-              type="button"
-              disabled={running || sending || importingProject}
-              onClick={handleProjectFolder}
-              className="inline-flex size-9 items-center justify-center rounded-md border border-border text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:cursor-not-allowed disabled:opacity-45"
-              title="导入项目文件夹"
-              aria-label="导入项目文件夹"
-            >
-              <FolderOpen className="size-4" />
-            </button>
             <button
               type="button"
               disabled={sending || running}
@@ -379,6 +425,62 @@ export function Composer({
       </div>
     </div>
   )
+}
+
+async function readLocalAttachments(files: File[], current: LocalAttachment[]) {
+  if (current.length + files.length > MAX_FILE_ATTACHMENTS) {
+    throw new Error(`一次最多添加 ${MAX_FILE_ATTACHMENTS} 个文件`)
+  }
+  let totalBytes = current.reduce((sum, file) => sum + file.sizeBytes, 0)
+  const nextFiles: LocalAttachment[] = []
+  for (const file of files) {
+    if (!isTextFile(file)) throw new Error(`${file.name} 不是已支持的文本文件`)
+    if (file.size > MAX_ATTACHMENT_BYTES) throw new Error(`${file.name} 超过 256KB，先拆小一点再传`)
+    totalBytes += file.size
+    if (totalBytes > MAX_TOTAL_ATTACHMENT_BYTES) throw new Error("附件总大小超过 768KB，先减少文件数量")
+    const content = await file.text()
+    if (/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/.test(content)) {
+      throw new Error(`${file.name} 看起来不是纯文本，暂不读取`)
+    }
+    nextFiles.push({
+      id: `${file.name}-${file.lastModified}-${file.size}-${Math.random().toString(36).slice(2)}`,
+      name: file.name,
+      type: file.type || "text/plain",
+      sizeBytes: file.size,
+      content,
+    })
+  }
+  return nextFiles
+}
+
+function validateAttachmentBatch(current: LocalAttachment[], next: LocalAttachment[], label: string) {
+  if (current.length + next.length > MAX_FILE_ATTACHMENTS) {
+    throw new Error(`${label}会超过 ${MAX_FILE_ATTACHMENTS} 个附件，请先移除一些附件`)
+  }
+  const totalBytes = [...current, ...next].reduce((sum, file) => sum + file.sizeBytes, 0)
+  if (totalBytes > MAX_TOTAL_ATTACHMENT_BYTES) {
+    throw new Error(`${label}内容超过 768KB，请先减少已有附件`)
+  }
+}
+
+function hasDraggedFiles(dataTransfer: DataTransfer) {
+  return Array.from(dataTransfer.types || []).includes("Files")
+}
+
+function getDroppedEntry(item: DataTransferItem) {
+  const legacyItem = item as DataTransferItem & {
+    webkitGetAsEntry?: () => DroppedEntry | null
+  }
+  return legacyItem.webkitGetAsEntry?.() || null
+}
+
+function getDesktopFilePath(file: File) {
+  const desktopWindow = window as Window & {
+    aiCouncilDesktop?: {
+      getPathForFile: (file: File) => string
+    }
+  }
+  return desktopWindow.aiCouncilDesktop?.getPathForFile(file) || ""
 }
 
 function isTextFile(file: File) {

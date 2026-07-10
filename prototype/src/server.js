@@ -175,11 +175,6 @@ async function handleApi(req, res, url) {
     return;
   }
 
-  if (req.method === "GET" && url.pathname === "/api/project-folder-picker") {
-    sendJson(res, 200, await pickFolder({ description: "选择要导入的项目文件夹" }));
-    return;
-  }
-
   if (req.method === "POST" && url.pathname === "/api/project/import") {
     const body = await readBody(req);
     sendJson(res, 200, importProjectFolder(body.folderPath, body.options || {}));
