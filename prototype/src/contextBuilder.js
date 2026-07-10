@@ -6,8 +6,10 @@ import { formatTaskStateForPrompt } from "./taskState.js";
 const DEFAULT_RECENT_MESSAGES = 6;
 const DEFAULT_ARCHIVE_CONTEXT_ITEMS = 5;
 const DEFAULT_ARCHIVE_CONTEXT_TOKENS = 900;
-const MAX_TOOL_RESULTS_IN_CONTEXT = 20;
 const MAX_TOOL_CONTEXT_STRING_CHARS = 4000;
+const DEFAULT_EVIDENCE_STRING_CHARS = 1600;
+const MAX_EXECUTION_EVIDENCE_TOKEN_RATIO = 0.45;
+const EXECUTION_EVIDENCE_RESERVE_TOKENS = 160;
 
 export function buildMemberContext(agent, session, options = {}) {
   const limits = resolveEffectiveLimits(agent, options.groupSettings || {});
@@ -18,9 +20,9 @@ export function buildMemberContext(agent, session, options = {}) {
   const visibleMessages = selectVisibleMessages(session.messages || [], agent, transcriptVisibility);
   const latestArtifacts = selectLatestArtifacts(selectVisibleArtifacts(session.artifacts || [], agent, transcriptVisibility));
   const unresolvedObjections = selectVisibleObjections(session.unresolvedObjections || {}, agent, transcriptVisibility);
-  const fileOperationExecutionResults = selectVisibleFileOperationResults(session.fileOperationExecutionResults || [], agent, transcriptVisibility);
-  const toolExecutionResults = selectVisibleToolResults(session.toolExecutionResults || [], agent, transcriptVisibility);
-  const rejectedToolRequests = selectVisibleToolResults(session.rejectedToolRequests || [], agent, transcriptVisibility);
+  const visibleFileOperationExecutionResults = selectVisibleFileOperationResults(session.fileOperationExecutionResults || [], agent, transcriptVisibility);
+  const visibleToolExecutionResults = selectVisibleToolResults(session.toolExecutionResults || [], agent, transcriptVisibility);
+  const visibleRejectedToolRequests = selectVisibleToolResults(session.rejectedToolRequests || [], agent, transcriptVisibility);
   const attachedFiles = normalizeFileAttachments(options.attachments || []);
   const stable = {
     roleIdentity: roleIdentity(agent),
@@ -30,16 +32,16 @@ export function buildMemberContext(agent, session, options = {}) {
     globalRequirement: options.globalRequirement || "",
     harnessSummary: options.harnessSummary || ""
   };
-  const core = {
+  const coreBase = {
     originalQuestion,
     latestBossInstruction,
     latestArtifacts,
     unresolvedObjections,
     executionStandard: options.executionStandard || "",
     verificationStandard: options.verificationStandard || "",
-    fileOperationExecutionResults,
-    toolExecutionResults,
-    rejectedToolRequests,
+    fileOperationExecutionResults: [],
+    toolExecutionResults: [],
+    rejectedToolRequests: [],
     taskState: options.taskState || {},
     attachedFiles
   };
@@ -54,6 +56,24 @@ export function buildMemberContext(agent, session, options = {}) {
     privateBossMessages: Array.isArray(options.privateBossMessages) ? options.privateBossMessages : []
   };
   const stableMessages = contextMessagesFromStable(stable);
+  const executionEvidenceBudget = resolveExecutionEvidenceBudget({
+    limits,
+    stableMessages,
+    coreBase,
+    summaries
+  });
+  const executionEvidence = buildExecutionEvidencePack({
+    fileOperationExecutionResults: visibleFileOperationExecutionResults,
+    toolExecutionResults: visibleToolExecutionResults,
+    rejectedToolRequests: visibleRejectedToolRequests
+  }, executionEvidenceBudget);
+  const core = {
+    ...coreBase,
+    fileOperationExecutionResults: executionEvidence.fileOperationExecutionResults,
+    toolExecutionResults: executionEvidence.toolExecutionResults,
+    rejectedToolRequests: executionEvidence.rejectedToolRequests,
+    executionEvidenceCompression: executionEvidence.compression
+  };
   const coreMessages = contextMessagesFromCore(core);
   const summaryMessages = contextMessagesFromSummaries(summaries);
   const requestedRecentTranscript = selectRecentTranscript(visibleMessages, options.recentMessageLimit ?? options.groupSettings?.recentMessageLimit);
@@ -94,6 +114,7 @@ export function buildMemberContext(agent, session, options = {}) {
       targetTokens: compressionTargetTokens(limits)
     },
     archiveContextCompression: summaries.retrievedContext.compression,
+    executionEvidenceCompression: executionEvidence.compression,
     tokenEstimate: {
       ...tokenEstimate,
       nonCompressibleCore: nonCompressibleCoreTokens,
@@ -125,6 +146,7 @@ export function buildContextPromptSections(context) {
       context.core.fileOperationExecutionResults?.length ? `File operation execution results: ${JSON.stringify(context.core.fileOperationExecutionResults)}` : "",
       context.core.toolExecutionResults?.length ? `Tool execution results: ${JSON.stringify(context.core.toolExecutionResults)}` : "",
       context.core.rejectedToolRequests?.length ? `Rejected tool requests: ${JSON.stringify(context.core.rejectedToolRequests)}` : "",
+      formatExecutionEvidenceCompression(context.core.executionEvidenceCompression),
       formatTaskStateForPrompt(context.core.taskState) ? `Task state ledger:\n${formatTaskStateForPrompt(context.core.taskState)}` : ""
     ]],
     ["Summaries", [
@@ -174,25 +196,254 @@ function selectVisibleObjections(unresolvedObjections, agent, visibility) {
 }
 
 function selectVisibleFileOperationResults(results, agent, visibility) {
-  const visible = visibility === "full" ? results : results.filter((item) => {
+  return visibility === "full" ? results : results.filter((item) => {
     const source = item.source_agent_id || item.sourceAgentId || item.proposedBy?.seatId || item.proposedBy?.id;
     return source === agent.id;
   });
-  return compactFileOperationResultsForContext(visible);
 }
 
 function selectVisibleToolResults(results, agent, visibility) {
-  const visible = visibility === "full" ? results : results.filter((item) => {
+  return visibility === "full" ? results : results.filter((item) => {
     const source = item.source_agent_id || item.sourceAgentId || item.proposedBy?.seatId || item.proposedBy?.id;
     return source === agent.id;
   });
-  return compactToolResultsForContext(visible);
 }
 
-function compactFileOperationResultsForContext(results) {
-  return dedupeSimilarFileOperationResults(Array.isArray(results) ? results : [])
-    .slice(-MAX_TOOL_RESULTS_IN_CONTEXT)
-    .map((item) => compactContextValue(item));
+function resolveExecutionEvidenceBudget({ limits, stableMessages, coreBase, summaries }) {
+  const targetTokens = compressionTargetTokens(limits) || limits.effectiveInputLimit;
+  const mandatoryTokens = estimateMessagesTokens([
+    ...stableMessages,
+    ...contextMessagesFromCore(coreBase),
+    ...contextMessagesFromSummaries(summaries)
+  ]);
+  const available = Math.max(0, targetTokens - mandatoryTokens - EXECUTION_EVIDENCE_RESERVE_TOKENS);
+  const ratioLimit = Math.max(0, Math.floor(limits.effectiveInputLimit * MAX_EXECUTION_EVIDENCE_TOKEN_RATIO));
+  return Math.max(0, Math.min(available, ratioLimit));
+}
+
+function buildExecutionEvidencePack(groups, maxTokens) {
+  const rawFileResults = Array.isArray(groups.fileOperationExecutionResults) ? groups.fileOperationExecutionResults : [];
+  const rawToolResults = Array.isArray(groups.toolExecutionResults) ? groups.toolExecutionResults : [];
+  const rawRejected = Array.isArray(groups.rejectedToolRequests) ? groups.rejectedToolRequests : [];
+  const dedupedFileResults = dedupeSimilarFileOperationResults(rawFileResults);
+  const dedupedToolResults = dedupeSimilarToolResults(rawToolResults);
+  const dedupedRejected = dedupeSimilarToolResults(rawRejected);
+  let sequence = 0;
+  const candidates = [
+    ...dedupedFileResults.map((item) => executionEvidenceCandidate("file", item, sequence++)),
+    ...dedupedToolResults.map((item) => executionEvidenceCandidate("tool", item, sequence++)),
+    ...dedupedRejected.map((item) => executionEvidenceCandidate("rejected", item, sequence++))
+  ];
+  markPriorityExecutionEvidence(candidates);
+  candidates.sort(compareExecutionEvidenceCandidate);
+  const kept = [];
+  let estimatedTokens = 0;
+  let shortenedCount = 0;
+
+  for (const candidate of candidates) {
+    const remaining = Math.max(0, maxTokens - estimatedTokens);
+    const fitted = fitExecutionEvidenceCandidate(candidate, remaining);
+    if (!fitted) continue;
+    kept.push({ ...candidate, record: fitted.record });
+    estimatedTokens += fitted.tokens;
+    if (fitted.shortened) shortenedCount += 1;
+  }
+  kept.sort((a, b) => a.sequence - b.sequence);
+  const byKind = (kind) => kept.filter((item) => item.kind === kind).map((item) => item.record);
+  const originalCount = rawFileResults.length + rawToolResults.length + rawRejected.length;
+  const dedupedCount = candidates.length;
+  const keptCount = kept.length;
+  const omittedCount = Math.max(0, dedupedCount - keptCount);
+  const duplicateCount = Math.max(0, originalCount - dedupedCount);
+
+  return {
+    fileOperationExecutionResults: byKind("file"),
+    toolExecutionResults: byKind("tool"),
+    rejectedToolRequests: byKind("rejected"),
+    compression: {
+      maxTokens,
+      estimatedTokens,
+      originalCount,
+      dedupedCount,
+      keptCount,
+      omittedCount,
+      duplicateCount,
+      shortenedCount,
+      originalByKind: {
+        fileOperations: rawFileResults.length,
+        tools: rawToolResults.length,
+        rejected: rawRejected.length
+      },
+      keptByKind: {
+        fileOperations: byKind("file").length,
+        tools: byKind("tool").length,
+        rejected: byKind("rejected").length
+      },
+      applied: duplicateCount > 0 || omittedCount > 0 || shortenedCount > 0,
+      source: "complete raw results remain in session storage"
+    }
+  };
+}
+
+function executionEvidenceCandidate(kind, item, sequence) {
+  const failed = kind === "rejected" || ["failed", "rejected", "skipped_policy", "unavailable"].includes(String(item?.status || ""));
+  return {
+    kind,
+    item,
+    sequence,
+    source: String(item?.source_agent_id || item?.sourceAgentId || item?.agentId || item?.proposedBy?.seatId || item?.proposedBy?.id || "unknown"),
+    verification: kind === "file" || ["execute_command", "run_tests", "git_operation"].includes(String(item?.tool || "")),
+    priority: failed ? 4 : kind === "file" ? 3 : 2
+  };
+}
+
+function markPriorityExecutionEvidence(candidates) {
+  const latestBySource = new Map();
+  const latestVerificationBySource = new Map();
+  for (const candidate of candidates) {
+    latestBySource.set(candidate.source, candidate);
+    if (candidate.verification) latestVerificationBySource.set(candidate.source, candidate);
+  }
+  for (const candidate of latestVerificationBySource.values()) candidate.priority = Math.max(candidate.priority, 6);
+  for (const candidate of latestBySource.values()) candidate.priority = Math.max(candidate.priority, 7);
+}
+
+function compareExecutionEvidenceCandidate(a, b) {
+  return b.priority - a.priority || b.sequence - a.sequence;
+}
+
+function fitExecutionEvidenceCandidate(candidate, remainingTokens) {
+  if (remainingTokens <= 0) return null;
+  for (const maxStringChars of [DEFAULT_EVIDENCE_STRING_CHARS, 800, 320, 120]) {
+    const compacted = compactExecutionEvidenceRecord(candidate.kind, candidate.item, maxStringChars);
+    const tokens = estimateTokens(JSON.stringify(compacted.record));
+    if (tokens <= remainingTokens) return { ...compacted, tokens };
+  }
+  return null;
+}
+
+function compactExecutionEvidenceRecord(kind, item, maxStringChars) {
+  const record = kind === "file"
+    ? fileOperationEvidenceRecord(item)
+    : toolEvidenceRecord(item, kind === "rejected");
+  const compacted = compactEvidenceValue(record, maxStringChars);
+  return { record: compacted.value, shortened: compacted.shortened };
+}
+
+function fileOperationEvidenceRecord(item = {}) {
+  return removeEmptyEvidenceValues({
+    proposalId: item.proposalId || item.id,
+    op: item.op || item.operation || item.action,
+    path: item.path || item.targetPath,
+    status: item.status,
+    code: item.code,
+    error: item.error,
+    reason: item.reason,
+    round: item.round,
+    source_agent_id: item.source_agent_id || item.sourceAgentId || item.proposedBy?.seatId || item.proposedBy?.id,
+    source_agent_name: item.source_agent_name || item.sourceAgentName || item.proposedBy?.name,
+    commitHash: item.commitHash,
+    verification: item.verification,
+    content: item.content,
+    entries: item.entries,
+    createdAt: item.createdAt
+  });
+}
+
+function toolEvidenceRecord(item = {}, rejected = false) {
+  const request = removeEmptyEvidenceValues({
+    id: item.id,
+    tool: item.tool,
+    status: item.status || (rejected ? "rejected" : undefined),
+    code: item.code,
+    error: item.error,
+    reason: item.reason,
+    round: item.round,
+    source_agent_id: item.source_agent_id || item.sourceAgentId || item.agentId,
+    source_agent_name: item.source_agent_name || item.sourceAgentName,
+    query: item.query,
+    url: item.url,
+    path: item.path,
+    destination: item.destination,
+    command: item.command,
+    language: item.language,
+    packageName: item.packageName,
+    manager: item.manager,
+    runner: item.runner,
+    cwd: item.cwd,
+    shell: item.shell,
+    pattern: item.pattern,
+    root: item.root,
+    sessionId: item.sessionId,
+    method: item.method,
+    action: item.action,
+    branch: item.branch,
+    remote: item.remote,
+    paths: item.paths,
+    selector: item.selector,
+    databasePath: item.databasePath,
+    sql: item.sql,
+    serverId: item.serverId,
+    catalogId: item.catalogId,
+    packageSpec: item.packageSpec,
+    binName: item.binName,
+    mcpToolName: item.mcpToolName,
+    resourceUri: item.resourceUri,
+    promptName: item.promptName,
+    mode: item.mode,
+    background: item.background,
+    timeoutMs: item.timeoutMs,
+    createdAt: item.createdAt
+  });
+  const result = removeDuplicateEvidenceValues(removeEmptyEvidenceValues(item.result || {}), request);
+  return removeEmptyEvidenceValues({ ...request, result });
+}
+
+function removeDuplicateEvidenceValues(value, request) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  return Object.fromEntries(Object.entries(value).filter(([key, item]) => {
+    if (!(key in request)) return true;
+    return JSON.stringify(request[key]) !== JSON.stringify(item);
+  }));
+}
+
+function removeEmptyEvidenceValues(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  return Object.fromEntries(Object.entries(value).filter(([, item]) => {
+    if (item === undefined || item === null || item === "") return false;
+    if (Array.isArray(item) && item.length === 0) return false;
+    if (typeof item === "object" && !Array.isArray(item) && Object.keys(item).length === 0) return false;
+    return true;
+  }));
+}
+
+function compactEvidenceValue(value, maxStringChars, depth = 0) {
+  if (typeof value === "string") {
+    return {
+      value: compactContextString(value, maxStringChars),
+      shortened: value.length > maxStringChars
+    };
+  }
+  if (!value || typeof value !== "object") return { value, shortened: false };
+  if (depth > 5) return { value: "[truncated nested object]", shortened: true };
+  if (Array.isArray(value)) {
+    const limit = 20;
+    let shortened = value.length > limit;
+    const kept = value.slice(0, limit).map((item) => {
+      const compacted = compactEvidenceValue(item, maxStringChars, depth + 1);
+      shortened = shortened || compacted.shortened;
+      return compacted.value;
+    });
+    if (value.length > limit) kept.push(`[truncated ${value.length - limit} items]`);
+    return { value: kept, shortened };
+  }
+  let shortened = false;
+  const entries = Object.entries(value).map(([key, item]) => {
+    const compacted = compactEvidenceValue(item, maxStringChars, depth + 1);
+    shortened = shortened || compacted.shortened;
+    return [key, compacted.value];
+  });
+  return { value: Object.fromEntries(entries), shortened };
 }
 
 function dedupeSimilarFileOperationResults(results) {
@@ -214,12 +465,6 @@ function fileOperationResultSignature(item = {}) {
   if (!op || !path) return "";
   const source = String(item.source_agent_id || item.sourceAgentId || item.agentId || item.proposedBy?.seatId || item.proposedBy?.id || "");
   return [source, op, path].join("\u001f");
-}
-
-function compactToolResultsForContext(results) {
-  return dedupeSimilarToolResults(Array.isArray(results) ? results : [])
-    .slice(-MAX_TOOL_RESULTS_IN_CONTEXT)
-    .map((item) => compactContextValue(item));
 }
 
 function dedupeSimilarToolResults(results) {
@@ -259,26 +504,19 @@ function toolResultSignature(item = {}) {
   return [source, tool, ...keyParts].join("\u001f");
 }
 
-function compactContextValue(value, depth = 0) {
-  if (typeof value === "string") return compactContextString(value);
-  if (!value || typeof value !== "object") return value;
-  if (Array.isArray(value)) {
-    const kept = value.slice(0, 20).map((item) => compactContextValue(item, depth + 1));
-    if (value.length > kept.length) kept.push(`[truncated ${value.length - kept.length} items]`);
-    return kept;
-  }
-  if (depth > 5) return "[truncated nested object]";
-  return Object.fromEntries(
-    Object.entries(value).map(([key, item]) => [key, compactContextValue(item, depth + 1)])
-  );
+function compactContextString(value, maxChars = MAX_TOOL_CONTEXT_STRING_CHARS) {
+  const text = String(value || "");
+  if (text.length <= maxChars) return text;
+  const markerReserve = Math.min(80, Math.max(30, Math.floor(maxChars / 4)));
+  const usable = Math.max(20, maxChars - markerReserve);
+  const headLength = Math.max(10, Math.floor(usable * 0.35));
+  const tailLength = Math.max(10, usable - headLength);
+  return `${text.slice(0, headLength)}\n...[tool output truncated ${text.length - headLength - tailLength} chars]...\n${text.slice(text.length - tailLength)}`;
 }
 
-function compactContextString(value) {
-  const text = String(value || "");
-  if (text.length <= MAX_TOOL_CONTEXT_STRING_CHARS) return text;
-  const headLength = 1000;
-  const tailLength = MAX_TOOL_CONTEXT_STRING_CHARS - headLength - 80;
-  return `${text.slice(0, headLength)}\n...[tool output truncated ${text.length - headLength - tailLength} chars]...\n${text.slice(text.length - tailLength)}`;
+function formatExecutionEvidenceCompression(compression = {}) {
+  if (!compression.originalCount) return "";
+  return `Execution evidence pack: kept=${compression.keptCount}/${compression.dedupedCount} from ${compression.originalCount} stored records; estimatedTokens=${compression.estimatedTokens}/${compression.maxTokens}; duplicates=${compression.duplicateCount}; omitted=${compression.omittedCount}; shortened=${compression.shortenedCount}. Complete raw results remain in session storage; this prompt contains a bounded evidence view, not the full raw outputs.`;
 }
 
 function selectRecentTranscript(messages, limit = DEFAULT_RECENT_MESSAGES) {
@@ -358,6 +596,7 @@ function contextMessagesFromCore(core) {
     { role: "user", content: JSON.stringify(core.fileOperationExecutionResults || []) },
     { role: "user", content: JSON.stringify(core.toolExecutionResults || []) },
     { role: "user", content: JSON.stringify(core.rejectedToolRequests || []) },
+    { role: "user", content: formatExecutionEvidenceCompression(core.executionEvidenceCompression) },
     { role: "user", content: formatTaskStateForPrompt(core.taskState) }
   ].filter((message) => message.content);
 }

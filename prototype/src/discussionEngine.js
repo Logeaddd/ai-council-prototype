@@ -828,6 +828,14 @@ function summarizeContextStatus(memberContext, options = {}) {
       droppedCount: 0,
       truncatedSnippets: 0
     },
+    executionEvidenceCompression: memberContext.executionEvidenceCompression || {
+      applied: false,
+      originalCount: 0,
+      dedupedCount: 0,
+      keptCount: 0,
+      omittedCount: 0,
+      shortenedCount: 0
+    },
     coreOverflow: memberContext.coreOverflow,
     sizeStatus: size.status,
     sizeRatio: size.ratio,

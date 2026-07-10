@@ -326,6 +326,63 @@ test("context prompt sections compact large tool outputs", () => {
   assert.ok(core.length < largeStdout.length);
 });
 
+test("execution evidence uses one dynamic budget without mutating complete stored results", () => {
+  const storedToolResults = Array.from({ length: 12 }, (_, index) => ({
+    id: `tool_${index}`,
+    tool: index === 10 || index === 11 ? "execute_command" : "read_file",
+    status: index === 10 ? "failed" : "completed",
+    code: index === 10 ? "command_exit_nonzero" : undefined,
+    source_agent_id: "builder",
+    source_agent_name: "Builder",
+    round: 1,
+    path: index < 10 ? `src/file-${index}.txt` : undefined,
+    command: index >= 10 ? `build-tool attempt-${index}` : undefined,
+    query: "",
+    url: "",
+    result: index < 10
+      ? { ok: true, path: `src/file-${index}.txt`, content: `FILE_${index}_HEAD ${"detail ".repeat(1800)} FILE_${index}_TAIL` }
+      : {
+          ok: index === 11,
+          command: `build-tool attempt-${index}`,
+          exitCode: index === 10 ? 1 : 0,
+          stdout: index === 11 ? `BUILD_SUCCESS_FACT ${"build detail ".repeat(1200)}` : "",
+          stderr: index === 10 ? `BUILD_FAILURE_FACT ${"failure detail ".repeat(1200)}` : ""
+        }
+  }));
+  const storedSnapshot = JSON.stringify(storedToolResults);
+  const context = buildMemberContext({
+    ...agent,
+    id: "finalizer",
+    name: "Finalizer",
+    role: "Finalizer",
+    mandatoryRedTeam: false,
+    providerLimits: { contextWindow: 9000, maxOutputTokens: 1000 },
+    tokenLimits: { maxInputTokensPerCall: 8000 }
+  }, {
+    question: "Synthesize verified execution evidence.",
+    unresolvedObjections: {},
+    artifacts: [],
+    toolExecutionResults: storedToolResults,
+    messages: []
+  });
+  const core = buildContextPromptSections(context).find((section) => section.title === "Non-compressible core")?.content || "";
+
+  assert.equal(JSON.stringify(storedToolResults), storedSnapshot);
+  assert.equal(context.coreOverflow, false);
+  assert.equal(context.executionEvidenceCompression.originalCount, 12);
+  assert.ok(context.executionEvidenceCompression.keptCount < 12);
+  assert.ok(context.executionEvidenceCompression.omittedCount > 0);
+  assert.ok(context.executionEvidenceCompression.shortenedCount > 0);
+  assert.ok(context.executionEvidenceCompression.estimatedTokens <= context.executionEvidenceCompression.maxTokens);
+  assert.match(core, /Execution evidence pack/);
+  assert.match(core, /Complete raw results remain in session storage/);
+  assert.match(core, /BUILD_SUCCESS_FACT/);
+  assert.match(core, /BUILD_FAILURE_FACT/);
+  assert.match(core, /command_exit_nonzero/);
+  assert.doesNotMatch(core, /"query":""/);
+  assert.doesNotMatch(core, /"url":""/);
+});
+
 test("context prompt sections keep only the latest repeated tool result", () => {
   const context = buildMemberContext(agent, {
     question: "Use the latest file read.",
