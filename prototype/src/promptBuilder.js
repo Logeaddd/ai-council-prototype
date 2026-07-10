@@ -29,6 +29,8 @@ export function buildRoundPrompt(agent, question, session, round, options = {}) 
         toolRequestProtocolLine(options),
         "If speaking, use keys: status, position, argument, objections, objection_items, resolved_ids, suggested_revision, artifacts, file_operations, tool_requests, confidence, memory_candidates.",
         "Do not use proposed_files, source_files, patches, or markdown code blocks for durable file contents. Durable file contents must be in file_operations.content for write/append, or created by a real execute_command/tool request.",
+        "When writing files through file_operations, use at most 2 write/append items in one response and keep each content under 6000 characters. If more files or longer content are needed, write a small batch first and continue in a later tool follow-up.",
+        "If your JSON is truncated or invalid, no file writes will run; prefer smaller batches over one huge response.",
         "Keep argument short. Do not put full source code, build scripts, manifests, generated files, or long patches in argument, reason, suggested_revision, or artifacts.",
         "Use file_operations only to request file work. The app validates every path; read/list can be executed by the app and returned in later context, while write/append/delete require approval before execution. You do not have direct filesystem access.",
         "Each file_operations item must include op, path, reason, expected_effect; write/append also require content. Allowed op values: read, list, write, append, delete.",
