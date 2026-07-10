@@ -114,6 +114,145 @@ test("a successful generic command cannot prove a built claim", () => {
   assert.equal(report.claims[0].status, "exists_unverified");
 });
 
+test("exact workspace change evidence overrides timestamps and blocks unrelated commands", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-deliverable-manifest-"));
+  const target = path.join(root, "dist", "app.jar");
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.writeFileSync(target, "MANIFEST_BOUND_ARTIFACT", "utf8");
+  const oldTime = new Date(Date.now() - 24 * 60 * 60 * 1000);
+  fs.utimesSync(target, oldTime, oldTime);
+  const baseResult = {
+    ok: true,
+    durationMs: 1,
+    workspaceChanges: {
+      status: "completed",
+      complete: true,
+      created: [{ path: "dist/app.jar", change: "created", reliable: true }],
+      modified: [],
+      deleted: []
+    }
+  };
+  const verified = verifyFinalDeliverables({
+    groupPath: root,
+    session: {
+      finalDecision: {
+        answer: "Built `dist/app.jar`.",
+        deliverables: [{ path: "dist/app.jar", claim: "built", evidence_ids: ["tool-build"] }]
+      },
+      toolExecutionResults: [{
+        id: "tool-build",
+        tool: "execute_command",
+        command: "npm run build",
+        status: "completed",
+        createdAt: new Date().toISOString(),
+        result: baseResult
+      }],
+      fileOperationExecutionResults: []
+    }
+  });
+  const unverified = verifyFinalDeliverables({
+    groupPath: root,
+    session: {
+      finalDecision: {
+        answer: "Built `dist/app.jar`.",
+        deliverables: [{ path: "dist/app.jar", claim: "built", evidence_ids: ["tool-build"] }]
+      },
+      toolExecutionResults: [{
+        id: "tool-build",
+        tool: "execute_command",
+        command: "npm run build",
+        status: "completed",
+        createdAt: new Date().toISOString(),
+        result: {
+          ...baseResult,
+          workspaceChanges: { ...baseResult.workspaceChanges, created: [{ path: "dist/other.jar", change: "created", reliable: true }] }
+        }
+      }],
+      fileOperationExecutionResults: []
+    }
+  });
+
+  assert.equal(verified.claims[0].status, "verified_built");
+  assert.match(verified.claims[0].evidence_matches[0].match, /workspace_change_created/);
+  assert.equal(unverified.claims[0].status, "exists_unverified");
+});
+
+test("successful incremental build can verify an unchanged artifact observed afterward", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-deliverable-incremental-"));
+  const target = path.join(root, "dist", "app.jar");
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.writeFileSync(target, "UP_TO_DATE_ARTIFACT", "utf8");
+  const report = verifyFinalDeliverables({
+    groupPath: root,
+    session: {
+      finalDecision: {
+        answer: "Built `dist/app.jar`.",
+        deliverables: [{ path: "dist/app.jar", claim: "built", evidence_ids: ["tool-build"] }]
+      },
+      toolExecutionResults: [{
+        id: "tool-build",
+        tool: "execute_command",
+        command: "gradle build",
+        status: "completed",
+        createdAt: new Date().toISOString(),
+        result: {
+          ok: true,
+          cwd: ".",
+          workspaceChanges: {
+            status: "completed",
+            complete: true,
+            created: [],
+            modified: [],
+            deleted: [],
+            observedArtifacts: [{ path: "dist/app.jar", reliable: true }]
+          }
+        }
+      }],
+      fileOperationExecutionResults: []
+    }
+  });
+
+  assert.equal(report.claims[0].status, "verified_built");
+  assert.equal(report.claims[0].evidence_matches[0].match, "workspace_observed_after_successful_build");
+});
+
+test("incremental build observation cannot verify an artifact outside command cwd", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-deliverable-cwd-"));
+  fs.mkdirSync(path.join(root, "project-b", "dist"), { recursive: true });
+  fs.writeFileSync(path.join(root, "project-b", "dist", "app.jar"), "OTHER_PROJECT", "utf8");
+  const report = verifyFinalDeliverables({
+    groupPath: root,
+    session: {
+      finalDecision: {
+        answer: "Built `project-b/dist/app.jar`.",
+        deliverables: [{ path: "project-b/dist/app.jar", claim: "built", evidence_ids: ["tool-build-a"] }]
+      },
+      toolExecutionResults: [{
+        id: "tool-build-a",
+        tool: "execute_command",
+        command: "npm run build",
+        status: "completed",
+        createdAt: new Date().toISOString(),
+        result: {
+          ok: true,
+          cwd: "project-a",
+          workspaceChanges: {
+            status: "completed",
+            complete: true,
+            created: [],
+            modified: [],
+            deleted: [],
+            observedArtifacts: [{ path: "project-b/dist/app.jar", reliable: true }]
+          }
+        }
+      }],
+      fileOperationExecutionResults: []
+    }
+  });
+
+  assert.equal(report.claims[0].status, "exists_unverified");
+});
+
 test("missing and escaped deliverable claims are rejected", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-deliverable-bad-"));
   const session = {

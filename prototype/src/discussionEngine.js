@@ -235,6 +235,8 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
           maxGrepFileBytes: group.settings.maxToolGrepFileBytes,
           maxCommandOutputBytes: group.settings.maxToolOutputBytes,
           maxGitOutputBytes: group.settings.maxToolOutputBytes,
+          maxWorkspaceSnapshotEntries: group.settings.maxWorkspaceSnapshotEntries,
+          maxWorkspaceChanges: group.settings.maxWorkspaceChanges,
           managedToolRoots: runtimeDiscoveryOptions.managedToolRoots,
           signal: options.signal,
           previousResults: accumulatedToolResults

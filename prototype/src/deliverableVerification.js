@@ -240,16 +240,63 @@ function matchEvidence(evidence, resolved, stat) {
     const direct = inspectionPathMatch(item, resolved);
     if (direct) return { id: evidence.id, kind: evidence.kind, tool: evidence.tool, strength: "inspection", match: direct };
   }
-  if (MUTATING_TOOL_NAMES.has(evidence.tool) && modifiedDuringEvidenceWindow(stat, item)) {
+  const workspaceChangeMatch = exactWorkspaceChangeMatch(item.result?.workspaceChanges, resolved.relativePath);
+  if (MUTATING_TOOL_NAMES.has(evidence.tool) && workspaceChangeMatch) {
     return {
       id: evidence.id,
       kind: evidence.kind,
       tool: evidence.tool,
       strength: buildEvidence(item) ? "build" : "mutation",
-      match: "modified_during_successful_execution"
+      match: workspaceChangeMatch
+    };
+  }
+  if (buildEvidence(item) && exactObservedArtifactMatch(item, resolved.relativePath)) {
+    return {
+      id: evidence.id,
+      kind: evidence.kind,
+      tool: evidence.tool,
+      strength: "build",
+      match: "workspace_observed_after_successful_build"
+    };
+  }
+  if (MUTATING_TOOL_NAMES.has(evidence.tool)
+    && !hasWorkspaceChangeManifest(item.result)
+    && modifiedDuringEvidenceWindow(stat, item)) {
+    return {
+      id: evidence.id,
+      kind: evidence.kind,
+      tool: evidence.tool,
+      strength: buildEvidence(item) ? "build" : "mutation",
+      match: "legacy_modified_during_successful_execution"
     };
   }
   return null;
+}
+
+function exactWorkspaceChangeMatch(workspaceChanges, relativePath) {
+  if (!workspaceChanges || workspaceChanges.status !== "completed") return "";
+  const claimKey = normalizedPathKey(relativePath);
+  for (const change of [...(workspaceChanges.created || []), ...(workspaceChanges.modified || [])]) {
+    if (change?.reliable === false) continue;
+    if (normalizedPathKey(change?.path) !== claimKey) continue;
+    return `workspace_change_${change.change || "observed"}`;
+  }
+  return "";
+}
+
+function hasWorkspaceChangeManifest(result) {
+  return Boolean(result && Object.hasOwn(result, "workspaceChanges"));
+}
+
+function exactObservedArtifactMatch(item, relativePath) {
+  const workspaceChanges = item?.result?.workspaceChanges;
+  if (!workspaceChanges || workspaceChanges.status !== "completed") return false;
+  const claimKey = normalizedPathKey(relativePath);
+  const cwdKey = normalizedPathKey(item?.result?.cwd || item?.cwd || ".");
+  if (cwdKey && cwdKey !== "." && claimKey !== cwdKey && !claimKey.startsWith(`${cwdKey}/`)) return false;
+  return (workspaceChanges.observedArtifacts || []).some((item) => (
+    item?.reliable !== false && normalizedPathKey(item?.path) === claimKey
+  ));
 }
 
 function inspectionPathMatch(item, resolved) {

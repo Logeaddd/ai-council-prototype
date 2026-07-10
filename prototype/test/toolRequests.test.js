@@ -366,9 +366,45 @@ test("execute_command supports pipes redirection and background processes", asyn
 
   assert.equal(pipeResult.results[0].status, "completed");
   assert.match(fs.readFileSync(path.join(tmp, "piped.txt"), "utf8"), /PIPE_FACT/);
+  assert.equal(pipeResult.results[0].result.workspaceChanges.created.some((item) => item.path === "piped.txt"), true);
+  assert.equal(pipeResult.results[0].result.workspaceChanges.complete, true);
   assert.equal(backgroundResult.results[0].status, "completed");
   assert.equal(backgroundResult.results[0].result.background, true);
   assert.ok(backgroundResult.results[0].result.pid > 0);
+  assert.equal(backgroundResult.results[0].result.workspaceChanges.status, "not_observed_background");
+  assert.equal(backgroundResult.results[0].result.workspaceChanges.complete, false);
+});
+
+test("execute_command reports real net file changes without runtime or secret noise", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-command-changes-"));
+  fs.writeFileSync(path.join(tmp, "modify.txt"), "OLD", "utf8");
+  fs.writeFileSync(path.join(tmp, "delete.txt"), "DELETE", "utf8");
+  const script = [
+    "const fs=require('fs')",
+    "fs.writeFileSync('modify.txt','NEW-LONGER')",
+    "fs.rmSync('delete.txt')",
+    "fs.mkdirSync('dist',{recursive:true})",
+    "fs.writeFileSync('dist/app.zip','ARTIFACT')",
+    "fs.writeFileSync('.env.local','SECRET')",
+    "fs.mkdirSync('shared/logs',{recursive:true})",
+    "fs.writeFileSync('shared/logs/runtime.jsonl','LOG')"
+  ].join(";");
+  const result = await executeToolRequests({
+    permissionTier: "full",
+    groupPath: tmp,
+    agent: { id: "full", name: "Full" },
+    round: 1,
+    requests: [{ tool: "execute_command", command: nodeCommand(script), shell: shellForNodeCommand(), reason: "Change real files." }]
+  });
+  const changes = result.results[0].result.workspaceChanges;
+  const allPaths = [...changes.created, ...changes.modified, ...changes.deleted].map((item) => item.path);
+
+  assert.equal(result.results[0].status, "completed");
+  assert.equal(changes.created.some((item) => item.path === "dist/app.zip"), true);
+  assert.equal(changes.modified.some((item) => item.path === "modify.txt"), true);
+  assert.equal(changes.deleted.some((item) => item.path === "delete.txt"), true);
+  assert.equal(allPaths.includes(".env.local"), false);
+  assert.equal(allPaths.includes("shared/logs/runtime.jsonl"), false);
 });
 
 test("execute_command default shell supports common shell operators", async () => {

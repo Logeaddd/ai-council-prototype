@@ -50,6 +50,8 @@ export function validateGroupConfig(group) {
     contextArchiveInjectionLimit: 5,
     contextArchiveInjectionTokens: 900,
     recentMessageLimit: 6,
+    maxWorkspaceSnapshotEntries: 20000,
+    maxWorkspaceChanges: 1000,
     allowSoloCouncil: false,
     ...(group.settings ?? {})
   };
@@ -60,6 +62,8 @@ export function validateGroupConfig(group) {
   group.settings.contextArchiveInjectionTokens = clampInteger(group.settings.contextArchiveInjectionTokens, 120, 4000, 900);
   group.settings.recentMessageLimit = clampInteger(group.settings.recentMessageLimit, 0, 30, 6);
   group.settings.maxToolIterations = clampInteger(group.settings.maxToolIterations, 0, 24, 12);
+  group.settings.maxWorkspaceSnapshotEntries = clampInteger(group.settings.maxWorkspaceSnapshotEntries, 100, 100000, 20000);
+  group.settings.maxWorkspaceChanges = clampInteger(group.settings.maxWorkspaceChanges, 10, 5000, 1000);
 
   return group;
 }

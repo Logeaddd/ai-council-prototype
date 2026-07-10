@@ -302,6 +302,8 @@ async function executeOne(request, options) {
         timeoutMs: options.timeoutMs,
         commandTimeoutMs: options.commandTimeoutMs,
         maxCommandOutputBytes: options.maxCommandOutputBytes,
+        maxWorkspaceSnapshotEntries: options.maxWorkspaceSnapshotEntries,
+        maxWorkspaceChanges: options.maxWorkspaceChanges,
         managedToolRoots: options.managedToolRoots,
         signal: options.signal
       });
@@ -869,6 +871,7 @@ function summarizeToolResult(record = {}) {
     };
   }
   if (record.tool === "execute_command") {
+    const workspaceChanges = record.result?.workspaceChanges || {};
     return {
       command: record.command,
       cwd: record.result?.cwd || record.cwd || ".",
@@ -877,7 +880,21 @@ function summarizeToolResult(record = {}) {
       exitCode: record.result?.exitCode,
       timedOut: Boolean(record.result?.timedOut),
       stdoutBytes: record.result?.stdout?.length || 0,
-      stderrBytes: record.result?.stderr?.length || 0
+      stderrBytes: record.result?.stderr?.length || 0,
+      workspaceChanges: {
+        status: workspaceChanges.status || "unavailable",
+        complete: Boolean(workspaceChanges.complete),
+        created: workspaceChanges.created?.length || 0,
+        modified: workspaceChanges.modified?.length || 0,
+        deleted: workspaceChanges.deleted?.length || 0,
+        observedArtifacts: workspaceChanges.observedArtifacts?.length || 0,
+        observedArtifactsComplete: Boolean(workspaceChanges.observedArtifactsComplete),
+        observedArtifactsOmitted: workspaceChanges.observedArtifactsOmitted || 0,
+        total: workspaceChanges.totalChanges || 0,
+        omitted: workspaceChanges.omittedChanges || 0,
+        beforeScanMs: workspaceChanges.before?.durationMs || 0,
+        afterScanMs: workspaceChanges.after?.durationMs || 0
+      }
     };
   }
   if (record.tool === "run_code") {

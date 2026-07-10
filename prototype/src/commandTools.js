@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { isInsidePath, normalizeWorkspacePathAlias } from "./pathGuards.js";
 import { buildCommandEnvironment, displayPath } from "./runtimeEnvironment.js";
+import { backgroundWorkspaceChanges, captureWorkspaceSnapshot, diffWorkspaceSnapshots } from "./workspaceChanges.js";
 
 const DEFAULT_TIMEOUT_MS = 60 * 1000;
 const MIN_TIMEOUT_MS = 1000;
@@ -19,6 +20,10 @@ export async function executeCommandTool(request, options = {}) {
   const maxOutputBytes = clampNumber(request.maxOutputBytes || options.maxCommandOutputBytes, DEFAULT_MAX_OUTPUT_BYTES, 1024, MAX_OUTPUT_BYTES);
   const invocation = buildShellInvocation(command, shell);
   const runtime = buildCommandEnvironment(groupRoot, { managedToolRoots: options.managedToolRoots });
+  const workspaceSnapshotOptions = {
+    maxEntries: options.maxWorkspaceSnapshotEntries,
+    maxChanges: options.maxWorkspaceChanges
+  };
   const startedAtMs = Date.now();
 
   if (request.background) {
@@ -30,9 +35,12 @@ export async function executeCommandTool(request, options = {}) {
       shell,
       timeoutMs,
       runtime,
+      workspaceChanges: backgroundWorkspaceChanges(),
       startedAtMs
     });
   }
+
+  const workspaceSnapshotBefore = captureWorkspaceSnapshot(groupRoot, workspaceSnapshotOptions);
 
   return runForegroundCommand({
     invocation,
@@ -44,6 +52,8 @@ export async function executeCommandTool(request, options = {}) {
     maxOutputBytes,
     signal: options.signal,
     runtime,
+    workspaceSnapshotBefore,
+    workspaceSnapshotOptions,
     startedAtMs
   });
 }
@@ -80,7 +90,29 @@ function runForegroundCommand(options) {
       settled = true;
       clearTimeout(timeout);
       if (options.signal) options.signal.removeEventListener("abort", abort);
-      resolve(commandResult(options, payload));
+      const finishedAtMs = Date.now();
+      let workspaceChanges;
+      try {
+        workspaceChanges = diffWorkspaceSnapshots(
+          options.workspaceSnapshotBefore,
+          captureWorkspaceSnapshot(options.groupRoot, options.workspaceSnapshotOptions),
+          options.workspaceSnapshotOptions
+        );
+      } catch (error) {
+        workspaceChanges = {
+          source: "bounded_workspace_snapshot_diff",
+          status: "unavailable",
+          complete: false,
+          created: [],
+          modified: [],
+          deleted: [],
+          totalChanges: 0,
+          keptChanges: 0,
+          omittedChanges: 0,
+          reason: error.message || "Workspace change scan failed."
+        };
+      }
+      resolve(commandResult(options, { ...payload, finishedAtMs, workspaceChanges }));
     };
 
     child.stdout.on("data", (chunk) => stdout.add(chunk));
@@ -188,7 +220,7 @@ function commandResult(options, state) {
     exitCode: state.exitCode,
     signal: state.signal || "",
     timedOut: Boolean(state.timedOut),
-    durationMs: Date.now() - options.startedAtMs,
+    durationMs: Number(state.finishedAtMs || Date.now()) - options.startedAtMs,
     stdout: redactSecrets(stdout),
     stderr: redactSecrets(stderr),
     stdoutTruncated: Boolean(state.stdout?.truncated),
@@ -198,6 +230,7 @@ function commandResult(options, state) {
       pathAdditions: (options.runtime?.pathAdditions || []).map(displayPath),
       corrections: (options.runtime?.corrections || []).map(redactEmbeddedHomePath)
     },
+    workspaceChanges: state.workspaceChanges || options.workspaceChanges,
     code: state.code,
     error: [state.error || "", environmentHint].filter(Boolean).join(" ")
   };
