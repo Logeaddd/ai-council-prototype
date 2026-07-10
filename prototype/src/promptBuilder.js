@@ -205,7 +205,7 @@ function buildFinalUserContent(session, consensus, contextSections) {
 
 function summarizePendingFileOperationProposals(session) {
   const proposals = Array.isArray(session.pendingFileOperationProposals) ? session.pendingFileOperationProposals : [];
-  return proposals.map((proposal) => ({
+  return proposals.filter((proposal) => (proposal.status || "pending_user_approval") === "pending_user_approval").map((proposal) => ({
     id: proposal.id,
     op: proposal.op,
     path: proposal.path,

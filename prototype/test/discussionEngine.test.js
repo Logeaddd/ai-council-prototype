@@ -3471,6 +3471,118 @@ test("workspace round prompts gate file_operations by seat permission tier", asy
   }
 });
 
+test("full permission executes approved file operation proposals during the round", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-full-round-files-"));
+  const groupPath = path.join(tmp, "group");
+  fs.mkdirSync(path.join(groupPath, "sessions"), { recursive: true });
+  fs.writeFileSync(path.join(groupPath, "group.json"), JSON.stringify({
+    groupPath,
+    permissions: {
+      defaultTier: "full",
+      seatTiers: { runtime: "full" }
+    },
+    seats: [
+      {
+        seatId: "runtime",
+        displayName: "Runtime Agent",
+        currentModel: "runtime-model",
+        privateFolder: "members/RuntimeAgent",
+        role: "Executor"
+      }
+    ]
+  }, null, 2), "utf8");
+  execFileSync("git", ["init"], { cwd: groupPath, stdio: "pipe" });
+  execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: groupPath, stdio: "pipe" });
+  execFileSync("git", ["config", "user.name", "Test User"], { cwd: groupPath, stdio: "pipe" });
+  execFileSync("git", ["add", "--", "."], { cwd: groupPath, stdio: "pipe" });
+  execFileSync("git", ["commit", "-m", "test: initialize group"], { cwd: groupPath, stdio: "pipe" });
+  prepareExecutionStandards({
+    groupPath,
+    finalAnswer: "Create the requested file.",
+    recorderSeatId: "runtime"
+  });
+  approveExecutionStandards({ groupPath, approvedBy: "test" });
+  execFileSync("git", ["add", "--", "."], { cwd: groupPath, stdio: "pipe" });
+  execFileSync("git", ["commit", "-m", "test: approve standards"], { cwd: groupPath, stdio: "pipe" });
+
+  let callCount = 0;
+  const server = http.createServer(async (req, res) => {
+    for await (const _ of req) {
+      // Drain request body.
+    }
+    callCount += 1;
+    const payload = callCount === 1
+      ? {
+        status: "speak",
+        argument: "I wrote the file.",
+        file_operations: [
+          {
+            op: "write",
+            path: "src/output.js",
+            content: "export const ok = true;\n",
+            reason: "Create the requested module.",
+            expected_effect: "A module file exists."
+          }
+        ],
+        confidence: 0.8,
+        memory_candidates: []
+      }
+      : {
+        answer: "File created.",
+        consensus_score: 1,
+        supporting_agents: ["Runtime Agent"],
+        dissenting_agents: [],
+        minority_report: "None.",
+        risks: [],
+        next_actions: [],
+        selected_file_operation_ids: [],
+        memory_candidates: []
+      };
+    writeOpenAiStream(res, JSON.stringify(payload));
+  });
+  await listen(server);
+  const apiBaseUrl = `http://127.0.0.1:${server.address().port}/v1`;
+
+  try {
+    const group = validateGroupConfig({
+      id: "full-round-files",
+      name: "Full Round Files",
+      settings: {
+        maxRounds: 1,
+        minConsensusWeight: 0.75,
+        stopWhenAllSkip: true,
+        agentTimeoutMs: 1000,
+        allowSoloCouncil: true
+      },
+      agents: [
+        {
+          id: "runtime",
+          name: "Runtime Agent",
+          role: "Executor",
+          provider: "openai-compatible",
+          apiBaseUrl,
+          allowUnsafePrivateNetwork: true,
+          apiKey: "secret-runtime-key",
+          model: "runtime-model",
+          providerLimits: { contextWindow: 12000, maxOutputTokens: 1000 },
+          weight: 1,
+          enabled: true,
+          judge: true
+        }
+      ]
+    });
+
+    const { session } = await runCouncil("Create a file.", group, tmp, { groupPath });
+
+    assert.equal(fs.readFileSync(path.join(groupPath, "src", "output.js"), "utf8"), "export const ok = true;\n");
+    assert.equal(session.fileOperationExecutionResults.some((item) => item.status === "executed" && item.path === "src/output.js"), true);
+    assert.equal(session.messages[0].fileOperationExecutionResults.some((item) => item.status === "executed" && item.path === "src/output.js"), true);
+    assert.match(execFileSync("git", ["log", "--oneline", "-1"], { cwd: groupPath, encoding: "utf8" }), /files: apply write src\/output\.js/);
+  } finally {
+    await close(server);
+  }
+});
+
 test("ready final state auto-executes safe file proposals for full tier", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-auto-exec-runtime-"));
   const groupPath = path.join(tmp, "group");
@@ -3605,7 +3717,7 @@ test("ready final state auto-executes safe file proposals for full tier", async 
   }
 });
 
-test("final judge selection executes only selected file proposals", async () => {
+test("full permission executes approved round proposals before final selection", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-selected-file-runtime-"));
   const groupPath = path.join(tmp, "group");
   fs.mkdirSync(path.join(groupPath, "sessions"), { recursive: true });
@@ -3640,7 +3752,6 @@ test("final judge selection executes only selected file proposals", async () => 
   git(groupPath, ["commit", "-m", "test: approve standards"]);
 
   const requests = [];
-  let selectedProposalId = "";
   let callCount = 0;
   const server = http.createServer(async (req, res) => {
     const chunks = [];
@@ -3682,17 +3793,16 @@ test("final judge selection executes only selected file proposals", async () => 
 
     const finalPrompt = body.messages.at(-1).content;
     const finalInput = JSON.parse(finalPrompt);
-    const selectedProposal = finalInput.pendingFileOperationProposals.find((proposal) => proposal.path === "src/selected.js");
-    selectedProposalId = selectedProposal.id;
+    assert.deepEqual(finalInput.pendingFileOperationProposals, []);
     writeOpenAiStream(res, JSON.stringify({
-      answer: "Ready to execute the selected file operation only.",
+      answer: "The full-permission file operations already executed.",
       consensus_score: 1,
       supporting_agents: ["Runtime Agent"],
       dissenting_agents: [],
       minority_report: "None.",
       risks: [],
       next_actions: [],
-      selected_file_operation_ids: [selectedProposal.id],
+      selected_file_operation_ids: [],
       memory_candidates: []
     }));
   });
@@ -3736,10 +3846,10 @@ test("final judge selection executes only selected file proposals", async () => 
     assert.equal(session.fileOperationProposals.length, 2);
     assert.equal(session.pendingFileOperationProposals.length, 2);
     assert.equal(fs.existsSync(path.join(groupPath, "src", "selected.js")), true);
-    assert.equal(fs.existsSync(path.join(groupPath, "src", "rejected.js")), false);
-    assert.deepEqual(session.finalDecision.selected_file_operation_ids, [selectedProposalId]);
-    assert.equal(session.fileOperationExecutionResults.some((item) => item.status === "executed" && item.proposalId === selectedProposalId), true);
-    assert.equal(session.fileOperationExecutionResults.some((item) => item.status === "not_selected" && item.path === "src/rejected.js"), true);
+    assert.equal(fs.existsSync(path.join(groupPath, "src", "rejected.js")), true);
+    assert.deepEqual(session.finalDecision.selected_file_operation_ids, []);
+    assert.equal(session.pendingFileOperationProposals.every((proposal) => proposal.status === "executed"), true);
+    assert.equal(session.fileOperationExecutionResults.filter((item) => item.status === "executed").length, 2);
   } finally {
     await close(server);
   }

@@ -265,6 +265,12 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
       const queueResult = queueFileOperationProposals(fileOperationResult, options.groupPath);
       session.pendingFileOperationProposals.push(...queueResult.queued);
       session.rejectedFileOperationProposals.push(...queueResult.rejected);
+      const autoFileExecutionResults = executeRoundAutoFileOperations({
+        groupPath: options.groupPath,
+        session,
+        group: workspaceGroup || group,
+        permissionTier: fileOperationPermissionTier
+      });
 
       const message = {
         round,
@@ -273,7 +279,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
         response,
         artifacts,
         fileOperationProposals: fileOperationResult.accepted,
-        fileOperationExecutionResults: readListResults,
+        fileOperationExecutionResults: [...readListResults, ...autoFileExecutionResults],
         toolRequests: accumulatedToolRequests,
         toolExecutionResults: accumulatedToolResults,
         rejectedToolRequests: accumulatedRejectedToolRequests,
@@ -1075,6 +1081,46 @@ function queueFileOperationProposals(fileOperationResult, groupPath) {
     groupPath,
     accepted: fileOperationResult.accepted.filter((proposal) => proposal.op !== "read" && proposal.op !== "list"),
     rejected: fileOperationResult.rejected
+  });
+}
+
+function executeRoundAutoFileOperations(options = {}) {
+  if (!options.groupPath || options.permissionTier !== "full") return [];
+  const beforeCount = Array.isArray(options.session.fileOperationExecutionResults)
+    ? options.session.fileOperationExecutionResults.length
+    : 0;
+  const autoSession = {
+    finalDecision: { final_state: "ready_to_execute" },
+    fileOperationExecutionResults: options.session.fileOperationExecutionResults || []
+  };
+  const result = runAutoFileOperations({
+    groupPath: options.groupPath,
+    session: autoSession,
+    group: options.group
+  });
+  options.session.fileOperationExecutionResults = result.results || [];
+  syncPendingFileOperationStatuses(options.session, options.session.fileOperationExecutionResults);
+  return options.session.fileOperationExecutionResults.slice(beforeCount);
+}
+
+function syncPendingFileOperationStatuses(session, executionResults = []) {
+  if (!Array.isArray(session.pendingFileOperationProposals) || !session.pendingFileOperationProposals.length) return;
+  const byId = new Map(
+    executionResults
+      .filter((item) => item?.proposalId)
+      .map((item) => [item.proposalId, item])
+  );
+  session.pendingFileOperationProposals = session.pendingFileOperationProposals.map((proposal) => {
+    const result = byId.get(proposal.id);
+    if (!result) return proposal;
+    return {
+      ...proposal,
+      status: result.status || proposal.status,
+      autoExecutionStatus: result.status || proposal.autoExecutionStatus,
+      autoExecutionReason: result.reason || proposal.autoExecutionReason,
+      commitHash: result.commitHash || proposal.commitHash,
+      verification: result.verification || proposal.verification
+    };
   });
 }
 
