@@ -354,12 +354,13 @@ test("full tool prompt advertises full-only tools while tool tier does not", () 
   assert.match(full[0].content, /mcp_search_npm for real npm registry search/);
   assert.match(full[0].content, /mcp_install_npm for built-in or npm MCP servers/);
   assert.match(full[0].content, /mcp_uninstall for configured MCP servers/);
-  assert.match(full[0].content, /mcp_list_tools and mcp_call for configured external MCP tools/);
+  assert.match(full[0].content, /mcp_list_tools and mcp_call for configured MCP tools/);
   assert.match(full[0].content, /mcp_call can infer the server when the tool name is unique/);
   assert.match(full[0].content, /include serverId for ambiguous tool names/);
   assert.match(full[0].content, /For mcp_call include mcpToolName and arguments; include serverId only/);
-  assert.match(full[0].content, /mcp_list_resources and mcp_read_resource for configured external MCP resources/);
-  assert.match(full[0].content, /mcp_list_prompts and mcp_get_prompt for configured external MCP prompts/);
+  assert.match(full[0].content, /mcp_list_resources and mcp_read_resource for configured MCP resources/);
+  assert.match(full[0].content, /mcp_list_prompts and mcp_get_prompt for configured MCP prompts/);
+  assert.doesNotMatch(full[0].content, /external MCP/);
   assert.match(tool[0].content, /database_query for read-only SQLite SELECT queries/);
   assert.match(tool[0].content, /database_query write operations require full permission/);
   assert.match(tool[0].content, /extract_archive, execute_command, run_code, install_package, run_tests, git_operation, browser_control, mcp_search_npm, mcp_install_npm, mcp_uninstall, mcp_list_tools, mcp_call, mcp_list_resources, mcp_read_resource, mcp_list_prompts, and mcp_get_prompt require full permission/);

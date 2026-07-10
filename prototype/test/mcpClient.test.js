@@ -14,7 +14,7 @@ import {
 import { upsertMcpServerConfig } from "../src/mcpConfig.js";
 import { executeToolRequests } from "../src/toolRequests.js";
 
-test("external MCP client starts configured stdio servers and lists tools", async () => {
+test("configured MCP client starts configured stdio servers and lists tools", async () => {
   const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-mcp-client-list-"));
   const serverScript = writeFakeMcpServer(baseDir);
   upsertMcpServerConfig(baseDir, {
@@ -29,6 +29,7 @@ test("external MCP client starts configured stdio servers and lists tools", asyn
   const result = await listConfiguredMcpTools(baseDir, { serverId: "fake" });
 
   assert.equal(result.ok, true);
+  assert.equal(result.source, "configured_mcp_stdio");
   assert.equal(result.servers.length, 1);
   assert.equal(result.servers[0].ok, true);
   assert.deepEqual(result.servers[0].tools.map((tool) => tool.name), ["echo"]);
@@ -36,7 +37,7 @@ test("external MCP client starts configured stdio servers and lists tools", asyn
   assert.match(result.servers[0].stderr, /\[redacted\]/);
 });
 
-test("external MCP client calls configured tools and returns real content", async () => {
+test("configured MCP client calls configured tools and returns real content", async () => {
   const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-mcp-client-call-"));
   const serverScript = writeFakeMcpServer(baseDir);
   upsertMcpServerConfig(baseDir, {
@@ -54,12 +55,13 @@ test("external MCP client calls configured tools and returns real content", asyn
   });
 
   assert.equal(result.ok, true);
+  assert.equal(result.source, "configured_mcp_stdio");
   assert.equal(result.serverId, "fake-call");
   assert.equal(result.toolName, "echo");
   assert.match(result.content[0].text, /MCP_CALL_FACT/);
 });
 
-test("external MCP client infers the server when a tool name is unique", async () => {
+test("configured MCP client infers the server when a tool name is unique", async () => {
   const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-mcp-client-infer-"));
   const echoScript = writeFakeMcpServer(baseDir, { fileName: "fake-echo.mjs", toolName: "echo" });
   const searchScript = writeFakeMcpServer(baseDir, { fileName: "fake-search.mjs", toolName: "web_search" });
@@ -89,7 +91,7 @@ test("external MCP client infers the server when a tool name is unique", async (
   assert.match(result.content[0].text, /UNIQUE_MCP_TOOL_FACT/);
 });
 
-test("external MCP client reports ambiguous tool names instead of guessing", async () => {
+test("configured MCP client reports ambiguous tool names instead of guessing", async () => {
   const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-mcp-client-ambiguous-"));
   const firstScript = writeFakeMcpServer(baseDir, { fileName: "fake-first.mjs", toolName: "echo" });
   const secondScript = writeFakeMcpServer(baseDir, { fileName: "fake-second.mjs", toolName: "echo" });
@@ -118,7 +120,7 @@ test("external MCP client reports ambiguous tool names instead of guessing", asy
   assert.deepEqual(result.matchingServers.map((item) => item.id), ["fake-first", "fake-second"]);
 });
 
-test("external MCP client reports missing tool names across multiple servers", async () => {
+test("configured MCP client reports missing tool names across multiple servers", async () => {
   const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-mcp-client-not-found-"));
   const firstScript = writeFakeMcpServer(baseDir, { fileName: "fake-first.mjs", toolName: "echo" });
   const secondScript = writeFakeMcpServer(baseDir, { fileName: "fake-second.mjs", toolName: "web_search" });
@@ -146,7 +148,7 @@ test("external MCP client reports missing tool names across multiple servers", a
   assert.equal(result.toolName, "missing_tool");
 });
 
-test("external MCP client infers the server for unique resource URIs", async () => {
+test("configured MCP client infers the server for unique resource URIs", async () => {
   const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-mcp-client-resource-infer-"));
   const firstScript = writeFakeMcpServer(baseDir, { fileName: "fake-first.mjs", resourceUri: "memo://alpha" });
   const secondScript = writeFakeMcpServer(baseDir, { fileName: "fake-second.mjs", resourceUri: "memo://beta" });
@@ -175,7 +177,7 @@ test("external MCP client infers the server for unique resource URIs", async () 
   assert.match(result.contents[0].text, /MCP_RESOURCE_FACT/);
 });
 
-test("external MCP client reports ambiguous resources instead of guessing", async () => {
+test("configured MCP client reports ambiguous resources instead of guessing", async () => {
   const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-mcp-client-resource-ambiguous-"));
   const firstScript = writeFakeMcpServer(baseDir, { fileName: "fake-first.mjs", resourceUri: "memo://same" });
   const secondScript = writeFakeMcpServer(baseDir, { fileName: "fake-second.mjs", resourceUri: "memo://same" });
@@ -203,7 +205,7 @@ test("external MCP client reports ambiguous resources instead of guessing", asyn
   assert.deepEqual(result.matchingServers.map((item) => item.id), ["fake-first", "fake-second"]);
 });
 
-test("external MCP client infers the server for unique prompt names", async () => {
+test("configured MCP client infers the server for unique prompt names", async () => {
   const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-mcp-client-prompt-infer-"));
   const firstScript = writeFakeMcpServer(baseDir, { fileName: "fake-first.mjs", promptName: "brief" });
   const secondScript = writeFakeMcpServer(baseDir, { fileName: "fake-second.mjs", promptName: "review" });
@@ -233,7 +235,7 @@ test("external MCP client infers the server for unique prompt names", async () =
   assert.match(result.messages[0].content.text, /PROMPT_INFER_FACT/);
 });
 
-test("external MCP client lists and reads configured resources", async () => {
+test("configured MCP client lists and reads configured resources", async () => {
   const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-mcp-client-resources-"));
   const serverScript = writeFakeMcpServer(baseDir);
   upsertMcpServerConfig(baseDir, {
@@ -257,7 +259,7 @@ test("external MCP client lists and reads configured resources", async () => {
   assert.match(read.contents[0].text, /MCP_RESOURCE_FACT/);
 });
 
-test("external MCP client lists and gets configured prompts", async () => {
+test("configured MCP client lists and gets configured prompts", async () => {
   const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-mcp-client-prompts-"));
   const serverScript = writeFakeMcpServer(baseDir);
   upsertMcpServerConfig(baseDir, {
@@ -282,7 +284,7 @@ test("external MCP client lists and gets configured prompts", async () => {
   assert.match(prompt.messages[0].content.text, /MCP_PROMPT_FACT/);
 });
 
-test("external MCP client reports missing and disabled servers honestly", async () => {
+test("configured MCP client reports missing and disabled servers honestly", async () => {
   const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-mcp-client-missing-"));
   upsertMcpServerConfig(baseDir, {
     id: "disabled",
@@ -300,9 +302,13 @@ test("external MCP client reports missing and disabled servers honestly", async 
   });
 
   assert.equal(listed.ok, false);
+  assert.equal(listed.source, "configured_mcp_stdio");
   assert.equal(listed.code, "mcp_server_not_configured");
+  assert.doesNotMatch(listed.error, /external MCP/);
   assert.equal(called.ok, false);
+  assert.equal(called.source, "configured_mcp_stdio");
   assert.equal(called.code, "mcp_server_not_configured");
+  assert.doesNotMatch(called.error, /external MCP/);
 });
 
 test("mcp_call tool requires full permission and writes an audit log", async () => {

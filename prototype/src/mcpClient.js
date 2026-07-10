@@ -19,9 +19,9 @@ export async function listConfiguredMcpTools(baseDir, request = {}, options = {}
   const ok = servers.some((item) => item.ok);
   return {
     ok,
-    source: "external_mcp_stdio",
+    source: "configured_mcp_stdio",
     code: ok ? undefined : "mcp_list_tools_failed",
-    error: ok ? "" : "No configured external MCP server returned a tool list.",
+    error: ok ? "" : "No configured MCP server returned a tool list.",
     servers
   };
 }
@@ -31,7 +31,7 @@ export async function callConfiguredMcpTool(baseDir, request = {}, options = {})
   if (!toolName) {
     return {
       ok: false,
-      source: "external_mcp_stdio",
+      source: "configured_mcp_stdio",
       code: "missing_mcp_tool_name",
       error: "mcp_call requires mcpToolName."
     };
@@ -55,9 +55,9 @@ export async function listConfiguredMcpResources(baseDir, request = {}, options 
   const ok = servers.some((item) => item.ok);
   return {
     ok,
-    source: "external_mcp_stdio",
+    source: "configured_mcp_stdio",
     code: ok ? undefined : "mcp_list_resources_failed",
-    error: ok ? "" : "No configured external MCP server returned a resource list.",
+    error: ok ? "" : "No configured MCP server returned a resource list.",
     servers
   };
 }
@@ -67,7 +67,7 @@ export async function readConfiguredMcpResource(baseDir, request = {}, options =
   if (!uri) {
     return {
       ok: false,
-      source: "external_mcp_stdio",
+      source: "configured_mcp_stdio",
       code: "missing_mcp_resource_uri",
       error: "mcp_read_resource requires uri."
     };
@@ -90,9 +90,9 @@ export async function listConfiguredMcpPrompts(baseDir, request = {}, options = 
   const ok = servers.some((item) => item.ok);
   return {
     ok,
-    source: "external_mcp_stdio",
+    source: "configured_mcp_stdio",
     code: ok ? undefined : "mcp_list_prompts_failed",
-    error: ok ? "" : "No configured external MCP server returned a prompt list.",
+    error: ok ? "" : "No configured MCP server returned a prompt list.",
     servers
   };
 }
@@ -102,7 +102,7 @@ export async function getConfiguredMcpPrompt(baseDir, request = {}, options = {}
   if (!promptName) {
     return {
       ok: false,
-      source: "external_mcp_stdio",
+      source: "configured_mcp_stdio",
       code: "missing_mcp_prompt_name",
       error: "mcp_get_prompt requires promptName."
     };
@@ -121,7 +121,7 @@ async function listOneServerTools(baseDir, server, options) {
       const listed = await client.request("tools/list", {});
       return {
         ok: true,
-        source: "external_mcp_stdio",
+        source: "configured_mcp_stdio",
         serverId: server.id,
         serverName: server.name,
         tools: Array.isArray(listed?.tools) ? listed.tools : []
@@ -141,7 +141,7 @@ async function callOneServerTool(baseDir, server, request, options) {
       });
       return {
         ok: !toolResult?.isError,
-        source: "external_mcp_stdio",
+        source: "configured_mcp_stdio",
         serverId: server.id,
         serverName: server.name,
         toolName: request.toolName,
@@ -161,7 +161,7 @@ async function listOneServerResources(baseDir, server, request, options) {
       const listed = await client.request("resources/list", cursorParams(request.cursor));
       return {
         ok: true,
-        source: "external_mcp_stdio",
+        source: "configured_mcp_stdio",
         serverId: server.id,
         serverName: server.name,
         resources: Array.isArray(listed?.resources) ? listed.resources : [],
@@ -181,7 +181,7 @@ async function readOneServerResource(baseDir, server, request, options) {
       });
       return {
         ok: true,
-        source: "external_mcp_stdio",
+        source: "configured_mcp_stdio",
         serverId: server.id,
         serverName: server.name,
         uri: request.uri,
@@ -200,7 +200,7 @@ async function listOneServerPrompts(baseDir, server, request, options) {
       const listed = await client.request("prompts/list", cursorParams(request.cursor));
       return {
         ok: true,
-        source: "external_mcp_stdio",
+        source: "configured_mcp_stdio",
         serverId: server.id,
         serverName: server.name,
         prompts: Array.isArray(listed?.prompts) ? listed.prompts : [],
@@ -221,7 +221,7 @@ async function getOneServerPrompt(baseDir, server, request, options) {
       });
       return {
         ok: true,
-        source: "external_mcp_stdio",
+        source: "configured_mcp_stdio",
         serverId: server.id,
         serverName: server.name,
         promptName: request.promptName,
@@ -238,7 +238,7 @@ async function getOneServerPrompt(baseDir, server, request, options) {
 function mcpFailure(server, error, extra = {}) {
   return {
     ok: false,
-    source: "external_mcp_stdio",
+    source: "configured_mcp_stdio",
     serverId: server.id,
     serverName: server.name,
     code: error.code || "mcp_client_error",
@@ -287,7 +287,7 @@ function runMcpSession(baseDir, server, operation, options = {}) {
     const fail = (code, message, extra = {}) => {
       finish({
         ok: false,
-        source: "external_mcp_stdio",
+        source: "configured_mcp_stdio",
         serverId: server.id,
         serverName: server.name,
         code,
@@ -380,9 +380,9 @@ function selectMcpServer(baseDir, id) {
   if (!servers.length) {
     return {
       ok: false,
-      source: "external_mcp_stdio",
+      source: "configured_mcp_stdio",
       code: "mcp_server_not_configured",
-      error: "No enabled external MCP server is configured."
+      error: "No enabled MCP server is configured."
     };
   }
   const target = String(id || "").trim();
@@ -390,18 +390,18 @@ function selectMcpServer(baseDir, id) {
   if (!target) {
     return {
       ok: false,
-      source: "external_mcp_stdio",
+      source: "configured_mcp_stdio",
       code: "missing_mcp_server_id",
-      error: "mcp_call requires serverId when more than one external MCP server is enabled."
+      error: "mcp_call requires serverId when more than one configured MCP server is enabled."
     };
   }
   const server = servers.find((item) => item.id === target || item.name === target);
   if (!server) {
     return {
       ok: false,
-      source: "external_mcp_stdio",
+      source: "configured_mcp_stdio",
       code: "mcp_server_not_found",
-      error: `No enabled external MCP server matches ${target}.`
+      error: `No enabled MCP server matches ${target}.`
     };
   }
   return { ok: true, server };
@@ -454,9 +454,9 @@ async function selectMcpServerForListedItem(baseDir, id, value, options, config)
   if (!servers.length) {
     return {
       ok: false,
-      source: "external_mcp_stdio",
+      source: "configured_mcp_stdio",
       code: "mcp_server_not_configured",
-      error: "No enabled external MCP server is configured."
+      error: "No enabled MCP server is configured."
     };
   }
   if (servers.length === 1) return { ok: true, server: servers[0] };
@@ -473,7 +473,7 @@ async function selectMcpServerForListedItem(baseDir, id, value, options, config)
   if (failed.length) {
     return {
       ok: false,
-      source: "external_mcp_stdio",
+      source: "configured_mcp_stdio",
       code: config.lookupFailedCode,
       error: `Could not inspect ${config.valueLabel}s for ${failed.length} enabled MCP server(s); provide serverId.`,
       [config.valueKey]: value,
@@ -488,16 +488,16 @@ async function selectMcpServerForListedItem(baseDir, id, value, options, config)
   if (!matches.length) {
     return {
       ok: false,
-      source: "external_mcp_stdio",
+      source: "configured_mcp_stdio",
       code: config.notFoundCode,
-      error: `No enabled external MCP server exposes ${config.valueLabel} ${value}.`,
+      error: `No enabled MCP server exposes ${config.valueLabel} ${value}.`,
       [config.valueKey]: value,
       servers: inspected.map((item) => item.result)
     };
   }
   return {
     ok: false,
-    source: "external_mcp_stdio",
+    source: "configured_mcp_stdio",
     code: config.ambiguousCode,
     error: `More than one enabled MCP server exposes ${config.valueLabel} ${value}; provide serverId.`,
     [config.valueKey]: value,
@@ -512,9 +512,9 @@ function selectMcpServers(baseDir, id) {
   if (!servers.length) {
     return {
       ok: false,
-      source: "external_mcp_stdio",
+      source: "configured_mcp_stdio",
       code: "mcp_server_not_configured",
-      error: "No enabled external MCP server is configured.",
+      error: "No enabled MCP server is configured.",
       servers: []
     };
   }
@@ -523,9 +523,9 @@ function selectMcpServers(baseDir, id) {
   if (!server) {
     return {
       ok: false,
-      source: "external_mcp_stdio",
+      source: "configured_mcp_stdio",
       code: "mcp_server_not_found",
-      error: `No enabled external MCP server matches ${target}.`,
+      error: `No enabled MCP server matches ${target}.`,
       servers: []
     };
   }
