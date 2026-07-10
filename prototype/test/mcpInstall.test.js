@@ -84,6 +84,26 @@ test("MCP catalog separates package files from joined server config", async () =
   assert.equal(packageOnly.runtimeStatus, "package_only");
 });
 
+test("MCP catalog reports configured npm servers with missing package files", async () => {
+  const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-mcp-catalog-files-missing-"));
+  const packageDir = writeFakeMcpPackage(baseDir);
+
+  const installed = await installMcpNpmServer(baseDir, {
+    id: "filesystem",
+    packageSpec: packageDir,
+    installedPackageName: "fake-mcp-package",
+    binName: "fake-mcp"
+  });
+  fs.rmSync(path.join(mcpInstallRoot(baseDir), "filesystem"), { recursive: true, force: true });
+  const filesMissing = listMcpInstallCatalog(baseDir).catalog.find((item) => item.id === "filesystem");
+
+  assert.equal(installed.ok, true);
+  assert.equal(filesMissing.packageInstalled, false);
+  assert.equal(filesMissing.serverConfigured, true);
+  assert.equal(filesMissing.installed, false);
+  assert.equal(filesMissing.runtimeStatus, "files_missing");
+});
+
 test("MCP npm search reads real registry payloads without fake installed state", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (url) => {

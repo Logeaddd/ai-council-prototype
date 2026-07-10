@@ -277,7 +277,9 @@ test("settings page is category-first and avoids explanatory filler text", () =>
   assert.match(settings, /installMcpPackage/);
   assert.match(settings, /uninstallMcpServer/);
   assert.match(settings, /mcpCatalogDisplay/);
+  assert.match(settings, /runtimeStatus === "files_missing"/);
   assert.match(settings, /runtimeStatus === "package_only"/);
+  assert.match(settings, /文件缺失/);
   assert.match(settings, /item\.packageInstalled && !item\.serverConfigured/);
   assert.match(settings, /item\.serverConfigured && item\.serverEnabled === false/);
   assert.match(live, /\/api\/capabilities/);
