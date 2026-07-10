@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { isInsidePath } from "./pathGuards.js";
+import { isInsidePath, normalizeWorkspacePathAlias } from "./pathGuards.js";
 
 const DEFAULT_MAX_READ_BYTES = 64 * 1024;
 const DEFAULT_MAX_LIST_ENTRIES = 120;
@@ -239,8 +239,9 @@ function* walkFiles(basePath, root, options = {}) {
 }
 
 function resolveTarget(inputPath, roots, options = {}) {
-  const raw = requiredText(inputPath, "path");
-  const rootIndexes = candidateRootIndexes(roots, options.rootHint);
+  const alias = normalizeWorkspacePathAlias(requiredText(inputPath, "path"));
+  const raw = alias.path;
+  const rootIndexes = alias.aliased ? [0] : candidateRootIndexes(roots, options.rootHint);
   const candidates = [];
 
   if (path.isAbsolute(raw)) {

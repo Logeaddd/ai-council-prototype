@@ -489,8 +489,8 @@ function applyRoundResponseRules(response, agent, round) {
 
 function normalizeMaxToolIterations(value) {
   const number = Number.parseInt(String(value), 10);
-  if (!Number.isFinite(number)) return 4;
-  return Math.min(8, Math.max(0, number));
+  if (!Number.isFinite(number)) return 12;
+  return Math.min(24, Math.max(0, number));
 }
 
 function notifyModelCall(options = {}, record = {}) {

@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { isInsidePath } from "./pathGuards.js";
+import { isInsidePath, normalizeWorkspacePathAlias } from "./pathGuards.js";
 
 const DEFAULT_TIMEOUT_MS = 60 * 1000;
 const MIN_TIMEOUT_MS = 1000;
@@ -227,8 +227,9 @@ function resolveGroupRoot(groupPath) {
 }
 
 function resolveCommandCwd(groupRoot, input) {
-  const raw = String(input || ".").trim() || ".";
-  const candidate = path.isAbsolute(raw) ? path.resolve(raw) : path.resolve(groupRoot, raw);
+  const alias = normalizeWorkspacePathAlias(input || ".");
+  const raw = alias.path || ".";
+  const candidate = !alias.aliased && path.isAbsolute(raw) ? path.resolve(raw) : path.resolve(groupRoot, raw);
   const real = fs.existsSync(candidate) ? fs.realpathSync.native(candidate) : candidate;
   if (!isInsidePath(groupRoot, real)) {
     throw toolError("path_escape_denied", "Command cwd must stay inside the group workspace.");

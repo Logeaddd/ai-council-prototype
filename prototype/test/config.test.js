@@ -69,7 +69,8 @@ test("normalizes context budget settings with safe defaults and clamps", () => {
       contextSearchLimit: 200,
       contextArchiveInjectionLimit: 99,
       contextArchiveInjectionTokens: 999999,
-      recentMessageLimit: -10
+      recentMessageLimit: -10,
+      maxToolIterations: 99
     }
   });
 
@@ -77,6 +78,7 @@ test("normalizes context budget settings with safe defaults and clamps", () => {
   assert.equal(group.settings.contextArchiveInjectionLimit, 12);
   assert.equal(group.settings.contextArchiveInjectionTokens, 4000);
   assert.equal(group.settings.recentMessageLimit, 0);
+  assert.equal(group.settings.maxToolIterations, 24);
 });
 
 test("context budget settings get defaults when absent", () => {
@@ -97,6 +99,7 @@ test("context budget settings get defaults when absent", () => {
   assert.equal(group.settings.contextArchiveInjectionLimit, 5);
   assert.equal(group.settings.contextArchiveInjectionTokens, 900);
   assert.equal(group.settings.recentMessageLimit, 6);
+  assert.equal(group.settings.maxToolIterations, 12);
 });
 
 test("reports missing env vars before real API runs", () => {

@@ -1,13 +1,14 @@
 import fs from "node:fs";
 import path from "node:path";
 import { executeCommandTool } from "./commandTools.js";
+import { isInsidePath, normalizeWorkspacePathAlias } from "./pathGuards.js";
 
 const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
 
 export async function installPackageTool(request, options = {}) {
   const groupRoot = resolveGroupRoot(options.groupPath);
   const manager = normalizeManager(request.manager || request.packageManager || request.ecosystem);
-  const packageName = requiredPackage(request.packageName || request.package || request.name || request.query);
+  const packageName = normalizePackageSpec(requiredPackage(request.packageName || request.package || request.name || request.query), groupRoot);
   const envRoot = prepareEnvironment(groupRoot, manager);
   const command = installCommand(manager, packageName);
   const result = await executeCommandTool({
@@ -125,6 +126,14 @@ function requiredPackage(value) {
   const text = String(value || "").trim();
   if (!text) throw toolError("missing_package", "install_package requires a package name or spec.");
   return text;
+}
+
+function normalizePackageSpec(value, groupRoot) {
+  const alias = normalizeWorkspacePathAlias(value);
+  if (!alias.aliased) return value;
+  const candidate = path.resolve(groupRoot, alias.path);
+  if (!isInsidePath(groupRoot, candidate)) throw toolError("path_escape_denied", "Package path must stay inside the group workspace.");
+  return candidate;
 }
 
 function quoteShell(value) {

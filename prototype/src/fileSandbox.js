@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { isInsidePath } from "./pathGuards.js";
+import { isInsidePath, normalizeWorkspacePathAlias } from "./pathGuards.js";
 
 const FORBIDDEN_SEGMENTS = new Set([".git", "node_modules"]);
 const FORBIDDEN_BASENAMES = new Set([".env", "credentials", "credentials.json", "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"]);
@@ -37,8 +37,9 @@ function resolveRelativeCandidate(rootRealPath, relativePath) {
   if (typeof relativePath !== "string" || !relativePath.trim()) {
     throw sandboxError("missing_path", "Missing file operation path", 400);
   }
-  const raw = relativePath.trim();
-  if (path.isAbsolute(raw)) {
+  const alias = normalizeWorkspacePathAlias(relativePath);
+  const raw = alias.path;
+  if (!alias.aliased && path.isAbsolute(raw)) {
     throw sandboxError("absolute_path_denied", "File operation paths must be relative to the group root", 403);
   }
   const candidate = path.resolve(rootRealPath, raw);

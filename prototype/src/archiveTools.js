@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import zlib from "node:zlib";
-import { isInsidePath } from "./pathGuards.js";
+import { isInsidePath, normalizeWorkspacePathAlias } from "./pathGuards.js";
 
 const DEFAULT_MAX_ENTRIES = 200;
 const DEFAULT_MAX_FILE_BYTES = 5 * 1024 * 1024;
@@ -219,8 +219,9 @@ function defaultDestination(relativePath) {
 function requireRelativePath(value, label) {
   const text = String(value || "").trim();
   if (!text) throw toolError(`missing_${label.replace(/\s+/g, "_")}`, `Missing ${label}.`);
-  if (path.isAbsolute(text)) throw toolError("absolute_path_denied", `${label} must be relative to the group workspace.`);
-  return text;
+  const alias = normalizeWorkspacePathAlias(text);
+  if (!alias.aliased && path.isAbsolute(alias.path)) throw toolError("absolute_path_denied", `${label} must be relative to the group workspace.`);
+  return alias.path;
 }
 
 function normalizeRelative(root, candidate) {

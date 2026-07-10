@@ -1,5 +1,7 @@
 import path from "node:path";
 
+const WORKSPACE_PATH_ALIASES = new Set(["workspace", "group"]);
+
 export function isInsidePath(root, candidate) {
   const relative = path.relative(path.resolve(root), path.resolve(candidate));
   return relative === "" || (!!relative && !relative.startsWith("..") && !path.isAbsolute(relative));
@@ -15,6 +17,27 @@ export function resolveInside(root, input, options = {}) {
     throw error;
   }
   return resolved;
+}
+
+export function normalizeWorkspacePathAlias(input, options = {}) {
+  const raw = requirePath(input, options.name || "path");
+  const normalized = raw.replaceAll("\\", "/");
+  if (normalized.startsWith("//")) return { path: raw, aliased: false };
+
+  const candidate = normalized.startsWith("/") ? normalized.replace(/^\/+/, "") : normalized;
+  const firstSlash = candidate.indexOf("/");
+  const firstSegment = (firstSlash === -1 ? candidate : candidate.slice(0, firstSlash)).toLowerCase();
+  if (!WORKSPACE_PATH_ALIASES.has(firstSegment)) return { path: raw, aliased: false };
+  if (candidate.length > firstSegment.length && candidate[firstSegment.length] !== "/") {
+    return { path: raw, aliased: false };
+  }
+
+  const rest = candidate.slice(firstSegment.length).replace(/^\/+/, "");
+  return {
+    path: rest || ".",
+    aliased: true,
+    alias: firstSegment
+  };
 }
 
 function requirePath(value, name) {

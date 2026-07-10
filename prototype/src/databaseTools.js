@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { isInsidePath } from "./pathGuards.js";
+import { isInsidePath, normalizeWorkspacePathAlias } from "./pathGuards.js";
 
 const DEFAULT_MAX_ROWS = 100;
 const MAX_ROWS = 1000;
@@ -107,8 +107,9 @@ function normalizeParams(value) {
 }
 
 function resolveDatabasePath(groupRoot, input) {
-  const raw = requiredText(input, "path");
-  const candidate = path.isAbsolute(raw) ? path.resolve(raw) : path.resolve(groupRoot, raw);
+  const alias = normalizeWorkspacePathAlias(requiredText(input, "path"));
+  const raw = alias.path;
+  const candidate = !alias.aliased && path.isAbsolute(raw) ? path.resolve(raw) : path.resolve(groupRoot, raw);
   const parent = fs.existsSync(candidate) ? fs.realpathSync.native(candidate) : path.dirname(candidate);
   const realParent = fs.existsSync(parent) ? fs.realpathSync.native(parent) : parent;
   const resolved = fs.existsSync(candidate) ? fs.realpathSync.native(candidate) : path.join(realParent, path.basename(candidate));

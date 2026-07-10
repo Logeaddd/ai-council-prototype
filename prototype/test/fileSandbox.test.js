@@ -15,10 +15,21 @@ test("file sandbox accepts relative paths inside group root", () => {
   assert.ok(resolved.path.startsWith(fs.realpathSync.native(groupRoot)));
 });
 
+test("file sandbox accepts workspace path aliases inside group root", () => {
+  const groupRoot = makeGroupRoot();
+  fs.mkdirSync(path.join(groupRoot, "src"), { recursive: true });
+
+  const resolved = validateFileOperationPath(groupRoot, "/workspace/src/output.txt");
+
+  assert.equal(resolved.relativePath, "src/output.txt");
+  assert.ok(resolved.path.startsWith(fs.realpathSync.native(groupRoot)));
+});
+
 test("file sandbox rejects absolute paths and parent traversal", () => {
   const groupRoot = makeGroupRoot();
   assert.throws(() => validateFileOperationPath(groupRoot, path.join(groupRoot, "ok.txt")), /relative/);
   assert.throws(() => validateFileOperationPath(groupRoot, "../escape.txt"), /stay inside/);
+  assert.throws(() => validateFileOperationPath(groupRoot, "/workspace/../escape.txt"), /stay inside/);
 });
 
 test("file sandbox rejects forbidden secret files", () => {

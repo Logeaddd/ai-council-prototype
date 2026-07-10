@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { isInsidePath } from "./pathGuards.js";
+import { isInsidePath, normalizeWorkspacePathAlias } from "./pathGuards.js";
 
 const DEFAULT_TIMEOUT_MS = 60 * 1000;
 const MIN_TIMEOUT_MS = 1000;
@@ -75,7 +75,7 @@ async function singleGitOperation(context, args, extra = {}) {
 
 async function commitOperation(context, request) {
   const message = requiredText(request.message || request.reason, "message");
-  const paths = normalizePaths(request.paths || request.path);
+  const paths = normalizePaths(request.paths || request.path, context);
   const addArgs = paths.length ? ["add", "--", ...paths] : ["add", "-A"];
   const add = await runGit(context, addArgs);
   if (!add.ok) return gitResult(context, { ok: false, code: add.code, error: add.error, stdout: add.stdout, stderr: add.stderr });
@@ -292,10 +292,20 @@ function parseStatusBranch(output) {
   return text.split(/[.\s]/)[0] || "";
 }
 
-function normalizePaths(value) {
-  if (Array.isArray(value)) return value.map((item) => String(item || "").trim()).filter(Boolean);
+function normalizePaths(value, context) {
+  if (Array.isArray(value)) return value.map((item) => normalizeGitPath(item, context)).filter(Boolean);
+  const normalized = normalizeGitPath(value, context);
+  return normalized ? [normalized] : [];
+}
+
+function normalizeGitPath(value, context) {
   const text = String(value || "").trim();
-  return text ? [text] : [];
+  if (!text) return "";
+  const alias = normalizeWorkspacePathAlias(text);
+  if (!alias.aliased) return text;
+  const absolute = path.resolve(context.groupRoot, alias.path);
+  if (!isInsidePath(context.groupRoot, absolute)) throw toolError("path_escape_denied", "Git path must stay inside the group workspace.");
+  return path.relative(context.cwd, absolute).replaceAll("\\", "/") || ".";
 }
 
 function resolveGroupRoot(groupPath) {
@@ -307,8 +317,9 @@ function resolveGroupRoot(groupPath) {
 }
 
 function resolveGitCwd(groupRoot, input) {
-  const raw = String(input || ".").trim() || ".";
-  const candidate = path.isAbsolute(raw) ? path.resolve(raw) : path.resolve(groupRoot, raw);
+  const alias = normalizeWorkspacePathAlias(input || ".");
+  const raw = alias.path || ".";
+  const candidate = !alias.aliased && path.isAbsolute(raw) ? path.resolve(raw) : path.resolve(groupRoot, raw);
   const real = fs.existsSync(candidate) ? fs.realpathSync.native(candidate) : candidate;
   if (!isInsidePath(groupRoot, real)) throw toolError("path_escape_denied", "Git cwd must stay inside the group workspace.");
   if (!fs.existsSync(real)) throw toolError("cwd_not_found", "Git cwd does not exist.");

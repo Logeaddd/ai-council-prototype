@@ -40,6 +40,72 @@ test("controlled file tool requests list, read, search, and grep real workspace 
   assert.equal(fs.existsSync(path.join(tmp, "shared", "logs", "tools.jsonl")), true);
 });
 
+test("workspace path aliases work across local agent tools", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-workspace-alias-"));
+  fs.mkdirSync(path.join(tmp, "docs"), { recursive: true });
+  fs.writeFileSync(path.join(tmp, "docs", "notes.md"), "WORKSPACE_ALIAS_FACT\n", "utf8");
+  fs.writeFileSync(path.join(tmp, "sample.zip"), makeZip([
+    { name: "unzipped.txt", content: "ALIAS_ZIP_FACT" }
+  ]));
+  initGitRepo(tmp);
+
+  const localPackage = path.join(tmp, "local-package");
+  fs.mkdirSync(localPackage, { recursive: true });
+  fs.writeFileSync(path.join(localPackage, "package.json"), JSON.stringify({
+    name: "workspace-alias-local-package",
+    version: "1.0.0"
+  }), "utf8");
+  fs.writeFileSync(path.join(localPackage, "index.js"), "module.exports = true;\n", "utf8");
+
+  const result = await executeToolRequests({
+    permissionTier: "full",
+    groupPath: tmp,
+    agent: { id: "full", name: "Full" },
+    round: 1,
+    requests: [
+      { tool: "list_directory", path: "/workspace", reason: "List workspace root." },
+      { tool: "read_file", path: "/workspace/docs/notes.md", reason: "Read aliased file." },
+      { tool: "execute_command", cwd: "/workspace", command: nodeCommand("console.log('ALIAS_COMMAND_FACT')"), shell: shellForNodeCommand(), reason: "Run command in aliased cwd." },
+      { tool: "run_tests", cwd: "workspace", runner: "custom", command: nodeCommand("console.log('ALIAS_TEST_FACT')"), reason: "Run tests in aliased cwd." },
+      { tool: "extract_archive", path: "/workspace/sample.zip", destination: "/workspace/out", reason: "Extract aliased archive." },
+      { tool: "database_query", path: "/workspace/data/app.sqlite", create: true, mode: "execute", sql: "CREATE TABLE facts(body TEXT); INSERT INTO facts(body) VALUES ('ALIAS_DB_FACT');", reason: "Create aliased database." },
+      { tool: "install_package", manager: "npm", packageName: "/workspace/local-package", reason: "Install aliased local package." },
+      { tool: "git_operation", cwd: "/workspace", action: "status", reason: "Check git status from aliased cwd." }
+    ]
+  });
+
+  assert.equal(result.rejected.length, 0);
+  assert.equal(result.results.every((item) => item.status === "completed"), true);
+  assert.equal(result.results[0].result.path, ".");
+  assert.match(result.results[1].result.content, /WORKSPACE_ALIAS_FACT/);
+  assert.match(result.results[2].result.stdout, /ALIAS_COMMAND_FACT/);
+  assert.match(result.results[3].result.stdout, /ALIAS_TEST_FACT/);
+  assert.equal(fs.readFileSync(path.join(tmp, "out", "unzipped.txt"), "utf8"), "ALIAS_ZIP_FACT");
+  assert.equal(fs.existsSync(path.join(tmp, "data", "app.sqlite")), true);
+  assert.equal(fs.existsSync(path.join(tmp, "shared", "environments", "npm", "node_modules", "workspace-alias-local-package", "package.json")), true);
+  assert.equal(result.results[7].result.cwd, ".");
+});
+
+test("workspace path aliases cannot escape the workspace", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-workspace-alias-guard-"));
+  const result = await executeToolRequests({
+    permissionTier: "full",
+    groupPath: tmp,
+    agent: { id: "full", name: "Full" },
+    round: 1,
+    requests: [
+      { tool: "list_directory", path: "/workspace/../outside", reason: "Try file escape." },
+      { tool: "execute_command", cwd: "/workspace/../outside", command: nodeCommand("console.log('OUTSIDE')"), shell: shellForNodeCommand(), reason: "Try command escape." },
+      { tool: "database_query", path: "/workspace/../outside.sqlite", create: true, mode: "execute", sql: "CREATE TABLE x(v TEXT);", reason: "Try db escape." },
+      { tool: "extract_archive", path: "/workspace/../outside.zip", destination: "/workspace/out", reason: "Try archive escape." }
+    ]
+  });
+
+  assert.equal(result.accepted.length, 4);
+  assert.deepEqual(result.results.map((item) => item.status), ["failed", "failed", "failed", "failed"]);
+  assert.equal(result.results.every((item) => item.code === "path_escape_denied"), true);
+});
+
 test("text-only seats cannot use controlled file tools", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-tools-deny-"));
   fs.writeFileSync(path.join(tmp, "notes.md"), "content", "utf8");
