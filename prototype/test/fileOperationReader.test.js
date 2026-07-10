@@ -23,6 +23,20 @@ test("read/list file operations execute inside the group sandbox", () => {
   assert.equal(fs.existsSync(path.join(groupPath, "shared", "logs", "file-ops.jsonl")), true);
 });
 
+test("list file operation can target the workspace root", () => {
+  const groupPath = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-read-root-"));
+  fs.writeFileSync(path.join(groupPath, "README.md"), "root note", "utf8");
+  fs.mkdirSync(path.join(groupPath, "src"));
+
+  const [result] = executeReadListFileOperations(groupPath, [
+    { id: "list-root", op: "list", path: ".", source_agent_id: "builder" }
+  ]);
+
+  assert.equal(result.status, "completed");
+  assert.equal(result.path, ".");
+  assert.deepEqual(result.entries, ["src/", "README.md"]);
+});
+
 test("read/list refuses forbidden secret paths", () => {
   const groupPath = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-read-deny-"));
   fs.writeFileSync(path.join(groupPath, ".env"), "SECRET=1", "utf8");

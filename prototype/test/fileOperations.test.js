@@ -156,6 +156,64 @@ test("file operation parser accepts list and delete proposals without content", 
   assert.equal(fs.existsSync(path.join(groupRoot, "src", "old.txt")), true);
 });
 
+test("file operation parser preserves workspace root list path", () => {
+  const groupRoot = makeGroupRoot();
+  const result = parseFileOperationProposals({
+    groupRoot,
+    source: {
+      file_operations: [
+        {
+          op: "list",
+          path: ".",
+          reason: "List workspace root.",
+          expected_effect: "Root entries are visible."
+        }
+      ]
+    }
+  });
+
+  assert.equal(result.rejected.length, 0);
+  assert.equal(result.accepted.length, 1);
+  assert.equal(result.accepted[0].path, ".");
+});
+
+test("file operation parser rejects non-list operations on workspace root", () => {
+  const groupRoot = makeGroupRoot();
+  const result = parseFileOperationProposals({
+    groupRoot,
+    source: {
+      file_operations: [
+        {
+          op: "read",
+          path: ".",
+          reason: "Read root as a file.",
+          expected_effect: "Should fail."
+        },
+        {
+          op: "write",
+          path: ".",
+          content: "bad",
+          reason: "Overwrite root.",
+          expected_effect: "Should fail."
+        },
+        {
+          op: "delete",
+          path: ".",
+          reason: "Delete root.",
+          expected_effect: "Should fail."
+        }
+      ]
+    }
+  });
+
+  assert.deepEqual(result.rejected.map((item) => item.code), [
+    "root_path_not_allowed",
+    "root_path_not_allowed",
+    "root_path_not_allowed"
+  ]);
+  assert.equal(result.accepted.length, 0);
+});
+
 
 test("file operation parser preserves write content exactly", () => {
   const groupRoot = makeGroupRoot();

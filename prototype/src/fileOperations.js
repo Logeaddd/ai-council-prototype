@@ -62,13 +62,17 @@ function normalizeFileOperation({ groupRoot, operation, index, proposedBy }) {
   } catch (error) {
     return reject(index, error.code || "path_denied", error.message || "File operation path denied.");
   }
+  const normalizedPath = sandbox.relativePath || ".";
+  if (normalizedPath === "." && op !== "list") {
+    return reject(index, "root_path_not_allowed", "Only list operations may target the workspace root path.");
+  }
 
   return {
     accepted: true,
     proposal: {
       id: makeId("fop"),
       op,
-      path: sandbox.relativePath,
+      path: normalizedPath,
       resolvedPath: sandbox.path,
       reason,
       expected_effect: expectedEffect,
