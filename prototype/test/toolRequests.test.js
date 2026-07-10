@@ -912,6 +912,19 @@ test("install_package installs a real local npm package into managed workspace e
   assert.equal(allowed.results[0].result.environmentPath, "shared/environments/npm");
   assert.equal(fs.existsSync(path.join(tmp, "shared", "environments", "npm", "node_modules", "local-install-fact", "index.js")), true);
   assert.equal(fs.existsSync(path.join(tmp, "shared", "logs", "packages.jsonl")), true);
+
+  const reused = await executeToolRequests({
+    permissionTier: "full",
+    groupPath: tmp,
+    agent: { id: "full", name: "Full" },
+    round: 2,
+    requests: [
+      { tool: "run_code", language: "javascript", code: "process.stdout.write(require('local-install-fact'));", reason: "Use the installed package." }
+    ]
+  });
+
+  assert.equal(reused.results[0].status, "completed");
+  assert.equal(reused.results[0].result.stdout, "LOCAL_INSTALL_FACT");
 });
 
 test("install_package supports cargo go and gem managers in managed workspace environments", async () => {

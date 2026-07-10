@@ -105,12 +105,18 @@ export function buildCommandEnvironment(groupPath, options = {}) {
 
   const currentPath = String(env.Path || env.PATH || "");
   const mergedPath = uniquePaths([...additions, ...currentPath.split(path.delimiter).filter(Boolean)]).join(path.delimiter);
+  const nodeModules = managedNodeModules(root);
+  const currentNodePath = String(env.NODE_PATH || "");
   env.Path = mergedPath;
   env.PATH = mergedPath;
+  if (nodeModules.length) {
+    env.NODE_PATH = uniquePaths([...nodeModules, ...currentNodePath.split(path.delimiter).filter(Boolean)]).join(path.delimiter);
+  }
   return {
     env,
     discovered,
     pathAdditions: uniquePaths(additions),
+    nodeModulePaths: nodeModules,
     corrections
   };
 }
@@ -197,6 +203,13 @@ function managedEnvironmentBins(root) {
     path.join(environmentRoot, "gem", "bin")
   ];
   return candidates.map(safeRealDirectory).filter(Boolean);
+}
+
+function managedNodeModules(root) {
+  if (!root) return [];
+  return [path.join(root, "shared", "environments", "npm", "node_modules")]
+    .map(safeRealDirectory)
+    .filter(Boolean);
 }
 
 function invalidConfiguredHomes() {

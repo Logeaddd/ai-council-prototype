@@ -59,3 +59,15 @@ test("command environment adds managed tools and replaces an invalid JAVA_HOME",
     else process.env.JAVA_HOME = oldJavaHome;
   }
 });
+
+test("command environment exposes managed npm modules to later Node code", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-node-module-env-"));
+  const group = path.join(root, "group");
+  const modules = path.join(group, "shared", "environments", "npm", "node_modules");
+  fs.mkdirSync(modules, { recursive: true });
+
+  const result = buildCommandEnvironment(group);
+
+  assert.equal(result.nodeModulePaths.includes(modules), true);
+  assert.equal(String(result.env.NODE_PATH || "").split(path.delimiter).includes(modules), true);
+});
