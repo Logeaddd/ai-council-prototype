@@ -274,6 +274,9 @@ test("round prompt advertises artifacts in speak schema", () => {
   assert.match(messages[0].content, /suggested_revision, artifacts, file_operations, tool_requests, confidence/);
   assert.match(messages[0].content, /only to request file work/);
   assert.match(messages[0].content, /Do not invent tool results/);
+  assert.match(messages[0].content, /Use fetch_url only for text\/html\/json pages/);
+  assert.match(messages[0].content, /Do not use fetch_url to download zip/);
+  assert.match(messages[0].content, /execute_command with curl\/PowerShell/);
   assert.match(messages[0].content, /api_request/);
   assert.match(messages[0].content, /search saved public group history/);
   assert.match(messages[0].content, /search_context/);
@@ -366,7 +369,7 @@ test("full tool prompt advertises full-only tools while tool tier does not", () 
   assert.match(tool[0].content, /database_query for read-only SQLite SELECT queries/);
   assert.match(tool[0].content, /database_query write operations require full permission/);
   assert.match(tool[0].content, /extract_archive, execute_command, run_code, install_package, run_tests, git_operation, browser_control, mcp_search_npm, mcp_install_npm, mcp_uninstall, mcp_list_tools, mcp_call, mcp_list_resources, mcp_read_resource, mcp_list_prompts, and mcp_get_prompt require full permission/);
-  assert.doesNotMatch(tool[0].content, /extract_archive for zip files/);
+  assert.doesNotMatch(tool[0].content, /extract_archive for zip files inside the group workspace/);
   assert.doesNotMatch(tool[0].content, /execute_command for real shell commands/);
   assert.doesNotMatch(tool[0].content, /run_code for real/);
   assert.doesNotMatch(tool[0].content, /install_package for real/);
