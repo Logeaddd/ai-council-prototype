@@ -36,6 +36,17 @@ import {
   readConfiguredMcpResource
 } from "./mcpClient.js";
 import { installMcpNpmServer, listMcpInstallCatalog, searchMcpNpmPackages, uninstallManagedMcpServer } from "./mcpInstall.js";
+import {
+  disableSkillForGroup,
+  enableSkillForGroup,
+  installBuiltInSkillPack,
+  installRemoteSkillPack,
+  installSkillMarkdown,
+  listSkillCatalog,
+  listSkillPacksForGroup,
+  removeSkillPack,
+  searchSkillCandidates
+} from "./skillPacks.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const baseDir = path.resolve(__dirname, "..");
@@ -293,6 +304,74 @@ async function handleApi(req, res, url) {
     }, {
       timeoutMs: body.timeoutMs
     }));
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/skills") {
+    const groupPath = resolveWorkspacePath(requireQuery(url, "groupPath"), "groupPath");
+    sendJson(res, 200, { ok: true, source: "local_skill_store", ...listSkillPacksForGroup(baseDir, groupPath) });
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/skills/catalog") {
+    sendJson(res, 200, { ok: true, ...listSkillCatalog(baseDir) });
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/skills/search") {
+    sendJson(res, 200, await searchSkillCandidates(url.searchParams.get("q") || url.searchParams.get("query") || "", {
+      count: url.searchParams.get("count"),
+      timeoutMs: url.searchParams.get("timeoutMs")
+    }));
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/skills/install") {
+    const body = await readBody(req);
+    const groupPath = body.groupPath ? resolveWorkspacePath(body.groupPath, "groupPath") : "";
+    let result;
+    if (body.markdown || body.skillMarkdown) {
+      result = installSkillMarkdown(baseDir, body.markdown || body.skillMarkdown, {
+        id: body.skillId || body.id,
+        overwrite: Boolean(body.overwrite),
+        source: "user_direct_markdown"
+      });
+    } else if (body.url || body.skillUrl) {
+      result = await installRemoteSkillPack(baseDir, {
+        url: body.url || body.skillUrl,
+        skillId: body.skillId || body.id,
+        overwrite: Boolean(body.overwrite),
+        timeoutMs: body.timeoutMs
+      });
+    } else {
+      result = installBuiltInSkillPack(baseDir, body.skillId || body.catalogId || body.id, {
+        overwrite: Boolean(body.overwrite)
+      });
+    }
+    if (result.ok && groupPath) enableSkillForGroup(baseDir, groupPath, result.skill.id);
+    sendJson(res, 200, { ...result, enabled: Boolean(result.ok && groupPath) });
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/skills/enable") {
+    const body = await readBody(req);
+    const groupPath = resolveWorkspacePath(body.groupPath, "groupPath");
+    sendJson(res, 200, enableSkillForGroup(baseDir, groupPath, body.skillId || body.id));
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/skills/disable") {
+    const body = await readBody(req);
+    const groupPath = resolveWorkspacePath(body.groupPath, "groupPath");
+    sendJson(res, 200, disableSkillForGroup(baseDir, groupPath, body.skillId || body.id));
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/skills/remove") {
+    const body = await readBody(req);
+    const groupPath = body.groupPath ? resolveWorkspacePath(body.groupPath, "groupPath") : "";
+    if (groupPath) disableSkillForGroup(baseDir, groupPath, body.skillId || body.id);
+    sendJson(res, 200, removeSkillPack(baseDir, body.skillId || body.id));
     return;
   }
 

@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useState } from "react"
 import { Cpu, KeyRound, Wifi } from "lucide-react"
 import { cn } from "@/lib/utils"
 import {
@@ -58,56 +58,34 @@ export function MemberConfigSheet({
   }) => Promise<ProviderHealthResult>
   onClose: () => void
 }) {
-  const [name, setName] = useState("")
-  const [providerId, setProviderId] = useState("openai")
-  const [model, setModel] = useState("")
-  const [baseUrl, setBaseUrl] = useState("")
+  const providerOptions: ProviderPresetRecord[] = providers.length > 0
+    ? providers
+    : providerPresets.map((p) => ({
+        id: p.id,
+        label: p.name,
+        name: p.name,
+        officialBaseUrl: p.baseUrl,
+        baseUrl: p.baseUrl,
+        defaultModel: p.models[0] || "",
+        models: p.models,
+        customUrl: p.id === "custom",
+      }))
+  const initial = initialMemberForm(member, providerOptions)
+  const [name, setName] = useState(initial.name)
+  const [providerId, setProviderId] = useState(initial.providerId)
+  const [model, setModel] = useState(initial.model)
+  const [baseUrl, setBaseUrl] = useState(initial.baseUrl)
   const [apiKey, setApiKey] = useState("")
-  const [permission, setPermission] = useState<Permission>("text")
-  const [role, setRole] = useState<Role>("ordinary")
-  const [intensity, setIntensity] = useState<1 | 2 | 3>(2)
-  const [reasoningEffort, setReasoningEffort] = useState("")
+  const [permission, setPermission] = useState<Permission>(initial.permission)
+  const [role, setRole] = useState<Role>(initial.role)
+  const [intensity, setIntensity] = useState<1 | 2 | 3>(initial.intensity)
+  const [reasoningEffort, setReasoningEffort] = useState(initial.reasoningEffort)
   const [discovered, setDiscovered] = useState<string[]>([])
   const [discoveryStatus, setDiscoveryStatus] = useState("")
   const [discovering, setDiscovering] = useState(false)
   const [healthStatus, setHealthStatus] = useState("")
   const [checkingHealth, setCheckingHealth] = useState(false)
   const [saving, setSaving] = useState(false)
-  const providerOptions: ProviderPresetRecord[] =
-    providers.length > 0
-      ? providers
-      : providerPresets.map((p) => ({
-          id: p.id,
-          label: p.name,
-          name: p.name,
-          officialBaseUrl: p.baseUrl,
-          baseUrl: p.baseUrl,
-          defaultModel: p.models[0] || "",
-          models: p.models,
-          customUrl: p.id === "custom",
-        }))
-
-  // 当打开不同成员时，重置表单。
-  useEffect(() => {
-    if (!member) return
-    setName(member.name)
-    const preset =
-      providerOptions.find(
-        (p) => p.id === member.provider || p.label === member.provider || p.name === member.provider,
-      ) ?? providerOptions[0]
-    if (preset) setProviderId(preset.id)
-    setModel(member.model)
-    setBaseUrl(member.baseUrl || preset?.officialBaseUrl || preset?.baseUrl || "")
-    setApiKey("")
-    setPermission(member.permission)
-    setRole(member.role)
-    setIntensity(member.reviewIntensity)
-    setReasoningEffort(member.reasoningEffort || "")
-    setDiscovered([])
-    setDiscoveryStatus("")
-    setHealthStatus("")
-  }, [member, providers])
-
   const preset = providerOptions.find((p) => p.id === providerId)
   const presetModels = preset?.models || (preset?.defaultModel ? [preset.defaultModel] : [])
   const modelOptions = discovered.length > 0 ? discovered : presetModels
@@ -467,6 +445,22 @@ export function MemberConfigSheet({
       ) : null}
     </Sheet>
   )
+}
+
+function initialMemberForm(member: AgentMember | undefined, providers: ProviderPresetRecord[]) {
+  const preset = member
+    ? providers.find((item) => item.id === member.provider || item.label === member.provider || item.name === member.provider) ?? providers[0]
+    : providers[0]
+  return {
+    name: member?.name || "",
+    providerId: preset?.id || "openai",
+    model: member?.model || "",
+    baseUrl: member?.baseUrl || preset?.officialBaseUrl || preset?.baseUrl || "",
+    permission: (member?.permission || "text") as Permission,
+    role: (member?.role || "ordinary") as Role,
+    intensity: (member?.reviewIntensity || 2) as 1 | 2 | 3,
+    reasoningEffort: member?.reasoningEffort || "",
+  }
 }
 
 function sourceLabel(source: string) {

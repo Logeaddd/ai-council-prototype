@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useMemo, useRef, useState } from "react"
+import { useEffect, useEffectEvent, useMemo, useRef, useState } from "react"
 import {
   usage as fallbackUsage,
   type AgentMember,
@@ -107,7 +107,7 @@ export function CouncilApp() {
   const [running, setRunning] = useState(false)
   const [visualStyle, setVisualStyle] = useState<VisualStyle>("workbench")
   const [rightOpen, setRightOpen] = useState(false)
-  const [hydrated, setHydrated] = useState(false)
+  const [layoutLoaded, setLayoutLoaded] = useState(false)
   const [groupList, setGroupList] = useState<LiveGroup[]>([])
   const [workspaceGroup, setWorkspaceGroup] = useState<WorkspaceGroup | null>(null)
   const [usageSnapshot, setUsageSnapshot] = useState<UsageSnapshot | null>(null)
@@ -158,18 +158,21 @@ export function CouncilApp() {
       .map((item) => (item.kind === "round" ? item.round : 0)),
   )
 
+  const openGroupFromEffect = useEffectEvent((nextGroup: LiveGroup) => openGroup(nextGroup, { silent: true }))
+
   useEffect(() => {
-    try {
-      const raw = localStorage.getItem(LAYOUT_KEY)
-      if (raw) {
-        const layout = JSON.parse(raw) as Partial<Layout>
+    const frame = window.requestAnimationFrame(() => {
+      try {
+        const raw = window.localStorage.getItem(LAYOUT_KEY)
+        const layout = raw ? JSON.parse(raw) as Partial<Layout> : {}
         if (layout.visualStyle) setVisualStyle(layout.visualStyle)
         if (typeof layout.rightOpen === "boolean") setRightOpen(layout.rightOpen)
+      } catch {
+        // Ignore broken local layout data.
       }
-    } catch {
-      // Ignore broken local layout data.
-    }
-    setHydrated(true)
+      setLayoutLoaded(true)
+    })
+    return () => window.cancelAnimationFrame(frame)
   }, [])
 
   useEffect(() => {
@@ -202,7 +205,7 @@ export function CouncilApp() {
           nextGroups.find((item) => item.id === index.lastGroupId) ||
           nextGroups[0]
         setActiveGroup(selected.id)
-        await openGroup(selected, { silent: true })
+        await openGroupFromEffect(selected)
       } catch (error) {
         if (!cancelled) setStatusText(`读取小组失败：${errorMessage(error)}`)
       }
@@ -214,7 +217,7 @@ export function CouncilApp() {
   }, [])
 
   useEffect(() => {
-    if (!hydrated) return
+    if (!layoutLoaded) return
     try {
       localStorage.setItem(
         LAYOUT_KEY,
@@ -223,7 +226,7 @@ export function CouncilApp() {
     } catch {
       // Ignore localStorage failures.
     }
-  }, [visualStyle, rightOpen, hydrated])
+  }, [visualStyle, rightOpen, layoutLoaded])
 
   async function openGroup(nextGroup: LiveGroup, options: { silent?: boolean } = {}) {
     setActiveGroup(nextGroup.id)
@@ -729,7 +732,7 @@ export function CouncilApp() {
     }
     if (event.type === "agent_message" && event.message) {
       partials.current[event.message.agentId] = ""
-      const item = messageToTranscriptItem(event.message, maxRounds)
+      const item = messageToTranscriptItem(event.message)
       setAgentStates((current) => ({
         ...current,
         [event.message?.agentId || ""]: item.kind === "message" ? item.state : "completed",
@@ -897,6 +900,7 @@ export function CouncilApp() {
             />
           </div>
           <Composer
+            key={group.path || group.id || "empty-group"}
             members={members}
             running={running}
             draftKey={group.path || group.id || ""}
@@ -927,6 +931,7 @@ export function CouncilApp() {
       </div>
 
       <MemberConfigSheet
+        key={`${sheetMember?.id || "empty-member"}:${createMemberDraft ? "create" : "edit"}:${providerOptions.length}`}
         member={sheetMember}
         creating={!!createMemberDraft}
         workMode={mode}
@@ -940,6 +945,7 @@ export function CouncilApp() {
         }}
       />
       <SettingsSheet
+        key={`${group.path || group.id || "empty-group"}:${settingsOpen ? "open" : "closed"}`}
         open={settingsOpen}
         onClose={() => setSettingsOpen(false)}
         mode={mode}
@@ -951,6 +957,7 @@ export function CouncilApp() {
         agentTimeoutMinutes={agentTimeoutMinutes}
         onAgentTimeoutMinutesChange={setAgentTimeoutMinutes}
         groupsRoot={appSettings?.groupsRoot || ""}
+        groupPath={group.path || ""}
         webSearchConfigured={appSettings?.capabilities?.webSearch?.configured}
         webSearchSource={formatSearchKeySource(appSettings?.capabilities?.webSearch?.source)}
         onSave={handleSaveSettings}

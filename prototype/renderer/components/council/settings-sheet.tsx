@@ -13,6 +13,7 @@ import {
   Sparkles,
   UserCheck,
   Users,
+  X,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import {
@@ -24,15 +25,24 @@ import {
   fetchMcpCatalog,
   fetchMcpServers,
   fetchProviderPresets,
+  fetchSkillCatalog,
+  fetchSkills,
   installMcpCatalogItem,
   installMcpPackage,
+  installSkill,
+  removeSkill,
   searchMcpPackages,
+  searchSkills,
+  setSkillEnabled,
   uninstallMcpServer,
   type CapabilityRecord,
   type McpInstallCatalogItem,
   type McpSearchResult,
   type McpServerRecord,
   type ProviderPresetRecord,
+  type SkillCatalogRecord,
+  type SkillPackRecord,
+  type SkillSearchResult,
 } from "@/lib/council-live"
 import { Badge, Sheet, inputClass, type Tone } from "./primitives"
 
@@ -75,6 +85,7 @@ export function SettingsSheet({
   agentTimeoutMinutes,
   onAgentTimeoutMinutesChange,
   groupsRoot,
+  groupPath,
   webSearchConfigured,
   webSearchSource,
   onSave,
@@ -90,6 +101,7 @@ export function SettingsSheet({
   agentTimeoutMinutes: number
   onAgentTimeoutMinutesChange: (value: number) => void
   groupsRoot?: string
+  groupPath?: string
   webSearchConfigured?: boolean
   webSearchSource?: string
   onSave: (values: {
@@ -118,39 +130,48 @@ export function SettingsSheet({
   const [searchingMcp, setSearchingMcp] = useState(false)
   const [mcpServers, setMcpServers] = useState<McpServerRecord[]>([])
   const [busyMcpId, setBusyMcpId] = useState("")
-
-  useEffect(() => {
-    setText(globalRequirement)
-  }, [globalRequirement])
-
-  useEffect(() => {
-    setDataRoot(groupsRoot || "")
-  }, [groupsRoot])
+  const [skills, setSkills] = useState<SkillPackRecord[]>([])
+  const [skillCatalog, setSkillCatalog] = useState<SkillCatalogRecord[]>([])
+  const [skillSearchQuery, setSkillSearchQuery] = useState("")
+  const [skillSearchResults, setSkillSearchResults] = useState<SkillSearchResult[]>([])
+  const [searchingSkills, setSearchingSkills] = useState(false)
+  const [busySkillId, setBusySkillId] = useState("")
 
   const reloadFacts = useCallback(async () => {
+    await Promise.resolve()
     setLoadingFacts(true)
     setSettingsError("")
     try {
-      const [providerResult, capabilityResult, catalogResult, serverResult] = await Promise.all([
+      const [providerResult, capabilityResult, catalogResult, serverResult, skillCatalogResult, skillsResult] = await Promise.all([
         fetchProviderPresets(),
         fetchCapabilities(),
         fetchMcpCatalog(),
         fetchMcpServers(),
+        fetchSkillCatalog(),
+        groupPath ? fetchSkills(groupPath) : Promise.resolve({ ok: true, skills: [] }),
       ])
       setProviders(providerResult.providers || [])
       setCapabilities(capabilityResult.capabilities || [])
       setMcpCatalog(catalogResult.catalog || [])
       setMcpServers(serverResult.servers || [])
+      setSkillCatalog(skillCatalogResult.catalog || [])
+      setSkills(skillsResult.skills || [])
     } catch (error) {
       setSettingsError(errorMessage(error))
     } finally {
       setLoadingFacts(false)
     }
-  }, [])
+  }, [groupPath])
 
   useEffect(() => {
     if (!open) return
-    void reloadFacts()
+    let cancelled = false
+    void Promise.resolve().then(() => {
+      if (!cancelled) return reloadFacts()
+    })
+    return () => {
+      cancelled = true
+    }
   }, [open, reloadFacts])
 
   async function save() {
@@ -261,6 +282,82 @@ export function SettingsSheet({
     }
   }
 
+  async function searchSkillPacks() {
+    const query = skillSearchQuery.trim()
+    if (!query || searchingSkills) return
+    setSearchingSkills(true)
+    setSettingsError("")
+    try {
+      const result = await searchSkills(query)
+      if (!result.ok) throw new Error(result.error || result.code || "搜索失败")
+      setSkillSearchResults(result.results || [])
+    } catch (error) {
+      setSettingsError(errorMessage(error))
+    } finally {
+      setSearchingSkills(false)
+    }
+  }
+
+  async function addSkill(item?: SkillCatalogRecord | SkillSearchResult) {
+    if (!groupPath || busySkillId) return
+    const query = skillSearchQuery.trim()
+    const id = item?.id || query
+    const isSearchResult = item && "type" in item
+    const skillUrl = isSearchResult && item.type !== "built_in"
+      ? item.skillUrl || ""
+      : !item && /^https:\/\//i.test(query) ? query : ""
+    const builtInId = item && (("type" in item && item.type === "built_in") || ("sourceType" in item && item.sourceType === "built_in"))
+      ? id
+      : ""
+    if (!skillUrl && !builtInId) return
+    setBusySkillId(id || skillUrl)
+    setSettingsError("")
+    try {
+      const result = await installSkill({
+        groupPath,
+        skillId: builtInId || undefined,
+        skillUrl: skillUrl || undefined,
+      })
+      if (!result.ok) throw new Error(result.error || result.code || "加入失败")
+      setSkillSearchResults([])
+      await reloadFacts()
+    } catch (error) {
+      setSettingsError(errorMessage(error))
+    } finally {
+      setBusySkillId("")
+    }
+  }
+
+  async function toggleSkill(item: SkillPackRecord) {
+    if (!groupPath || busySkillId) return
+    setBusySkillId(item.id)
+    setSettingsError("")
+    try {
+      const result = await setSkillEnabled(groupPath, item.id, !item.enabled)
+      if (!result.ok) throw new Error(result.error || result.code || "保存失败")
+      await reloadFacts()
+    } catch (error) {
+      setSettingsError(errorMessage(error))
+    } finally {
+      setBusySkillId("")
+    }
+  }
+
+  async function deleteSkillPack(item: SkillPackRecord) {
+    if (!groupPath || busySkillId) return
+    setBusySkillId(item.id)
+    setSettingsError("")
+    try {
+      const result = await removeSkill(groupPath, item.id)
+      if (!result.ok) throw new Error(result.error || "移除失败")
+      await reloadFacts()
+    } catch (error) {
+      setSettingsError(errorMessage(error))
+    } finally {
+      setBusySkillId("")
+    }
+  }
+
   return (
     <Sheet
       open={open}
@@ -357,7 +454,23 @@ export function SettingsSheet({
             />
           ) : null}
 
-          {activeTab === "skills" ? <SkillsPanel capabilities={capabilities} loading={loadingFacts} /> : null}
+          {activeTab === "skills" ? (
+            <SkillsPanel
+              groupPath={groupPath || ""}
+              skills={skills}
+              catalog={skillCatalog}
+              loading={loadingFacts}
+              busyId={busySkillId}
+              searchQuery={skillSearchQuery}
+              searchResults={skillSearchResults}
+              searching={searchingSkills}
+              onSearchQueryChange={setSkillSearchQuery}
+              onSearch={searchSkillPacks}
+              onAdd={addSkill}
+              onToggle={toggleSkill}
+              onRemove={deleteSkillPack}
+            />
+          ) : null}
           {activeTab === "plugins" ? <PluginsPanel servers={mcpServers} loading={loadingFacts} /> : null}
           {activeTab === "memory" ? <MemoryPanel capabilities={capabilities} loading={loadingFacts} /> : null}
           {activeTab === "data" ? <DataPanel value={dataRoot} onChange={setDataRoot} /> : null}
@@ -519,7 +632,7 @@ function SearchPanel({
 
       <SettingRow label="状态">
         <Badge tone="success">
-          {`可用 · ${source || "内置搜索"}`}
+          {`可用 · ${configured ? source || "Brave" : source || "内置搜索"}`}
         </Badge>
       </SettingRow>
 
@@ -734,26 +847,169 @@ function McpPanel({
 }
 
 function SkillsPanel({
-  capabilities,
+  groupPath,
+  skills,
+  catalog,
   loading,
+  busyId,
+  searchQuery,
+  searchResults,
+  searching,
+  onSearchQueryChange,
+  onSearch,
+  onAdd,
+  onToggle,
+  onRemove,
 }: {
-  capabilities: CapabilityRecord[]
+  groupPath: string
+  skills: SkillPackRecord[]
+  catalog: SkillCatalogRecord[]
   loading: boolean
+  busyId: string
+  searchQuery: string
+  searchResults: SkillSearchResult[]
+  searching: boolean
+  onSearchQueryChange: (value: string) => void
+  onSearch: () => Promise<void>
+  onAdd: (item?: SkillCatalogRecord | SkillSearchResult) => Promise<void>
+  onToggle: (item: SkillPackRecord) => Promise<void>
+  onRemove: (item: SkillPackRecord) => Promise<void>
 }) {
-  const rows = capabilities
-    .filter((item) => item.kind === "tool" || item.kind === "memory" || item.kind === "mcp_server")
-    .map((item) => ({
-      key: item.id,
-      name: item.label,
-      meta: item.provider || item.source || item.kind,
-      tone: capabilityTone(item),
-      status: capabilityStatus(item),
-    }))
-
   return (
-    <div className="space-y-4">
+    <div className="space-y-5">
       <PanelTitle title="技能" />
-      <FactGrid rows={rows} loading={loading} />
+
+      <div className="flex items-center gap-2">
+        <input
+          value={searchQuery}
+          onChange={(event) => onSearchQueryChange(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") void onSearch()
+          }}
+          className={cn(inputClass, "flex-1")}
+          placeholder="搜索或粘贴 SKILL.md 地址"
+        />
+        <button
+          type="button"
+          disabled={searching || !searchQuery.trim()}
+          onClick={() => void onSearch()}
+          className="rounded-md border border-border px-3 py-1.5 text-[13px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-50"
+        >
+          {searching ? "搜索中" : "搜索"}
+        </button>
+        {/^https:\/\//i.test(searchQuery.trim()) ? (
+          <button
+            type="button"
+            disabled={!groupPath || Boolean(busyId)}
+            onClick={() => void onAdd()}
+            className="rounded-md bg-primary px-3 py-1.5 text-[13px] font-semibold text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
+          >
+            加入
+          </button>
+        ) : null}
+      </div>
+
+      {searchResults.length ? (
+        <div className="space-y-2">
+          {searchResults.map((item) => (
+            <SkillRow
+              key={`${item.type}:${item.id}`}
+              name={item.name}
+              meta={item.type === "built_in" ? "内置" : item.url || item.skillUrl || item.id}
+              status={item.type === "built_in" ? "内置" : "候选"}
+              action="加入"
+              disabled={!groupPath || Boolean(busyId)}
+              onAction={() => void onAdd(item)}
+            />
+          ))}
+        </div>
+      ) : null}
+
+      <div className="space-y-2">
+        {loading ? <EmptyLine text="读取中" /> : null}
+        {!loading && !skills.length ? <EmptyLine text="暂无已加入技能" /> : null}
+        {skills.map((item) => (
+          <SkillRow
+            key={item.id}
+            name={item.name}
+            meta={item.sourceType === "built_in" ? "内置" : item.sourceUrl || item.source || item.id}
+            status={item.enabled ? "已启用" : "已停用"}
+            tone={item.enabled ? "success" : "neutral"}
+            action={item.enabled ? "停用" : "启用"}
+            disabled={busyId === item.id}
+            onAction={() => void onToggle(item)}
+            onRemove={() => void onRemove(item)}
+          />
+        ))}
+      </div>
+
+      <div className="space-y-2">
+        {catalog.filter((item) => !item.installed).map((item) => (
+          <SkillRow
+            key={item.id}
+            name={item.name}
+            meta="内置"
+            status="可加入"
+            action="加入"
+            disabled={!groupPath || Boolean(busyId)}
+            onAction={() => void onAdd(item)}
+          />
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function SkillRow({
+  name,
+  meta,
+  status,
+  tone = "neutral",
+  action,
+  disabled,
+  onAction,
+  onRemove,
+}: {
+  name: string
+  meta?: string
+  status: string
+  tone?: Tone
+  action: string
+  disabled?: boolean
+  onAction: () => void
+  onRemove?: () => void
+}) {
+  return (
+    <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 rounded-md border border-border px-3 py-2">
+      <div className="min-w-0">
+        <div className="flex items-center gap-2">
+          <span className="truncate text-[13px] font-medium text-foreground">{name}</span>
+          <Badge tone={tone}>{status}</Badge>
+        </div>
+        {meta ? <div className="mt-1 truncate font-mono text-[11px] text-muted-foreground">{meta}</div> : null}
+      </div>
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          disabled={disabled}
+          onClick={onAction}
+          className="rounded-md border border-border px-3 py-1.5 text-[13px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-50"
+        >
+          {action}
+        </button>
+        {onRemove ? (
+          <button
+            type="button"
+            title="移除"
+            aria-label="移除"
+            disabled={disabled}
+            onClick={onRemove}
+            className="grid size-8 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-danger/10 hover:text-danger disabled:opacity-50"
+          >
+            <X className="size-4" />
+          </button>
+        ) : null}
+      </div>
     </div>
   )
 }

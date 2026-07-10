@@ -82,6 +82,30 @@ test("renderer wires the real council APIs instead of mock-only UI state", () =>
   assert.match(app, /workspaceGroupToRuntimeGroup/);
 });
 
+test("settings skills panel uses real installable skill records", () => {
+  const live = read("renderer/lib/council-live.ts");
+  const settings = read("renderer/components/council/settings-sheet.tsx");
+  const app = read("renderer/components/council/council-app.tsx");
+  for (const endpoint of [
+    "/api/skills?groupPath=",
+    "/api/skills/catalog",
+    "/api/skills/search",
+    "/api/skills/install",
+    "/api/skills/enable",
+    "/api/skills/disable",
+    "/api/skills/remove",
+  ]) {
+    assert.match(live, new RegExp(endpoint.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  }
+  assert.match(app, /groupPath=\{group\.path \|\| ""\}/);
+  assert.match(settings, /fetchSkills\(groupPath\)/);
+  assert.match(settings, /searchSkills\(query\)/);
+  assert.match(settings, /installSkill\(/);
+  assert.match(settings, /setSkillEnabled\(/);
+  assert.match(settings, /removeSkill\(/);
+  assert.doesNotMatch(settings, /\.filter\(\(item\) => item\.kind === "tool" \|\| item\.kind === "memory" \|\| item\.kind === "mcp_server"\)/);
+});
+
 test("add member opens the template configuration sheet before creating a seat", () => {
   const app = read("renderer/components/council/council-app.tsx");
   const sheet = read("renderer/components/council/member-config-sheet.tsx");

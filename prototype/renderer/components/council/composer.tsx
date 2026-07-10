@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useState } from "react"
 import { ChevronDown, FileText, FolderOpen, Lock, Paperclip, Pause, Send, StepForward, X } from "lucide-react"
 import { cn } from "@/lib/utils"
 import type { AgentMember, FileAttachment } from "@/lib/council-data"
@@ -45,6 +45,15 @@ const TEXT_EXTENSIONS = new Set([
 
 type LocalAttachment = FileAttachment & { id: string }
 
+function readDraft(draftKey: string) {
+  if (!draftKey || typeof window === "undefined") return ""
+  try {
+    return window.localStorage.getItem(`${DRAFT_PREFIX}${draftKey}`) || ""
+  } catch {
+    return ""
+  }
+}
+
 export function Composer({
   members,
   running,
@@ -61,6 +70,7 @@ export function Composer({
   onContinue: () => void
 }) {
   const [value, setValue] = useState("")
+  const [draftLoaded, setDraftLoaded] = useState(false)
   const [privateMode, setPrivateMode] = useState(false)
   const [target, setTarget] = useState(members[0]?.id || "")
   const [sending, setSending] = useState(false)
@@ -68,40 +78,17 @@ export function Composer({
   const [fileError, setFileError] = useState("")
   const [fileNotice, setFileNotice] = useState("")
   const [importingProject, setImportingProject] = useState(false)
-  const skipDraftSave = useRef(false)
 
   useEffect(() => {
-    if (!members.length) {
-      setTarget("")
-      return
-    }
-    if (!members.some((member) => member.id === target)) {
-      setTarget(members[0].id)
-    }
-  }, [members, target])
-
-  useEffect(() => {
-    skipDraftSave.current = true
-    if (!draftKey) {
-      setValue("")
-      return
-    }
-    try {
-      setValue(localStorage.getItem(`${DRAFT_PREFIX}${draftKey}`) || "")
-    } catch {
-      setValue("")
-    }
-    setAttachments([])
-    setFileError("")
-    setFileNotice("")
+    const frame = window.requestAnimationFrame(() => {
+      setValue(readDraft(draftKey))
+      setDraftLoaded(true)
+    })
+    return () => window.cancelAnimationFrame(frame)
   }, [draftKey])
 
   useEffect(() => {
-    if (skipDraftSave.current) {
-      skipDraftSave.current = false
-      return
-    }
-    if (!draftKey) return
+    if (!draftKey || !draftLoaded) return
     try {
       const key = `${DRAFT_PREFIX}${draftKey}`
       if (value.trim()) localStorage.setItem(key, value)
@@ -109,9 +96,10 @@ export function Composer({
     } catch {
       // Draft persistence is best-effort local UI state.
     }
-  }, [draftKey, value])
+  }, [draftKey, draftLoaded, value])
 
-  const targetMember = members.find((member) => member.id === target)
+  const effectiveTarget = members.some((member) => member.id === target) ? target : members[0]?.id || ""
+  const targetMember = members.find((member) => member.id === effectiveTarget)
   const sendDisabled = sending || (!value.trim() && !attachments.length) || !members.length
 
   async function submit() {
@@ -120,10 +108,10 @@ export function Composer({
     setSending(true)
     try {
       setValue("")
-      const files = attachments.map(({ id: _id, ...file }) => file)
+      const files = attachments.map(({ name, type, sizeBytes, content }) => ({ name, type, sizeBytes, content }))
       setAttachments([])
       setFileError("")
-      await onSend(text, { privateMode, targetId: target || members[0]?.id || "", attachments: files })
+      await onSend(text, { privateMode, targetId: effectiveTarget, attachments: files })
     } finally {
       setSending(false)
     }
@@ -240,7 +228,7 @@ export function Composer({
           {privateMode ? (
             <div className="relative">
               <select
-                value={target}
+                value={effectiveTarget}
                 onChange={(event) => setTarget(event.target.value)}
                 className="h-7 appearance-none rounded-md border border-info/40 bg-info/5 pl-2.5 pr-7 text-xs font-medium text-foreground focus:border-ring focus:outline-none"
               >

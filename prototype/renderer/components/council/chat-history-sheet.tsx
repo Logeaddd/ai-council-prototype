@@ -52,10 +52,7 @@ export function ChatHistorySheet({
   }, [open, groupPath])
 
   useEffect(() => {
-    if (!open || !groupPath || !selectedId) {
-      setSelected(null)
-      return
-    }
+    if (!open || !groupPath || !selectedId) return
     let cancelled = false
     async function loadDetail() {
       setError("")

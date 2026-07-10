@@ -324,7 +324,7 @@ export function workspaceGroupToRuntimeGroup(
   }
 }
 
-export function messageToTranscriptItem(message: CouncilMessage, totalRounds: number): TranscriptItem {
+export function messageToTranscriptItem(message: CouncilMessage): TranscriptItem {
   return {
     kind: "message",
     id: `${message.agentId}-${message.round || 0}-${message.createdAt || Date.now()}`,
@@ -504,6 +504,36 @@ export interface McpServerRecord {
   }
 }
 
+export interface SkillPackRecord {
+  id: string
+  name: string
+  description: string
+  sourceType: string
+  source?: string
+  sourceUrl?: string
+  sha256?: string
+  integrity?: string
+  bytes?: number
+  installedAt?: string
+  enabled?: boolean
+}
+
+export interface SkillCatalogRecord extends SkillPackRecord {
+  installed: boolean
+  installedRecord?: SkillPackRecord
+}
+
+export interface SkillSearchResult {
+  type: "built_in" | "github_repository_candidate" | string
+  id: string
+  name: string
+  description?: string
+  url?: string
+  skillUrl?: string
+  stars?: number
+  verifiedSkillFile?: boolean
+}
+
 export interface FolderPickerResult {
   supported: boolean
   path: string
@@ -626,6 +656,45 @@ export async function installMcpPackage(body: {
 
 export async function uninstallMcpServer(serverId: string) {
   return api<{ ok: boolean; error?: string; code?: string }>("/api/mcp/uninstall", { serverId })
+}
+
+export async function fetchSkills(groupPath: string) {
+  return api<{ ok: boolean; skills: SkillPackRecord[]; enabledMissing?: string[] }>(
+    `/api/skills?groupPath=${encodeURIComponent(groupPath)}`,
+  )
+}
+
+export async function fetchSkillCatalog() {
+  return api<{ ok: boolean; catalog: SkillCatalogRecord[] }>("/api/skills/catalog")
+}
+
+export async function searchSkills(query: string) {
+  const params = new URLSearchParams({ q: query })
+  return api<{ ok: boolean; error?: string; code?: string; results: SkillSearchResult[] }>(`/api/skills/search?${params}`)
+}
+
+export async function installSkill(body: {
+  groupPath?: string
+  skillId?: string
+  skillUrl?: string
+  skillMarkdown?: string
+  overwrite?: boolean
+}) {
+  return api<{ ok: boolean; error?: string; code?: string; skill?: SkillPackRecord; enabled?: boolean }>("/api/skills/install", body)
+}
+
+export async function setSkillEnabled(groupPath: string, skillId: string, enabled: boolean) {
+  return api<{ ok: boolean; error?: string; code?: string }>(enabled ? "/api/skills/enable" : "/api/skills/disable", {
+    groupPath,
+    skillId,
+  })
+}
+
+export async function removeSkill(groupPath: string, skillId: string) {
+  return api<{ ok: boolean; error?: string; deleted?: boolean }>("/api/skills/remove", {
+    groupPath,
+    skillId,
+  })
 }
 
 export async function discoverModels(body: {

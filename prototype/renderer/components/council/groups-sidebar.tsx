@@ -1,6 +1,7 @@
 "use client"
 
 import { useMemo, useState } from "react"
+import Image from "next/image"
 import { Pin, Plus, Search, Sliders, X } from "lucide-react"
 import { cn } from "@/lib/utils"
 import {
@@ -41,9 +42,11 @@ export function GroupsSidebar({
   return (
     <nav className="flex h-full w-60 flex-col border-r border-sidebar-border bg-sidebar">
       <div className="flex items-center gap-2 px-3 py-3">
-        <img
+        <Image
           src="/logo.png"
           alt=""
+          width={28}
+          height={28}
           draggable={false}
           className="size-7 rounded-md object-contain"
         />

@@ -287,3 +287,17 @@ test("server exposes local MCP server config APIs without starting fake runtimes
   assert.match(mcpConfigJs, /redacted/);
   assert.match(mcpConfigJs, /runtime: "not_started"/);
 });
+
+test("server exposes guarded real skill pack APIs", () => {
+  const serverJs = fs.readFileSync(path.join(root, "src", "server.js"), "utf8");
+  const skillJs = fs.readFileSync(path.join(root, "src", "skillPacks.js"), "utf8");
+  for (const endpoint of ["/api/skills", "/api/skills/catalog", "/api/skills/search", "/api/skills/install", "/api/skills/enable", "/api/skills/disable", "/api/skills/remove"]) {
+    assert.match(serverJs, new RegExp(endpoint.replaceAll("/", "\\/")));
+  }
+  assert.match(serverJs, /resolveWorkspacePath\(.*groupPath/);
+  assert.match(serverJs, /installRemoteSkillPack/);
+  assert.match(serverJs, /enableSkillForGroup/);
+  assert.match(skillJs, /fetchPublicText/);
+  assert.match(skillJs, /skill_download_truncated/);
+  assert.match(skillJs, /sha256/);
+});
