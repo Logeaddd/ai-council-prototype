@@ -42,6 +42,23 @@ export async function fetchPublicText(input, options = {}) {
   };
 }
 
+export async function fetchPublicBuffer(input, options = {}) {
+  const url = await assertSafePublicUrl(input, options);
+  const timeoutMs = normalizeTimeoutMs(options.timeoutMs);
+  const maxBytes = normalizeMaxBytes(options.maxBytes);
+  const response = await fetchWithRedirects(url, { timeoutMs, maxBytes, signal: options.signal, binary: true });
+  return {
+    ok: true,
+    source: "real_response",
+    url: response.url,
+    status: response.status,
+    contentType: response.contentType,
+    buffer: response.buffer,
+    bytes: response.buffer.length,
+    truncated: response.truncated
+  };
+}
+
 export async function searchWeb(query, options = {}) {
   const text = String(query || "").trim();
   if (!text) throw new Error("Missing search query");
@@ -217,13 +234,13 @@ async function fetchWithRedirects(url, options, redirectsLeft = 3) {
     }
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const contentType = response.headers.get("content-type") || "";
-    if (!isTextLike(contentType)) throw new Error(`Unsupported content type: ${contentType || "unknown"}`);
-    const { text, truncated } = await readLimitedText(response, options.maxBytes);
+    if (!options.binary && !isTextLike(contentType)) throw new Error(`Unsupported content type: ${contentType || "unknown"}`);
+    const { buffer, truncated } = await readLimitedBuffer(response, options.maxBytes);
     return {
       url,
       status: response.status,
       contentType,
-      text,
+      ...(options.binary ? { buffer } : { text: buffer.toString("utf8") }),
       truncated
     };
   } finally {
@@ -233,8 +250,16 @@ async function fetchWithRedirects(url, options, redirectsLeft = 3) {
 }
 
 async function readLimitedText(response, maxBytes) {
+  const result = await readLimitedBuffer(response, maxBytes);
+  return { text: result.buffer.toString("utf8"), truncated: result.truncated };
+}
+
+async function readLimitedBuffer(response, maxBytes) {
   const reader = response.body?.getReader();
-  if (!reader) return { text: await response.text(), truncated: false };
+  if (!reader) {
+    const buffer = Buffer.from(await response.arrayBuffer());
+    return { buffer: buffer.subarray(0, maxBytes), truncated: buffer.length > maxBytes };
+  }
   const chunks = [];
   let total = 0;
   let truncated = false;
@@ -252,7 +277,7 @@ async function readLimitedText(response, maxBytes) {
     chunks.push(value);
   }
   const buffer = Buffer.concat(chunks.map((chunk) => Buffer.from(chunk)));
-  return { text: buffer.toString("utf8"), truncated };
+  return { buffer, truncated };
 }
 
 function isTextLike(contentType) {

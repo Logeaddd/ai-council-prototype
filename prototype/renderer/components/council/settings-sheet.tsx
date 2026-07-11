@@ -334,10 +334,10 @@ export function SettingsSheet({
     const query = skillSearchQuery.trim()
     const id = item?.id || query
     const isSearchResult = item && "type" in item
-    const skillUrl = isSearchResult && item.type !== "built_in"
+    const skillUrl = isSearchResult && item.type !== "built_in" && item.type !== "catalog"
       ? item.skillUrl || ""
       : !item && /^https:\/\//i.test(query) ? query : ""
-    const builtInId = item && (("type" in item && item.type === "built_in") || ("sourceType" in item && item.sourceType === "built_in"))
+    const builtInId = item && (("type" in item && (item.type === "built_in" || item.type === "catalog")) || ("sourceType" in item && (item.sourceType === "built_in" || item.sourceType === "github_directory")))
       ? id
       : ""
     if (!skillUrl && !builtInId) return
@@ -1056,8 +1056,8 @@ function SkillsPanel({
             <SkillRow
               key={`${item.type}:${item.id}`}
               name={item.name}
-              meta={item.type === "built_in" ? "内置" : item.url || item.skillUrl || item.id}
-              status={item.type === "built_in" ? "内置" : "候选"}
+              meta={item.type === "catalog" ? item.sourceUrl || item.id : item.url || item.skillUrl || item.id}
+              status={item.type === "catalog" ? "项目" : "候选"}
               action="加入"
               disabled={!groupPath || Boolean(busyId)}
               onAction={() => void onAdd(item)}
@@ -1073,7 +1073,7 @@ function SkillsPanel({
           <SkillRow
             key={item.id}
             name={item.name}
-            meta={item.sourceType === "built_in" ? "内置" : item.sourceUrl || item.source || item.id}
+            meta={item.sourceUrl || item.source || item.id}
             status={item.enabled ? "已启用" : "已停用"}
             tone={item.enabled ? "success" : "neutral"}
             action={item.enabled ? "停用" : "启用"}
@@ -1089,7 +1089,7 @@ function SkillsPanel({
           <SkillRow
             key={item.id}
             name={item.name}
-            meta="内置"
+            meta={item.sourceUrl || item.source || item.id}
             status="可加入"
             action="加入"
             disabled={!groupPath || Boolean(busyId)}

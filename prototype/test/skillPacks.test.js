@@ -9,6 +9,7 @@ import {
   enableSkillForGroup,
   formatEnabledSkillMetadataForPrompt,
   installBuiltInSkillPack,
+  installGithubSkillDirectory,
   installRemoteSkillPack,
   installSkillMarkdown,
   listEnabledSkillMetadata,
@@ -35,6 +36,27 @@ function markdown(id = "custom-skill", marker = "CUSTOM_SKILL_FACT") {
   return `---\nname: ${id}\ndescription: Use for a focused real workflow.\n---\n\n# Workflow\n\n- ${marker}\n`;
 }
 
+function githubBundleFetch(files, directorySha = "directory-sha") {
+  const blobs = Object.entries(files).map(([filePath, content], index) => ({
+    path: filePath,
+    type: "blob",
+    size: Buffer.byteLength(content),
+    sha: `blob-${index}`
+  }));
+  const fetchText = async (url) => {
+    if (url.includes("/contents/")) return { ok: true, url, truncated: false, text: JSON.stringify({ type: "dir", sha: directorySha }) };
+    if (url.includes(`/git/trees/${directorySha}`)) return { ok: true, url, truncated: false, text: JSON.stringify({ truncated: false, tree: blobs }) };
+    throw new Error(`Unexpected GitHub URL: ${url}`);
+  };
+  fetchText.bytes = async (url) => {
+    const decoded = decodeURIComponent(url);
+    const filePath = Object.keys(files).find((item) => decoded.endsWith(`/${item}`));
+    if (!filePath) throw new Error(`Unexpected raw GitHub URL: ${url}`);
+    return { ok: true, url, truncated: false, buffer: Buffer.from(files[filePath]) };
+  };
+  return fetchText;
+}
+
 test("skill markdown parser requires bounded frontmatter and instructions", () => {
   const parsed = parseSkillMarkdown(markdown());
   assert.equal(parsed.id, "custom-skill");
@@ -44,13 +66,21 @@ test("skill markdown parser requires bounded frontmatter and instructions", () =
   assert.throws(() => parseSkillMarkdown("---\nname: bad\n---\nbody"), /description/);
 });
 
-test("direct and built-in skill installs persist real content hash and catalog state", () => {
+test("direct and catalog skill installs persist real bundle metadata and catalog state", async () => {
   const { baseDir, dataDir } = makeRoots();
   const previous = process.env.AI_COUNCIL_DATA_DIR;
   process.env.AI_COUNCIL_DATA_DIR = dataDir;
   try {
     const direct = installSkillMarkdown(baseDir, markdown());
-    const builtIn = installBuiltInSkillPack(baseDir, "code-agent");
+    const bundleFetch = githubBundleFetch({
+        "SKILL.md": `---\nname: playwright\ndescription: Browser automation.\n---\n\nRead references/cli.md and run scripts/playwright_cli.sh.\n`,
+        "LICENSE.txt": "Apache License",
+        "references/cli.md": "CLI reference",
+        "scripts/playwright_cli.sh": "#!/bin/sh\necho playwright\n"
+      });
+    const catalogSkill = await installBuiltInSkillPack(baseDir, "openai-playwright", { fetchText: bundleFetch, fetchBytes: bundleFetch.bytes, files: Object.keys({
+      "SKILL.md": true, "LICENSE.txt": true, "references/cli.md": true, "scripts/playwright_cli.sh": true
+    }) });
     const duplicate = installSkillMarkdown(baseDir, markdown());
     const installed = listInstalledSkillPacks(baseDir);
     const read = readSkillPack(baseDir, "custom-skill");
@@ -59,14 +89,84 @@ test("direct and built-in skill installs persist real content hash and catalog s
     assert.equal(direct.ok, true);
     assert.equal(direct.skill.sha256.length, 64);
     assert.equal(direct.skill.executableContent, false);
-    assert.equal(builtIn.ok, true);
-    assert.equal(builtIn.skill.name, "代码助手");
+    assert.equal(catalogSkill.ok, true);
+    assert.equal(catalogSkill.skill.name, "Playwright");
+    assert.equal(catalogSkill.skill.sourceType, "github_directory");
+    assert.equal(catalogSkill.skill.fileCount, 4);
+    assert.equal(catalogSkill.skill.executableContent, true);
+    assert.equal(fs.existsSync(path.join(dataDir, "skills", "openai-playwright", "references", "cli.md")), true);
+    assert.equal(fs.existsSync(path.join(dataDir, "skills", "openai-playwright", "scripts", "playwright_cli.sh")), true);
     assert.equal(duplicate.ok, false);
     assert.equal(duplicate.code, "skill_already_installed");
     assert.equal(installed.length, 2);
     assert.match(read.skill.instructions, /CUSTOM_SKILL_FACT/);
     assert.equal(read.skill.integrity, "verified");
-    assert.equal(catalog.catalog.find((item) => item.id === "code-agent")?.installed, true);
+    assert.equal(catalog.catalog.find((item) => item.id === "openai-playwright")?.installed, true);
+    assert.equal(catalog.catalog.some((item) => item.id === "code-agent"), false);
+    assert.equal(catalog.catalog.some((item) => item.id === "memory-summary"), false);
+  } finally {
+    if (previous === undefined) delete process.env.AI_COUNCIL_DATA_DIR;
+    else process.env.AI_COUNCIL_DATA_DIR = previous;
+  }
+});
+
+test("catalog install rejects missing referenced files without leaving a partial directory", async () => {
+  const { baseDir, dataDir } = makeRoots();
+  const previous = process.env.AI_COUNCIL_DATA_DIR;
+  process.env.AI_COUNCIL_DATA_DIR = dataDir;
+  try {
+    await assert.rejects(
+      (() => {
+        const bundleFetch = githubBundleFetch({
+          "SKILL.md": `---\nname: playwright\ndescription: Browser automation.\n---\n\nRun scripts/missing.sh.\n`
+        });
+        return installBuiltInSkillPack(baseDir, "openai-playwright", { fetchText: bundleFetch, fetchBytes: bundleFetch.bytes, files: ["SKILL.md"] });
+      })(),
+      (error) => error.code === "skill_bundle_missing_reference"
+    );
+    assert.equal(fs.existsSync(path.join(dataDir, "skills", "openai-playwright")), false);
+  } finally {
+    if (previous === undefined) delete process.env.AI_COUNCIL_DATA_DIR;
+    else process.env.AI_COUNCIL_DATA_DIR = previous;
+  }
+});
+
+test("github directory source cannot be installed twice under different ids", async () => {
+  const { baseDir, dataDir } = makeRoots();
+  const previous = process.env.AI_COUNCIL_DATA_DIR;
+  process.env.AI_COUNCIL_DATA_DIR = dataDir;
+  const fetchText = githubBundleFetch({
+    "SKILL.md": `---\nname: shared-source\ndescription: Shared source.\n---\n\nReal instructions.\n`
+  });
+  try {
+    const source = { owner: "example", repo: "skills", repositoryPath: "skills/shared", ref: "main" };
+    const first = await installGithubSkillDirectory(baseDir, { ...source, id: "first-skill" }, { fetchText, fetchBytes: fetchText.bytes });
+    const duplicate = await installGithubSkillDirectory(baseDir, { ...source, id: "second-skill" }, { fetchText, fetchBytes: fetchText.bytes });
+    assert.equal(first.ok, true);
+    assert.equal(duplicate.ok, false);
+    assert.equal(duplicate.code, "skill_source_already_installed");
+    assert.equal(listInstalledSkillPacks(baseDir).length, 1);
+  } finally {
+    if (previous === undefined) delete process.env.AI_COUNCIL_DATA_DIR;
+    else process.env.AI_COUNCIL_DATA_DIR = previous;
+  }
+});
+
+test("legacy prompt-only built-ins are removed without touching user-installed skills", () => {
+  const { baseDir, dataDir, groupPath } = makeRoots();
+  const previous = process.env.AI_COUNCIL_DATA_DIR;
+  process.env.AI_COUNCIL_DATA_DIR = dataDir;
+  try {
+    installSkillMarkdown(baseDir, markdown("code-agent"), { id: "code-agent", sourceType: "built_in", source: "built-in:code-agent" });
+    installSkillMarkdown(baseDir, markdown("browser-check"), { id: "browser-check", sourceType: "direct_markdown", source: "user_direct_markdown" });
+    const group = JSON.parse(fs.readFileSync(path.join(groupPath, "group.json"), "utf8"));
+    group.settings.enabledSkillIds = ["code-agent", "browser-check"];
+    fs.writeFileSync(path.join(groupPath, "group.json"), JSON.stringify(group, null, 2), "utf8");
+
+    const state = listSkillPacksForGroup(baseDir, groupPath);
+    assert.equal(state.skills.some((item) => item.id === "code-agent"), false);
+    assert.equal(state.skills.some((item) => item.id === "browser-check"), true);
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(groupPath, "group.json"), "utf8")).settings.enabledSkillIds, ["browser-check"]);
   } finally {
     if (previous === undefined) delete process.env.AI_COUNCIL_DATA_DIR;
     else process.env.AI_COUNCIL_DATA_DIR = previous;

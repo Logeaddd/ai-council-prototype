@@ -378,7 +378,7 @@ async function executeOne(request, options) {
       } else if (request.skillUrl) {
         result = await installRemoteSkillPack(options.baseDir, { url: request.skillUrl, skillId: request.skillId, overwrite: request.overwrite, timeoutMs: request.timeoutMs }, { signal: options.signal });
       } else {
-        result = installBuiltInSkillPack(options.baseDir, request.skillId || request.catalogId, { overwrite: request.overwrite });
+        result = await installBuiltInSkillPack(options.baseDir, request.skillId || request.catalogId, { overwrite: request.overwrite, signal: options.signal });
       }
       return resultRecord(request, { status: result.ok ? "completed" : "failed", code: result.code, error: result.error, result });
     }

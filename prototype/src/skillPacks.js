@@ -2,95 +2,38 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { userDataDir } from "./appSettings.js";
-import { fetchPublicText } from "./webTools.js";
+import { fetchPublicBuffer, fetchPublicText } from "./webTools.js";
 import { nowIso } from "./types.js";
 
 const MAX_SKILL_BYTES = 64 * 1024;
+const MAX_BUNDLE_FILES = 80;
+const MAX_BUNDLE_FILE_BYTES = 256 * 1024;
+const MAX_BUNDLE_BYTES = 2 * 1024 * 1024;
 const MAX_DESCRIPTION_CHARS = 1200;
 const MAX_SEARCH_RESULTS = 10;
 const SKILL_ID_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
+const LEGACY_PROMPT_SKILL_IDS = new Set(["web-research", "code-agent", "document-reader", "review-work", "memory-summary", "writing-polish", "browser-check"]);
 
-const BUILT_IN_SKILLS = [
-  builtInSkill(
-    "web-research",
-    "联网调研",
-    "用于需要当前信息、多个来源和可核查网址的调研任务。",
-    [
-      "先用 web_search 找到多个相关来源，再用 fetch_url 阅读关键原文。",
-      "区分来源事实、模型推断和未知信息。引用实际读取的网址，不要编造链接。",
-      "来源冲突时保留分歧，并说明哪一项仍需核查。"
-    ]
-  ),
-  builtInSkill(
-    "code-agent",
-    "代码助手",
-    "用于读取项目、修改代码、运行命令和测试、验证交付物的工程任务。",
-    [
-      "先检查现有项目结构、约定和真实错误，再做最小必要修改。",
-      "通过现有文件、终端、测试和 Git 工具工作。工具失败时读取实际输出后换策略。",
-      "声称文件已创建或构建前，运行相应验证并引用当前会话的真实证据。"
-    ]
-  ),
-  builtInSkill(
-    "document-reader",
-    "文档阅读",
-    "用于阅读、对比、提取和整理本地或在线文档内容。",
-    [
-      "先确认文件类型和可用读取方式，再读取正文与必要元数据。",
-      "长文档分段处理，保留章节、页码或文件路径等来源指针。",
-      "摘要必须标明是摘要，不得把推测写成原文事实。"
-    ]
-  ),
-  builtInSkill(
-    "review-work",
-    "审查工作",
-    "用于复查代码、方案或交付物，优先发现真实缺陷和缺失验证。",
-    [
-      "先核对目标和验收条件，再查看实际文件、差异、测试和运行证据。",
-      "发现按严重程度排序，给出文件或证据位置。没有问题时也说明剩余测试空白。",
-      "不把个人偏好冒充客观缺陷；主观判断必须明确标注。"
-    ]
-  ),
-  builtInSkill(
-    "memory-summary",
-    "总结记忆",
-    "用于把公开讨论整理为可追溯的小组摘要和长期记忆候选。",
-    [
-      "保留用户原话、已验证事实、未解决问题和来源时间，不保存隐藏思维过程。",
-      "明确区分原文、总结者理解和推测。总结不等于事实本身。",
-      "只把稳定偏好、长期规则或明确事实作为长期记忆候选。"
-    ]
-  ),
-  builtInSkill(
-    "writing-polish",
-    "写作润色",
-    "用于在不改变核心意思的前提下改善文字的清晰度、结构和语气。",
-    [
-      "先识别受众、用途和必须保留的事实，再修改表达。",
-      "不新增未经提供或核实的事实。专业词能不用就不用，必须用时给出通俗解释。",
-      "优先短句和自然段，删除重复、套话和空泛过渡。"
-    ]
-  ),
-  builtInSkill(
-    "browser-check",
-    "浏览器检查",
-    "用于打开真实页面、操作界面、检查状态并保存截图证据。",
-    [
-      "用 browser_control 打开真实页面并执行用户路径，不靠源码字符串推断界面可用。",
-      "检查加载、交互、错误状态和关键视口；需要时保存截图。",
-      "页面未加载、元素不存在或操作失败时如实记录。"
-    ]
-  )
+const SKILL_CATALOG = [
+  githubSkill("openai-playwright", "Playwright", "浏览器操作与界面测试", "openai", "skills", "skills/.curated/playwright", "49f948faa9258a0c61caceaf225e179651397431", ["LICENSE.txt", "NOTICE.txt", "SKILL.md", "agents/openai.yaml", "assets/playwright-small.svg", "assets/playwright.png", "references/cli.md", "references/workflows.md", "scripts/playwright_cli.sh"]),
+  githubSkill("openai-pdf", "PDF", "读取、创建和检查 PDF", "openai", "skills", "skills/.curated/pdf", "49f948faa9258a0c61caceaf225e179651397431", ["LICENSE.txt", "SKILL.md", "agents/openai.yaml", "assets/pdf.png"]),
+  githubSkill("openai-security-best-practices", "安全检查", "按语言和框架检查常见安全问题", "openai", "skills", "skills/.curated/security-best-practices", "49f948faa9258a0c61caceaf225e179651397431", ["LICENSE.txt", "SKILL.md", "agents/openai.yaml", "references/golang-general-backend-security.md", "references/javascript-express-web-server-security.md", "references/javascript-general-web-frontend-security.md", "references/javascript-jquery-web-frontend-security.md", "references/javascript-typescript-nextjs-web-server-security.md", "references/javascript-typescript-react-web-frontend-security.md", "references/javascript-typescript-vue-web-frontend-security.md", "references/python-django-web-server-security.md", "references/python-fastapi-web-server-security.md", "references/python-flask-web-server-security.md"]),
+  githubSkill("anthropic-doc-coauthoring", "文档协作", "共同起草、修改和检查文档", "anthropics", "skills", "skills/doc-coauthoring", "9d2f1ae187231d8199c64b5b762e1bdf2244733d", ["SKILL.md"])
 ];
 
 export function listSkillCatalog(baseDir) {
   const installed = new Map(listInstalledSkillPacks(baseDir).map((item) => [item.id, item]));
   return {
-    catalog: BUILT_IN_SKILLS.map((item) => ({
+    catalog: SKILL_CATALOG.map((item) => ({
       id: item.id,
       name: item.name,
       description: item.description,
-      sourceType: "built_in",
+      sourceType: "github_directory",
+      source: item.source,
+      sourceUrl: item.sourceUrl,
+      repository: item.repository,
+      repositoryPath: item.repositoryPath,
+      ref: item.ref,
       installed: installed.has(item.id),
       installedRecord: installed.get(item.id)
     }))
@@ -98,6 +41,7 @@ export function listSkillCatalog(baseDir) {
 }
 
 export function listInstalledSkillPacks(baseDir) {
+  pruneLegacyPromptSkills(baseDir);
   const root = skillStoreRoot(baseDir);
   if (!fs.existsSync(root)) return [];
   return fs.readdirSync(root, { withFileTypes: true })
@@ -109,8 +53,8 @@ export function listInstalledSkillPacks(baseDir) {
 
 export function listSkillPacksForGroup(baseDir, groupPath) {
   const installed = listInstalledSkillPacks(baseDir);
-  const enabledIds = new Set(readEnabledSkillIds(groupPath));
   const knownIds = new Set(installed.map((item) => item.id));
+  const enabledIds = new Set(removeLegacyEnabledSkillIds(groupPath, knownIds));
   return {
     skills: installed.map((item) => ({ ...item, enabled: enabledIds.has(item.id) })),
     enabledMissing: [...enabledIds].filter((id) => !knownIds.has(id))
@@ -156,16 +100,11 @@ export function readSkillPackChunk(baseDir, skillId, options = {}) {
   };
 }
 
-export function installBuiltInSkillPack(baseDir, skillId, options = {}) {
+export async function installBuiltInSkillPack(baseDir, skillId, options = {}) {
   const id = requireSkillId(skillId);
-  const item = BUILT_IN_SKILLS.find((skill) => skill.id === id);
-  if (!item) throw skillError("skill_catalog_item_not_found", `Unknown built-in skill: ${id}.`);
-  return installSkillMarkdown(baseDir, item.markdown, {
-    ...options,
-    id,
-    sourceType: "built_in",
-    source: `built-in:${id}`
-  });
+  const item = SKILL_CATALOG.find((skill) => skill.id === id);
+  if (!item) throw skillError("skill_catalog_item_not_found", `Unknown catalog skill: ${id}.`);
+  return installGithubSkillDirectory(baseDir, { ...item, ...(Array.isArray(options.files) ? { files: options.files } : {}) }, options);
 }
 
 export function installSkillMarkdown(baseDir, markdownInput, options = {}) {
@@ -232,6 +171,113 @@ export async function installRemoteSkillPack(baseDir, input = {}, options = {}) 
   });
 }
 
+export async function installGithubSkillDirectory(baseDir, input = {}, options = {}) {
+  const spec = normalizeGithubSkillSpec(input);
+  const existingBySource = listInstalledSkillPacks(baseDir).find((item) => item.sourceIdentity === spec.sourceIdentity && item.id !== spec.id);
+  if (existingBySource) {
+    return {
+      ok: false,
+      source: "local_skill_store",
+      code: "skill_source_already_installed",
+      error: `This Skill source is already installed as ${existingBySource.id}.`,
+      skill: existingBySource
+    };
+  }
+  const directory = skillDirectory(baseDir, spec.id);
+  if (fs.existsSync(directory) && !options.overwrite) {
+    return { ok: false, source: "local_skill_store", code: "skill_already_installed", error: `Skill pack ${spec.id} is already installed.`, skill: readInstalledMetadata(baseDir, spec.id) };
+  }
+
+  const fetchText = options.fetchText || fetchPublicText;
+  const fetchBytes = options.fetchBytes || fetchPublicBuffer;
+  let revision = spec.ref;
+  let blobs;
+  if (Array.isArray(spec.files) && spec.files.length) {
+    blobs = spec.files.map((filePath) => ({ path: filePath, type: "blob", size: 0, sha: "pinned-manifest" }));
+  } else {
+    const directoryInfo = await resolveGithubDirectoryInfo(fetchText, spec, options);
+    if (!directoryInfo || directoryInfo.type !== "dir" || !directoryInfo.sha) throw skillError("skill_directory_not_found", "GitHub Skill directory was not found.");
+    revision = String(directoryInfo.sha);
+    const tree = await fetchGithubJson(fetchText, githubApiUrl(`/repos/${spec.owner}/${spec.repo}/git/trees/${directoryInfo.sha}?recursive=1`), options);
+    if (tree.truncated) throw skillError("skill_tree_truncated", "GitHub returned a truncated Skill directory tree.");
+    blobs = (Array.isArray(tree.tree) ? tree.tree : []).filter((item) => item.type === "blob");
+  }
+  validateBundleEntries(blobs);
+
+  const files = [];
+  let totalBytes = 0;
+  for (const blob of blobs) {
+    const relativePath = normalizeBundlePath(blob.path);
+    const rawUrl = Array.isArray(spec.files) && spec.files.length
+      ? `https://cdn.jsdelivr.net/gh/${spec.owner}/${spec.repo}@${encodeURIComponent(spec.ref)}/${encodeGithubPath(spec.repositoryPath)}/${encodeGithubPath(relativePath)}`
+      : `https://raw.githubusercontent.com/${spec.owner}/${spec.repo}/${encodeURIComponent(spec.ref)}/${encodeGithubPath(spec.repositoryPath)}/${encodeGithubPath(relativePath)}`;
+    const payload = await fetchSkillFileWithRetry(fetchBytes, rawUrl, {
+      timeoutMs: options.timeoutMs,
+      maxBytes: MAX_BUNDLE_FILE_BYTES,
+      signal: options.signal,
+      allowHttp: options.allowHttp,
+      allowUnsafePrivateNetwork: options.allowUnsafePrivateNetwork
+    });
+    if (payload.truncated) throw skillError("skill_file_too_large", `${relativePath} exceeds the per-file limit.`);
+    const content = Buffer.from(payload.buffer);
+    if (content.length > MAX_BUNDLE_FILE_BYTES) throw skillError("skill_file_too_large", `${relativePath} exceeds the per-file limit.`);
+    totalBytes += content.length;
+    if (totalBytes > MAX_BUNDLE_BYTES) throw skillError("skill_bundle_too_large", `Skill bundle exceeds ${MAX_BUNDLE_BYTES} bytes.`);
+    files.push({ path: relativePath, content, sha: String(blob.sha || "") });
+  }
+  const skillFile = files.find((item) => item.path === "SKILL.md");
+  if (!skillFile) throw skillError("missing_skill_file", "GitHub Skill directory does not contain SKILL.md.");
+  const markdown = normalizeMarkdown(skillFile.content.toString("utf8"));
+  const parsed = parseSkillMarkdown(markdown, { expectedId: spec.id });
+  verifyLocalReferences(markdown, new Set(files.map((item) => item.path)));
+
+  const installedAt = nowIso();
+  const bundleHash = hashBundle(files);
+  const licenseFile = files.find((item) => /^LICENSE(?:\.|$)/i.test(item.path));
+  const metadata = {
+    id: spec.id,
+    name: spec.displayName || parsed.name,
+    description: spec.description || parsed.description,
+    sourceType: "github_directory",
+    source: spec.source,
+    sourceUrl: spec.sourceUrl,
+    sourceIdentity: spec.sourceIdentity,
+    repository: `${spec.owner}/${spec.repo}`,
+    repositoryPath: spec.repositoryPath,
+    ref: spec.ref,
+    revision,
+    sha256: sha256(markdown),
+    bundleSha256: bundleHash,
+    bytes: Buffer.byteLength(markdown, "utf8"),
+    bundleBytes: totalBytes,
+    fileCount: files.length,
+    files: files.map((item) => item.path),
+    licenseFile: licenseFile?.path || "",
+    installedAt,
+    updatedAt: installedAt,
+    executableContent: files.some((item) => item.path.startsWith("scripts/"))
+  };
+  const temporary = `${directory}.tmp-${process.pid}-${Date.now()}`;
+  fs.rmSync(temporary, { recursive: true, force: true });
+  fs.mkdirSync(temporary, { recursive: true });
+  try {
+    for (const file of files) {
+      const target = path.join(temporary, ...file.path.split("/"));
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.writeFileSync(target, file.path === "SKILL.md" ? markdown : file.content);
+    }
+    fs.writeFileSync(path.join(temporary, "metadata.json"), JSON.stringify(metadata, null, 2), "utf8");
+    fs.mkdirSync(path.dirname(directory), { recursive: true });
+    if (fs.existsSync(directory)) fs.rmSync(directory, { recursive: true, force: true });
+    fs.renameSync(temporary, directory);
+  } catch (error) {
+    fs.rmSync(temporary, { recursive: true, force: true });
+    throw error;
+  }
+  appendSkillAudit(baseDir, "install", metadata);
+  return { ok: true, source: "local_skill_store", skill: metadata };
+}
+
 export function removeSkillPack(baseDir, skillId) {
   const id = requireSkillId(skillId);
   const metadata = readInstalledMetadata(baseDir, id);
@@ -291,14 +337,15 @@ export async function searchSkillCandidates(query, options = {}) {
   const text = String(query || "").trim();
   if (!text) return { ok: false, source: "github_repository_search", code: "missing_query", error: "Missing skill search query.", results: [] };
   const count = clampNumber(options.count, 8, 1, MAX_SEARCH_RESULTS);
-  const catalogResults = BUILT_IN_SKILLS
+  const catalogResults = SKILL_CATALOG
     .filter((item) => `${item.id} ${item.name} ${item.description}`.toLowerCase().includes(text.toLowerCase()))
     .slice(0, count)
     .map((item) => ({
-      type: "built_in",
+      type: "catalog",
       id: item.id,
       name: item.name,
       description: item.description,
+      sourceUrl: item.sourceUrl,
       verifiedSkillFile: true
     }));
   const endpoint = new URL(options.endpoint || "https://api.github.com/search/repositories");
@@ -380,19 +427,138 @@ function parseScalar(value) {
   return text;
 }
 
-function builtInSkill(id, name, description, instructions) {
-  const markdown = [
-    "---",
-    `name: ${JSON.stringify(name)}`,
-    `description: ${JSON.stringify(description)}`,
-    "---",
-    "",
-    `# ${name}`,
-    "",
-    ...instructions.map((item) => `- ${item}`),
-    ""
-  ].join("\n");
-  return { id, name, description, markdown };
+function githubSkill(id, name, description, owner, repo, repositoryPath, ref, files) {
+  const repository = `${owner}/${repo}`;
+  return {
+    id,
+    name,
+    displayName: name,
+    description,
+    owner,
+    repo,
+    repository,
+    repositoryPath,
+    ref,
+    files,
+    source: `github:${repository}/${repositoryPath}@${ref}`,
+    sourceUrl: `https://github.com/${repository}/tree/${ref}/${repositoryPath}`,
+    sourceIdentity: `github:${repository.toLowerCase()}/${repositoryPath.toLowerCase()}`
+  };
+}
+
+function normalizeGithubSkillSpec(input = {}) {
+  const owner = String(input.owner || "").trim();
+  const repo = String(input.repo || "").trim();
+  const repositoryPath = normalizeBundlePath(input.repositoryPath || input.path || "");
+  const ref = String(input.ref || "main").trim();
+  const id = requireSkillId(input.id || input.skillId);
+  if (!/^[A-Za-z0-9_.-]+$/.test(owner) || !/^[A-Za-z0-9_.-]+$/.test(repo)) throw skillError("invalid_skill_repository", "GitHub repository owner or name is invalid.");
+  if (!repositoryPath || !ref || /[\r\n]/.test(ref)) throw skillError("invalid_skill_repository", "GitHub Skill path or ref is invalid.");
+  const repository = `${owner}/${repo}`;
+  return {
+    ...input,
+    id,
+    owner,
+    repo,
+    repository,
+    repositoryPath,
+    ref,
+    source: `github:${repository}/${repositoryPath}@${ref}`,
+    sourceUrl: `https://github.com/${repository}/tree/${encodeURIComponent(ref)}/${repositoryPath}`,
+    sourceIdentity: `github:${repository.toLowerCase()}/${repositoryPath.toLowerCase()}`
+  };
+}
+
+async function fetchGithubJson(fetchText, url, options = {}) {
+  const response = await fetchText(url, {
+    timeoutMs: options.timeoutMs,
+    maxBytes: 160 * 1024,
+    signal: options.signal,
+    allowHttp: options.allowHttp,
+    allowUnsafePrivateNetwork: options.allowUnsafePrivateNetwork
+  });
+  if (response.truncated) throw skillError("skill_github_response_truncated", "GitHub response exceeded the download limit.");
+  try {
+    return JSON.parse(response.text);
+  } catch {
+    throw skillError("skill_github_response_invalid", "GitHub returned invalid JSON while installing the Skill.");
+  }
+}
+
+async function fetchSkillFileWithRetry(fetchBytes, url, options = {}) {
+  let lastError;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      return await fetchBytes(url, options);
+    } catch (error) {
+      lastError = error;
+      if (options.signal?.aborted || attempt === 2) break;
+      await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)));
+    }
+  }
+  throw lastError;
+}
+
+async function resolveGithubDirectoryInfo(fetchText, spec, options = {}) {
+  const parts = spec.repositoryPath.split("/");
+  const directoryName = parts.pop();
+  const parentPath = parts.join("/");
+  const contents = await fetchGithubJson(
+    fetchText,
+    githubApiUrl(`/repos/${spec.owner}/${spec.repo}/contents/${encodeGithubPath(parentPath)}?ref=${encodeURIComponent(spec.ref)}`),
+    options
+  );
+  if (!Array.isArray(contents)) return contents;
+  return contents.find((item) => item.type === "dir" && item.name === directoryName);
+}
+
+function githubApiUrl(pathname) {
+  return `https://api.github.com${pathname}`;
+}
+
+function encodeGithubPath(value) {
+  return String(value || "").split("/").map(encodeURIComponent).join("/");
+}
+
+function normalizeBundlePath(value) {
+  const normalized = String(value || "").replaceAll("\\", "/").replace(/^\/+|\/+$/g, "");
+  const parts = normalized.split("/");
+  if (!normalized || parts.some((part) => !part || part === "." || part === ".." || part.includes("\0"))) throw skillError("invalid_skill_file_path", "Skill bundle contains an unsafe file path.");
+  return parts.join("/");
+}
+
+function validateBundleEntries(blobs) {
+  if (!blobs.length) throw skillError("empty_skill_bundle", "GitHub Skill directory is empty.");
+  if (blobs.length > MAX_BUNDLE_FILES) throw skillError("skill_bundle_too_many_files", `Skill bundle exceeds ${MAX_BUNDLE_FILES} files.`);
+  let declaredBytes = 0;
+  const paths = new Set();
+  for (const blob of blobs) {
+    const relativePath = normalizeBundlePath(blob.path);
+    if (paths.has(relativePath.toLowerCase())) throw skillError("duplicate_skill_file", `Skill bundle repeats ${relativePath}.`);
+    paths.add(relativePath.toLowerCase());
+    const size = Number(blob.size || 0);
+    if (!Number.isFinite(size) || size < 0 || size > MAX_BUNDLE_FILE_BYTES) throw skillError("skill_file_too_large", `${relativePath} exceeds the per-file limit.`);
+    declaredBytes += size;
+  }
+  if (declaredBytes > MAX_BUNDLE_BYTES) throw skillError("skill_bundle_too_large", `Skill bundle exceeds ${MAX_BUNDLE_BYTES} bytes.`);
+}
+
+function verifyLocalReferences(markdown, files) {
+  const references = [...markdown.matchAll(/(?:^|[\s`(])((?:scripts|references|assets|agents)\/[A-Za-z0-9_./-]+)/gm)]
+    .map((match) => match[1].replace(/[),.;:'"]+$/g, ""));
+  const missing = [...new Set(references)].filter((item) => !files.has(item));
+  if (missing.length) throw skillError("skill_bundle_missing_reference", `Skill bundle is missing referenced files: ${missing.slice(0, 5).join(", ")}.`);
+}
+
+function hashBundle(files) {
+  const hash = crypto.createHash("sha256");
+  for (const file of [...files].sort((a, b) => a.path.localeCompare(b.path))) {
+    hash.update(file.path, "utf8");
+    hash.update("\0");
+    hash.update(file.content);
+    hash.update("\0");
+  }
+  return hash.digest("hex");
 }
 
 function normalizeMarkdown(input) {
@@ -451,18 +617,28 @@ function readInstalledMetadata(baseDir, skillId) {
     const actualHash = sha256(normalizeMarkdown(markdown));
     return {
       id,
-      name: parsed.name,
-      description: parsed.description,
+      name: String(stored.name || parsed.name),
+      description: String(stored.description || parsed.description),
       sourceType: normalizeSourceType(stored.sourceType),
       source: String(stored.source || "").slice(0, 2000),
       sourceUrl: String(stored.sourceUrl || "").slice(0, 4000),
+      sourceIdentity: String(stored.sourceIdentity || "").slice(0, 2000),
+      repository: String(stored.repository || "").slice(0, 500),
+      repositoryPath: String(stored.repositoryPath || "").slice(0, 2000),
+      ref: String(stored.ref || "").slice(0, 500),
+      revision: String(stored.revision || "").slice(0, 200),
       sha256: actualHash,
+      bundleSha256: String(stored.bundleSha256 || ""),
       storedSha256: String(stored.sha256 || ""),
       integrity: actualHash === stored.sha256 ? "verified" : "changed_on_disk",
       bytes: Buffer.byteLength(markdown, "utf8"),
+      bundleBytes: Number(stored.bundleBytes || Buffer.byteLength(markdown, "utf8")),
+      fileCount: Number(stored.fileCount || 1),
+      files: Array.isArray(stored.files) ? stored.files.map((item) => String(item)).slice(0, MAX_BUNDLE_FILES) : ["SKILL.md"],
+      licenseFile: String(stored.licenseFile || ""),
       installedAt: String(stored.installedAt || ""),
       updatedAt: String(stored.updatedAt || stored.installedAt || ""),
-      executableContent: false
+      executableContent: Boolean(stored.executableContent)
     };
   } catch {
     return undefined;
@@ -475,6 +651,34 @@ function readEnabledSkillIds(groupPath) {
     return normalizeSkillIds(readGroup(groupPath).settings?.enabledSkillIds);
   } catch {
     return [];
+  }
+}
+
+function removeLegacyEnabledSkillIds(groupPath, knownIds = new Set()) {
+  const ids = readEnabledSkillIds(groupPath);
+  const filtered = ids.filter((id) => !LEGACY_PROMPT_SKILL_IDS.has(id) || knownIds.has(id));
+  if (groupPath && filtered.length !== ids.length) {
+    try {
+      const group = readGroup(groupPath);
+      writeEnabledSkillIds(groupPath, group, filtered);
+    } catch {}
+  }
+  return filtered;
+}
+
+function pruneLegacyPromptSkills(baseDir) {
+  const root = skillStoreRoot(baseDir);
+  if (!fs.existsSync(root)) return;
+  for (const id of LEGACY_PROMPT_SKILL_IDS) {
+    const directory = path.join(root, id);
+    const metadataPath = path.join(directory, "metadata.json");
+    if (!fs.existsSync(metadataPath)) continue;
+    try {
+      const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8"));
+      if (metadata.sourceType !== "built_in" || metadata.source !== `built-in:${id}`) continue;
+      fs.rmSync(directory, { recursive: true, force: true });
+      appendSkillAudit(baseDir, "remove_legacy_prompt_stub", { id, sourceType: "built_in" });
+    } catch {}
   }
 }
 
@@ -508,7 +712,7 @@ function normalizeSkillIds(value) {
 
 function normalizeSourceType(value) {
   const source = String(value || "direct_markdown").trim();
-  return ["built_in", "direct_markdown", "remote_url"].includes(source) ? source : "direct_markdown";
+  return ["built_in", "direct_markdown", "remote_url", "github_directory"].includes(source) ? source : "direct_markdown";
 }
 
 function skillStoreRoot(baseDir) {

@@ -530,9 +530,16 @@ export interface SkillPackRecord {
   sourceType: string
   source?: string
   sourceUrl?: string
+  repository?: string
+  repositoryPath?: string
+  revision?: string
   sha256?: string
+  bundleSha256?: string
   integrity?: string
   bytes?: number
+  bundleBytes?: number
+  fileCount?: number
+  licenseFile?: string
   installedAt?: string
   enabled?: boolean
 }
@@ -543,12 +550,13 @@ export interface SkillCatalogRecord extends SkillPackRecord {
 }
 
 export interface SkillSearchResult {
-  type: "built_in" | "github_repository_candidate" | string
+  type: "built_in" | "catalog" | "github_repository_candidate" | string
   id: string
   name: string
   description?: string
   url?: string
   skillUrl?: string
+  sourceUrl?: string
   stars?: number
   verifiedSkillFile?: boolean
 }

@@ -370,7 +370,7 @@ async function handleApi(req, res, url) {
         timeoutMs: body.timeoutMs
       });
     } else {
-      result = installBuiltInSkillPack(baseDir, body.skillId || body.catalogId || body.id, {
+      result = await installBuiltInSkillPack(baseDir, body.skillId || body.catalogId || body.id, {
         overwrite: Boolean(body.overwrite)
       });
     }
