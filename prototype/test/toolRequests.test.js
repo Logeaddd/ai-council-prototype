@@ -40,6 +40,37 @@ test("controlled file tool requests list, read, search, and grep real workspace 
   assert.equal(fs.existsSync(path.join(tmp, "shared", "logs", "tools.jsonl")), true);
 });
 
+test("repeated unchanged file observations are bounded across tool loops", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-repeat-observation-"));
+  fs.writeFileSync(path.join(tmp, "build.gradle"), "plugins {}\n", "utf8");
+  const previousResults = [];
+
+  for (let index = 0; index < 2; index += 1) {
+    const result = await executeToolRequests({
+      permissionTier: "tool",
+      groupPath: tmp,
+      agent: { id: "reader", name: "Reader" },
+      round: index + 1,
+      previousResults,
+      requests: [{ tool: "read_file", path: "build.gradle", reason: "Inspect build" }]
+    });
+    assert.equal(result.results[0].status, "completed");
+    previousResults.push(...result.results);
+  }
+
+  const blocked = await executeToolRequests({
+    permissionTier: "tool",
+    groupPath: tmp,
+    agent: { id: "reader", name: "Reader" },
+    round: 3,
+    previousResults,
+    requests: [{ tool: "read_file", path: "build.gradle", reason: "Inspect build again" }]
+  });
+
+  assert.equal(blocked.results.length, 0);
+  assert.equal(blocked.rejected[0].code, "repeated_observation_limit");
+});
+
 test("controlled file tools can read common build configuration files", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-build-files-"));
   fs.writeFileSync(path.join(tmp, "build.gradle"), "plugins { id 'fabric-loom' }\n", "utf8");

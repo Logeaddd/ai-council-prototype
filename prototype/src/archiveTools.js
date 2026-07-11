@@ -94,6 +94,19 @@ export function extractArchiveTool(request = {}, options = {}) {
   };
 }
 
+export function inspectZipArchive(filePath) {
+  const buffer = fs.readFileSync(filePath);
+  const entries = readZipCentralDirectory(buffer);
+  return {
+    entries: entries.map((entry) => ({
+      name: entry.name,
+      directory: entry.directory,
+      compressedSize: entry.compressedSize,
+      uncompressedSize: entry.uncompressedSize
+    }))
+  };
+}
+
 function readZipCentralDirectory(buffer) {
   const eocdOffset = findEndOfCentralDirectory(buffer);
   const entryCount = buffer.readUInt16LE(eocdOffset + 10);

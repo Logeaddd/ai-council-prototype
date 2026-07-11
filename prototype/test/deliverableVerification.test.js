@@ -6,9 +6,64 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   applyDeliverableVerification,
+  enforceRequestedArtifactRequirements,
   normalizeDeliverableClaims,
   verifyFinalDeliverables
 } from "../src/deliverableVerification.js";
+
+test("explicit JAR requests fail when the run produced no valid JAR", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-required-jar-missing-"));
+  const session = {
+    finalDecision: { answer: "Work is complete.", final_state: "ready_to_execute", blocking_issues: [], risks: [] },
+    toolExecutionResults: [],
+    fileOperationExecutionResults: []
+  };
+
+  const report = enforceRequestedArtifactRequirements({
+    groupPath: root,
+    question: "Build the mod and package it as a JAR.",
+    session
+  });
+
+  assert.equal(report.status, "needs_revision");
+  assert.equal(session.finalDecision.final_state, "needs_revision");
+  assert.match(session.finalDecision.blocking_issues[0].issue, /No valid \.jar artifact/);
+});
+
+test("explicit JAR requests pass only for a current-run observed archive with manifest and classes", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-required-jar-valid-"));
+  const relativePath = "build/libs/mod.jar";
+  fs.mkdirSync(path.join(root, "build", "libs"), { recursive: true });
+  fs.writeFileSync(path.join(root, relativePath), makeStoredZip([
+    { name: "META-INF/MANIFEST.MF", content: "Manifest-Version: 1.0\n" },
+    { name: "com/example/Mod.class", content: "CLASS_BYTES" }
+  ]));
+  const session = {
+    finalDecision: { answer: "Built the requested JAR.", final_state: "ready_to_execute", blocking_issues: [], risks: [] },
+    toolExecutionResults: [{
+      id: "build-command",
+      tool: "execute_command",
+      status: "completed",
+      result: {
+        ok: true,
+        exitCode: 0,
+        workspaceChanges: { observedArtifacts: [{ path: relativePath }] }
+      }
+    }],
+    fileOperationExecutionResults: []
+  };
+
+  const report = enforceRequestedArtifactRequirements({
+    groupPath: root,
+    question: "构建成 jar 包。",
+    session
+  });
+
+  assert.equal(report.status, "verified");
+  assert.equal(report.requirements[0].path, relativePath);
+  assert.equal(report.requirements[0].evidence_id, "build-command");
+  assert.equal(session.finalDecision.final_state, "ready_to_execute");
+});
 
 test("normalizes structured deliverable claims", () => {
   assert.deepEqual(normalizeDeliverableClaims([
@@ -375,3 +430,43 @@ test("fallback extraction does not carry a completion claim across sentences", (
 
   assert.equal(report.status, "not_claimed");
 });
+
+function makeStoredZip(entries) {
+  const localParts = [];
+  const centralParts = [];
+  let offset = 0;
+  for (const entry of entries) {
+    const name = Buffer.from(entry.name, "utf8");
+    const data = Buffer.from(entry.content, "utf8");
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0);
+    local.writeUInt16LE(20, 4);
+    local.writeUInt16LE(0, 6);
+    local.writeUInt16LE(0, 8);
+    local.writeUInt32LE(data.length, 18);
+    local.writeUInt32LE(data.length, 22);
+    local.writeUInt16LE(name.length, 26);
+    localParts.push(local, name, data);
+
+    const central = Buffer.alloc(46);
+    central.writeUInt32LE(0x02014b50, 0);
+    central.writeUInt16LE(20, 4);
+    central.writeUInt16LE(20, 6);
+    central.writeUInt16LE(0, 8);
+    central.writeUInt16LE(0, 10);
+    central.writeUInt32LE(data.length, 20);
+    central.writeUInt32LE(data.length, 24);
+    central.writeUInt16LE(name.length, 28);
+    central.writeUInt32LE(offset, 42);
+    centralParts.push(central, name);
+    offset += local.length + name.length + data.length;
+  }
+  const centralDir = Buffer.concat(centralParts);
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0);
+  eocd.writeUInt16LE(entries.length, 8);
+  eocd.writeUInt16LE(entries.length, 10);
+  eocd.writeUInt32LE(centralDir.length, 12);
+  eocd.writeUInt32LE(offset, 16);
+  return Buffer.concat([...localParts, centralDir, eocd]);
+}

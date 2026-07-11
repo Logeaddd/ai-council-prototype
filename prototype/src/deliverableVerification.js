@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { isInsidePath, normalizeWorkspacePathAlias, resolveInside } from "./pathGuards.js";
 import { nowIso } from "./types.js";
+import { inspectZipArchive } from "./archiveTools.js";
 
 const MUTATING_TOOL_NAMES = new Set([
   "execute_command",
@@ -90,6 +91,92 @@ export function applyDeliverableVerification(session, report) {
   finalDecision.risks = mergeText(finalDecision.risks, issues.map((item) => `BLOCKER ${item.id}: ${item.issue}`));
   if (finalDecision.final_state !== "failed_to_converge") finalDecision.final_state = "needs_revision";
   return finalDecision;
+}
+
+export function enforceRequestedArtifactRequirements(options = {}) {
+  const requested = requestedArtifactExtensions(options.question);
+  if (!requested.length || !options.session?.finalDecision) return { status: "not_requested", requirements: [] };
+  const groupPath = path.resolve(options.groupPath || "");
+  const evidence = collectSessionEvidence(options.session);
+  const requirements = requested.map((extension) => verifyRequestedArtifact(extension, groupPath, evidence));
+  const failed = requirements.filter((item) => item.status !== "verified");
+  if (failed.length) {
+    const issues = failed.map((item, index) => ({
+      id: `requested-artifact-${index + 1}`,
+      issue: item.reason,
+      severity: "blocker",
+      blocks_final: true,
+      in_scope: true,
+      why: `The user explicitly requested a ${item.extension} artifact, but this run did not verify one.`,
+      suggested_fix: `Run the real build, inspect the resulting ${item.extension} file, and keep the successful command evidence in this session.`,
+      source_agent_id: "system",
+      source_agent_name: "Deliverable verifier",
+      status: "open"
+    }));
+    options.session.finalDecision.final_state = "needs_revision";
+    options.session.finalDecision.blocking_issues = mergeIssues(options.session.finalDecision.blocking_issues, issues);
+    options.session.finalDecision.risks = mergeText(options.session.finalDecision.risks, issues.map((item) => `BLOCKER ${item.id}: ${item.issue}`));
+  }
+  const report = {
+    status: failed.length ? "needs_revision" : "verified",
+    source: "explicit_user_artifact_requirement",
+    verifiedAt: nowIso(),
+    requirements
+  };
+  options.session.finalDecision.requested_artifact_verification = report;
+  return report;
+}
+
+function requestedArtifactExtensions(question) {
+  const text = String(question || "");
+  const requested = [];
+  if (/(?:\.jar\b|\bjar\b|jar\s*包)/i.test(text)) requested.push(".jar");
+  if (/(?:\.exe\b|\bexe\b|exe\s*(?:文件|版本|安装包))/i.test(text)) requested.push(".exe");
+  return [...new Set(requested)];
+}
+
+function verifyRequestedArtifact(extension, groupPath, evidence) {
+  const candidates = evidence
+    .filter((item) => item.kind === "tool")
+    .flatMap((item) => workspaceArtifactPaths(item.item).map((relativePath) => ({ relativePath, evidenceId: item.id })))
+    .filter((item) => item.relativePath.toLowerCase().endsWith(extension));
+  for (const candidate of candidates) {
+    let absolutePath;
+    try {
+      absolutePath = resolveDeliverablePath(groupPath, candidate.relativePath).absolutePath;
+    } catch {
+      continue;
+    }
+    if (!fs.existsSync(absolutePath) || !fs.statSync(absolutePath).isFile() || fs.statSync(absolutePath).size <= 0) continue;
+    if (extension === ".jar") {
+      try {
+        const archive = inspectZipArchive(absolutePath);
+        const names = archive.entries.map((entry) => entry.name.toLowerCase());
+        if (!names.includes("meta-inf/manifest.mf") || !names.some((name) => name.endsWith(".class"))) continue;
+      } catch {
+        continue;
+      }
+    }
+    return {
+      extension,
+      status: "verified",
+      path: candidate.relativePath,
+      evidence_id: candidate.evidenceId
+    };
+  }
+  return {
+    extension,
+    status: "missing_or_invalid",
+    reason: `No valid ${extension} artifact was produced and observed by a successful command in this run.`
+  };
+}
+
+function workspaceArtifactPaths(record = {}) {
+  const changes = record.result?.workspaceChanges || {};
+  return [changes.created, changes.modified, changes.observedArtifacts]
+    .flatMap((items) => Array.isArray(items) ? items : [])
+    .map((item) => String(typeof item === "string" ? item : item?.path || "").trim())
+    .filter(Boolean);
 }
 
 function extractDeliverableClaims(answer) {

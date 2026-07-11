@@ -186,6 +186,13 @@ export async function executeToolRequests(options = {}) {
       appendProcessAuditLog(options.groupPath, "rejected", rejection);
       continue;
     }
+    if (isRepeatedObservation(normalized, [...(options.previousResults || []), ...results])) {
+      const rejection = reject(base, "repeated_observation_limit", "This exact file or context observation already completed twice without enough new progress. Use the recorded result, inspect a different target, or perform a material action before reading it again.");
+      rejected.push(rejection);
+      events.push(toolEvent("tool_failure", base, { status: "rejected", code: rejection.code, error: rejection.error }));
+      appendToolAuditLog(options.groupPath, "rejected", rejection);
+      continue;
+    }
     if (isRepeatedFailedCommand(normalized, [...(options.previousResults || []), ...results])) {
       const rejection = reject(base, "repeated_failed_command", "This exact command already failed in the current tool loop. Inspect the recorded failure and choose a materially different action instead of repeating it.");
       rejected.push(rejection);
@@ -232,6 +239,43 @@ export async function executeToolRequests(options = {}) {
   }
 
   return { accepted, rejected, results, events };
+}
+
+function isRepeatedObservation(request, previousResults = []) {
+  const signature = observationSignature(request);
+  if (!signature) return false;
+  let matches = 0;
+  for (const item of Array.isArray(previousResults) ? previousResults : []) {
+    if (item?.status !== "completed") continue;
+    if (observationSignature(item) !== signature) continue;
+    matches += 1;
+    if (matches >= 2) return true;
+  }
+  return false;
+}
+
+function observationSignature(request = {}) {
+  const tool = String(request.tool || "");
+  if (tool === "read_file" || tool === "list_directory") {
+    return `${tool}:${normalizeObservationValue(request.path || ".")}`;
+  }
+  if (tool === "search_files") {
+    return `${tool}:${normalizeObservationValue(request.path || request.root || ".")}:${normalizeObservationValue(request.query)}`;
+  }
+  if (tool === "grep_content") {
+    return `${tool}:${normalizeObservationValue(request.path || request.root || ".")}:${normalizeObservationValue(request.pattern || request.query)}`;
+  }
+  if (tool === "search_context") {
+    return `${tool}:${normalizeObservationValue(request.query)}`;
+  }
+  if (tool === "load_context") {
+    return `${tool}:${normalizeObservationValue(request.sessionId)}:${normalizeObservationValue(request.archiveRound)}`;
+  }
+  return "";
+}
+
+function normalizeObservationValue(value) {
+  return String(value ?? "").trim().replaceAll("\\", "/").replace(/\/+/g, "/").toLowerCase();
 }
 
 function isRepeatedFailedCommand(request, previousResults = []) {

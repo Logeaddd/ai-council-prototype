@@ -39,7 +39,11 @@ test("server exposes an SSE council events endpoint", () => {
   assert.match(serverJs, /runtimeGroup/);
   assert.match(serverJs, /continuationContext: body\.continuationContext/);
   assert.match(serverJs, /attachments: normalizeFileAttachments\(body\.attachments \|\| \[\]\)/);
-  assert.match(serverJs, /req\.on\("close", \(\) => controller\.abort\(\)\)/);
+  assert.match(serverJs, /\/api\/council\/stop/);
+  assert.match(serverJs, /activeCouncilRuns\.start\(options\.groupPath\)/);
+  assert.match(serverJs, /req\.once\("aborted", abortDisconnectedRun\)/);
+  assert.match(serverJs, /res\.once\("close", abortDisconnectedRun\)/);
+  assert.match(serverJs, /activeCouncilRuns\.finish\(options\.groupPath, run\.id\)/);
 });
 
 test("server validates user file attachments before sending them to agents", () => {

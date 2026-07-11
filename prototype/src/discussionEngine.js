@@ -21,7 +21,7 @@ import { readPrivateContextMessages } from "./privateChat.js";
 import { normalizeFileAttachments } from "./attachments.js";
 import { readTaskState, updateTaskStateFromSession } from "./taskState.js";
 import { discoverRuntimeEnvironment, formatRuntimeEnvironment } from "./runtimeEnvironment.js";
-import { applyDeliverableVerification, verifyFinalDeliverables } from "./deliverableVerification.js";
+import { applyDeliverableVerification, enforceRequestedArtifactRequirements, verifyFinalDeliverables } from "./deliverableVerification.js";
 import { formatEnabledSkillMetadataForPrompt, listEnabledSkillMetadata } from "./skillPacks.js";
 import { capabilityEnabled } from "./capabilityPolicy.js";
 import fs from "node:fs";
@@ -104,6 +104,9 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
     contextRetrievalResults: retrievedContext,
     rejectedFileOperationProposals: [],
     pendingFileOperationProposals: [],
+    modelCallCount: 0,
+    modelCallBudget: normalizeModelCallBudget(group.settings.maxModelCalls),
+    guardStopReason: "",
     messages: []
   };
 
@@ -113,6 +116,14 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
     session.durationMs = elapsedMs(sessionStartMs);
     return writeGroupSession(session, options.groupPath);
   };
+  const persistInterruptedSession = () => {
+    if (session.status !== "running") return;
+    session.status = "interrupted";
+    session.interruptionReason = abortReasonCode(options.signal);
+    session.completedAt = nowIso();
+    persistRunningSession();
+  };
+  options.signal?.addEventListener("abort", persistInterruptedSession, { once: true });
   persistRunningSession();
 
   let consensus = scoreConsensus(enabledAgents, session);
@@ -283,7 +294,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
           maxWorkspaceChanges: group.settings.maxWorkspaceChanges,
           managedToolRoots: runtimeDiscoveryOptions.managedToolRoots,
           signal: options.signal,
-          previousResults: accumulatedToolResults
+          previousResults: session.toolExecutionResults.filter((item) => item.source_agent_id === agent.id)
         });
         accumulatedToolRequests.push(...toolResult.accepted);
         accumulatedToolResults.push(...toolResult.results);
@@ -394,6 +405,16 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
       consensus,
       createdAt: nowIso()
     };
+    if (session.guardStopReason) {
+      persistRunningSession();
+      break;
+    }
+    const noProgressReason = noProgressGuardReason(session, question, group.settings);
+    if (noProgressReason) {
+      session.guardStopReason = noProgressReason;
+      persistRunningSession();
+      break;
+    }
     if (shouldStop(consensus, enabledAgents, session, group.settings, round)) break;
   }
 
@@ -449,6 +470,17 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
         `final_judge_unavailable:${finalBudgetBlockReason}`
       ]
     };
+  } else if (session.guardStopReason) {
+    session.finalDecision = {
+      ...fallback,
+      risks: [...fallback.risks, session.guardStopReason]
+    };
+  } else if (!reserveModelCall(session)) {
+    session.guardStopReason = "model_call_budget_exhausted";
+    session.finalDecision = {
+      ...fallback,
+      risks: [...fallback.risks, session.guardStopReason]
+    };
   } else {
     const finalMessages = buildFinalPrompt(judge, session, consensus, {
       globalRequirement,
@@ -472,6 +504,22 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
   session.finalDecision.startedAt = finalStartedAt;
   session.finalDecision.durationMs = elapsedMs(finalStartMs);
   applyEngineFinalState(session, consensus, group.settings);
+  if (session.guardStopReason) {
+    session.finalDecision.final_state = "needs_revision";
+    session.finalDecision.blocking_issues = [
+      ...(session.finalDecision.blocking_issues || []),
+      {
+        id: "engine-no-progress-guard",
+        issue: session.guardStopReason,
+        severity: "critical",
+        blocks_final: true,
+        in_scope: true,
+        source_agent_id: "engine",
+        source_agent_name: "AI Council",
+        status: "open"
+      }
+    ];
+  }
   if (options.groupPath) {
     const fileExecution = runAutoFileOperations({
       groupPath: options.groupPath,
@@ -485,6 +533,11 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
       groupPath: options.groupPath,
       session
     }));
+    enforceRequestedArtifactRequirements({
+      groupPath: options.groupPath,
+      question,
+      session
+    });
   }
   session.finalDecision.memory_candidates = limitMemoryCandidates(session.finalDecision.memory_candidates);
   session.publicMemoryUpdate = persistSummarizerPublicMemory(options.groupPath, session.finalDecision.memory_candidates, {
@@ -494,7 +547,8 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
   });
   session.completedAt = nowIso();
   session.durationMs = elapsedMs(sessionStartMs);
-  session.status = "completed";
+  session.status = session.guardStopReason ? "guard_stopped" : "completed";
+  options.signal?.removeEventListener("abort", persistInterruptedSession);
 
   const sessionPath = options.groupPath
     ? persistRunningSession()
@@ -567,6 +621,14 @@ function persistSummarizerPublicMemory(groupPath, candidates, options = {}) {
 }
 
 async function* callRoundModel({ options, session, phase, round, agent, messages, timeoutMs, toolIteration, formatRecovery = true }) {
+  if (!reserveModelCall(session)) {
+    session.guardStopReason = "model_call_budget_exhausted";
+    return {
+      response: { status: "unavailable", reason: session.guardStopReason, retryable: false },
+      rawTextForMessage: "",
+      errorForMessage: session.guardStopReason
+    };
+  }
   const modelCallRecord = notifyModelCall(options, {
     sessionId: session.id,
     phase,
@@ -642,6 +704,49 @@ function normalizeMaxToolIterations(value) {
   const number = Number.parseInt(String(value), 10);
   if (!Number.isFinite(number)) return 12;
   return Math.min(24, Math.max(0, number));
+}
+
+function normalizeModelCallBudget(value) {
+  const number = Number.parseInt(String(value), 10);
+  if (!Number.isFinite(number)) return 48;
+  return Math.min(200, Math.max(4, number));
+}
+
+function reserveModelCall(session) {
+  const count = Number(session.modelCallCount || 0);
+  const budget = normalizeModelCallBudget(session.modelCallBudget);
+  if (count >= budget) return false;
+  session.modelCallCount = count + 1;
+  return true;
+}
+
+function noProgressGuardReason(session, question, settings = {}) {
+  if (!isFileDeliveryTask(question) || hasMaterialWorkspaceProgress(session)) return "";
+  const threshold = Math.min(100, Math.max(4, Number(settings.noProgressModelCalls) || 12));
+  if (Number(session.modelCallCount || 0) < threshold) return "";
+  return `no_workspace_progress_after_${session.modelCallCount}_model_calls`;
+}
+
+function isFileDeliveryTask(question) {
+  return /(build|create|implement|write|modify|fix|generate|package|compile|jar|mod\b|source|code|file|构建|生成|制作|开发|实现|编写|写入|修改|修复|打包|源码|代码|文件|模组)/i.test(String(question || ""));
+}
+
+function hasMaterialWorkspaceProgress(session = {}) {
+  if ((session.fileOperationExecutionResults || []).some((item) => (
+    ["executed", "committed", "restored"].includes(String(item.status || ""))
+    && ["write", "append", "delete", "restore"].includes(String(item.op || item.action || ""))
+  ))) return true;
+  return (session.toolExecutionResults || []).some((item) => {
+    if (item?.status !== "completed") return false;
+    const changes = item.result?.workspaceChanges || {};
+    if (Number(changes.totalChanges || 0) > 0) return true;
+    return [changes.created, changes.modified, changes.deleted].some((entries) => Array.isArray(entries) && entries.length > 0);
+  });
+}
+
+function abortReasonCode(signal) {
+  const reason = signal?.reason;
+  return String(reason?.code || reason?.message || "aborted").slice(0, 200);
 }
 
 function notifyModelCall(options = {}, record = {}) {

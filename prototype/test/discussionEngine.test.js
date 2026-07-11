@@ -70,6 +70,106 @@ test("running group sessions are saved before completion and refresh after each 
   assert.ok(completed.finalDecision?.answer);
 });
 
+test("aborted runs persist an explicit interrupted session instead of staying running", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-interrupted-session-"));
+  const controller = new AbortController();
+  const group = validateGroupConfig({
+    id: "interrupted-session",
+    name: "Interrupted Session",
+    settings: { maxRounds: 1, agentTimeoutMs: 1000, allowSoloCouncil: true },
+    agents: [{
+      id: "worker",
+      name: "Worker",
+      role: "Worker",
+      provider: "mock",
+      apiBaseUrl: "mock://local",
+      model: "mock-worker",
+      weight: 1,
+      enabled: true
+    }]
+  });
+  const events = runCouncilEvents("Build a file.", group, tmp, { groupPath: tmp, signal: controller.signal });
+  const started = await events.next();
+  assert.equal(started.value.type, "agent_start");
+  controller.abort(Object.assign(new Error("stopped_by_user"), { code: "stopped_by_user" }));
+  await assert.rejects(() => events.next(), { name: "AbortError" });
+
+  const sessionFile = fs.readdirSync(path.join(tmp, "sessions")).find((name) => name.endsWith(".json"));
+  const saved = JSON.parse(fs.readFileSync(path.join(tmp, "sessions", sessionFile), "utf8"));
+  assert.equal(saved.status, "interrupted");
+  assert.equal(saved.interruptionReason, "stopped_by_user");
+  assert.ok(saved.completedAt);
+});
+
+test("file delivery work stops after the configured real model-call budget without workspace progress", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-no-progress-"));
+  const calls = [];
+  const group = validateGroupConfig({
+    id: "no-progress",
+    name: "No Progress",
+    settings: {
+      maxRounds: 5,
+      minRounds: 5,
+      minConsensusWeight: 1,
+      stopWhenAllSkip: false,
+      agentTimeoutMs: 1000,
+      noProgressModelCalls: 4,
+      maxModelCalls: 20
+    },
+    agents: [
+      { id: "one", name: "One", role: "Builder", provider: "mock", apiBaseUrl: "mock://local", model: "mock-one", weight: 1, enabled: true },
+      { id: "two", name: "Two", role: "Builder", provider: "mock", apiBaseUrl: "mock://local", model: "mock-two", weight: 1, enabled: true }
+    ]
+  });
+
+  const { session } = await runCouncil("Build and package a real JAR file.", group, tmp, {
+    groupPath: tmp,
+    onModelCall: (record) => calls.push(record)
+  });
+
+  assert.equal(session.status, "guard_stopped");
+  assert.equal(session.guardStopReason, "no_workspace_progress_after_4_model_calls");
+  assert.equal(session.modelCallCount, 4);
+  assert.equal(calls.length, 4);
+  assert.equal(session.finalDecision.final_state, "needs_revision");
+  assert.match(session.finalDecision.blocking_issues[0].issue, /no_workspace_progress/);
+  assert.equal(session.finalDecision.requested_artifact_verification.status, "needs_revision");
+  assert.match(session.finalDecision.requested_artifact_verification.requirements[0].reason, /No valid \.jar artifact/);
+});
+
+test("every council has a hard provider-call budget even for non-delivery discussion", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-call-budget-"));
+  const calls = [];
+  const group = validateGroupConfig({
+    id: "call-budget",
+    name: "Call Budget",
+    settings: {
+      maxRounds: 5,
+      minRounds: 5,
+      minConsensusWeight: 1,
+      stopWhenAllSkip: false,
+      agentTimeoutMs: 1000,
+      maxModelCalls: 4
+    },
+    agents: [
+      { id: "one", name: "One", role: "Member", provider: "mock", apiBaseUrl: "mock://local", model: "mock-one", weight: 1, enabled: true },
+      { id: "two", name: "Two", role: "Member", provider: "mock", apiBaseUrl: "mock://local", model: "mock-two", weight: 1, enabled: true }
+    ]
+  });
+
+  const { session } = await runCouncil("Discuss the options.", group, tmp, {
+    groupPath: tmp,
+    onModelCall: (record) => calls.push(record)
+  });
+
+  assert.equal(session.status, "guard_stopped");
+  assert.equal(session.guardStopReason, "model_call_budget_exhausted");
+  assert.equal(session.modelCallCount, 4);
+  assert.equal(calls.length, 4);
+  assert.equal(session.messages.length, 6);
+  assert.equal(session.messages.at(-1).response.reason, "model_call_budget_exhausted");
+});
+
 test("onModelCall records round and final model payloads", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-model-call-"));
   const calls = [];

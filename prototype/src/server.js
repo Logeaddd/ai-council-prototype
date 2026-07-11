@@ -26,6 +26,7 @@ import { deletePublicMemory, listPublicMemories, upsertPublicMemory } from "./pu
 import { readTaskState } from "./taskState.js";
 import { listCapabilities } from "./capabilityRegistry.js";
 import { capabilityEnabled } from "./capabilityPolicy.js";
+import { createCouncilRunRegistry } from "./councilRunRegistry.js";
 import { fetchPublicUrl, searchWeb } from "./webTools.js";
 import { deleteMcpServerConfig, listMcpServerConfigs, upsertMcpServerConfig } from "./mcpConfig.js";
 import {
@@ -59,6 +60,7 @@ const dataDir = userDataDir(baseDir);
 const allowedWorkspaceRoot = path.resolve(process.env.AI_COUNCIL_WORKSPACE_ROOT || (process.env.AI_COUNCIL_DATA_DIR ? dataDir : baseDir));
 const defaultGroupsRoot = path.join(process.env.AI_COUNCIL_DATA_DIR ? dataDir : baseDir, "workspace-ui");
 const execFileAsync = promisify(execFile);
+const activeCouncilRuns = createCouncilRunRegistry();
 
 const server = http.createServer(async (req, res) => {
   try {
@@ -738,6 +740,13 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (req.method === "POST" && url.pathname === "/api/council/stop") {
+    const body = await readBody(req);
+    const workspaceGroupPath = resolveWorkspacePath(body.workspaceGroupPath || body.groupPath, "workspaceGroupPath");
+    sendJson(res, 200, activeCouncilRuns.stop(workspaceGroupPath));
+    return;
+  }
+
   sendJson(res, 404, { error: "Not found" });
 }
 
@@ -1029,6 +1038,7 @@ function applySeatRole(seat, role) {
     seat.judge = false;
     return;
   }
+
   if (normalized === "summarizer") {
     seat.reviewer = false;
     seat.mandatoryRedTeam = false;
@@ -1173,8 +1183,11 @@ function buildAppSettingsPatch(body) {
 }
 
 async function streamCouncilEvents(req, res, question, group, options = {}) {
-  const controller = new AbortController();
-  req.on("close", () => controller.abort());
+  if (!options.groupPath) throw new Error("A group workspace is required for a council run.");
+  const run = activeCouncilRuns.start(options.groupPath);
+  const abortDisconnectedRun = () => activeCouncilRuns.stop(options.groupPath, "client_disconnected");
+  req.once("aborted", abortDisconnectedRun);
+  res.once("close", abortDisconnectedRun);
   res.writeHead(200, {
     "Content-Type": "text/event-stream; charset=utf-8",
     "Cache-Control": "no-cache, no-transform",
@@ -1183,16 +1196,20 @@ async function streamCouncilEvents(req, res, question, group, options = {}) {
   try {
     for await (const event of runCouncilEvents(question, group, baseDir, {
       ...options,
-      signal: controller.signal
+      signal: run.controller.signal
     })) {
+      if (run.controller.signal.aborted || res.destroyed || res.writableEnded) break;
       writeSse(res, event.type, event);
     }
   } catch (error) {
-    if (error.name !== "AbortError") {
+    if (error.name !== "AbortError" && !run.controller.signal.aborted && !res.destroyed) {
       writeSse(res, "error", { type: "error", error: error.message, createdAt: new Date().toISOString() });
     }
   } finally {
-    res.end();
+    req.off("aborted", abortDisconnectedRun);
+    res.off("close", abortDisconnectedRun);
+    activeCouncilRuns.finish(options.groupPath, run.id);
+    if (!res.destroyed && !res.writableEnded) res.end();
   }
 }
 

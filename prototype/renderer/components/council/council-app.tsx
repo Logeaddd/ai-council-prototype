@@ -818,11 +818,19 @@ export function CouncilApp() {
     return "使用工具"
   }
 
-  function stopRun() {
+  async function stopRun() {
     if (running) {
-      activeRun.current?.abort()
-      setStatusText("已停止当前讨论。")
-      setRunning(false)
+      const controller = activeRun.current
+      try {
+        if (group.path) {
+          await api<{ stopped: boolean }>("/api/council/stop", { workspaceGroupPath: group.path })
+        }
+        controller?.abort()
+        setStatusText("已停止当前讨论。")
+      } catch (error) {
+        controller?.abort()
+        setStatusText(`停止讨论失败：${errorMessage(error)}`)
+      }
       return
     }
     addSystemItem("请在底部输入问题后发送。")

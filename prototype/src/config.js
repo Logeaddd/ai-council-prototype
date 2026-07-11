@@ -46,6 +46,8 @@ export function validateGroupConfig(group) {
     agentTimeoutMs: 900000,
     toolTimeoutMs: 12000,
     maxToolIterations: 12,
+    maxModelCalls: 48,
+    noProgressModelCalls: 12,
     contextSearchLimit: 5,
     contextArchiveInjectionLimit: 5,
     contextArchiveInjectionTokens: 900,
@@ -62,6 +64,8 @@ export function validateGroupConfig(group) {
   group.settings.contextArchiveInjectionTokens = clampInteger(group.settings.contextArchiveInjectionTokens, 120, 4000, 900);
   group.settings.recentMessageLimit = clampInteger(group.settings.recentMessageLimit, 0, 30, 6);
   group.settings.maxToolIterations = clampInteger(group.settings.maxToolIterations, 0, 24, 12);
+  group.settings.maxModelCalls = clampInteger(group.settings.maxModelCalls, 4, 200, 48);
+  group.settings.noProgressModelCalls = clampInteger(group.settings.noProgressModelCalls, 4, 100, 12);
   group.settings.maxWorkspaceSnapshotEntries = clampInteger(group.settings.maxWorkspaceSnapshotEntries, 100, 100000, 20000);
   group.settings.maxWorkspaceChanges = clampInteger(group.settings.maxWorkspaceChanges, 10, 5000, 1000);
 
