@@ -276,7 +276,7 @@ test("round prompt advertises artifacts in speak schema", () => {
   assert.match(messages[0].content, /Do not invent tool results/);
   assert.match(messages[0].content, /Do not use proposed_files/);
   assert.match(messages[0].content, /Durable file contents must be in file_operations\.content/);
-  assert.match(messages[0].content, /at most 2 write\/append items/);
+  assert.match(messages[0].content, /one write\/append item per response/);
   assert.match(messages[0].content, /no file writes will run/);
   assert.match(messages[0].content, /Do not put full source code/);
   assert.match(messages[0].content, /Use fetch_url only for text\/html\/json pages/);
@@ -311,11 +311,12 @@ test("workspace round prompt requires file_operations for file-writing tasks", (
     fileOperationPermissionTier: "full"
   });
 
-  assert.match(messages[0].content, /MUST propose the change in file_operations/);
-  assert.match(messages[0].content, /full file content for write\/append/);
-  assert.match(messages[0].content, /Do not put complete file content only in argument/);
-  assert.match(messages[0].content, /Never paste large source files/);
+  assert.match(messages[0].content, /emit exactly one write or append file_operations item/);
+  assert.match(messages[0].content, /accepted write\/append requests execute immediately/);
+  assert.match(messages[0].content, /Do not put durable file contents only in argument/);
+  assert.match(messages[0].content, /Split a longer file into a write followed by append/);
   assert.match(messages[0].content, /file_operations\.content/);
+  assert.match(messages[0].content, /under 1400 characters/);
 });
 
 test("final prompt requires evidence ids for workspace deliverable claims", () => {

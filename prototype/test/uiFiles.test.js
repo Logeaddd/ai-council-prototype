@@ -80,6 +80,7 @@ test("renderer uses the provided logo asset for visible branding and icons", () 
 test("renderer wires the real council APIs instead of mock-only UI state", () => {
   const live = read("renderer/lib/council-live.ts");
   const app = read("renderer/components/council/council-app.tsx");
+  const privateChat = read("renderer/components/council/private-chat-sheet.tsx");
   for (const endpoint of [
     "/api/groups-index",
     "/api/group?groupPath=",
@@ -96,7 +97,7 @@ test("renderer wires the real council APIs instead of mock-only UI state", () =>
     "/api/file-operations/reject",
     "/api/file-operations/execute",
   ]) {
-    assert.match(`${live}\n${app}`, new RegExp(endpoint.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    assert.match(`${live}\n${app}\n${privateChat}`, new RegExp(endpoint.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   }
   assert.match(app, /streamCouncilEvents/);
   assert.match(app, /AbortController/);
@@ -271,13 +272,15 @@ test("independent mode is named proctoring and uses supervisors", () => {
 test("private chat is wired through the renderer and backend API", () => {
   const composer = read("renderer/components/council/composer.tsx");
   const app = read("renderer/components/council/council-app.tsx");
+  const privateChat = read("renderer/components/council/private-chat-sheet.tsx");
   const server = read("src/server.js");
-  assert.match(composer, /私聊会写入该成员的私有记录/);
-  assert.match(composer, /privateMode/);
-  assert.match(app, /async function handlePrivateMessage/);
-  assert.match(app, /private-hint/);
-  assert.match(app, /\/api\/private-chat/);
-  assert.match(app, /reply\.status === "error"/);
+  assert.match(composer, /onOpenPrivateChat/);
+  assert.match(app, /PrivateChatSheet/);
+  assert.doesNotMatch(composer, /privateMode/);
+  assert.doesNotMatch(app, /private-reply-/);
+  assert.match(privateChat, /\/api\/private-chat/);
+  assert.match(privateChat, /ai-council:private-draft:/);
+  assert.match(privateChat, /runtimeGroup/);
   assert.match(server, /\/api\/private-chat/);
   assert.match(server, /status: "error"/);
 });
@@ -486,7 +489,7 @@ test("renderer source does not contain common mojibake markers", () => {
   }
 });
 
-test("renderer sends real file attachments with council and private messages", () => {
+test("renderer sends real file attachments with council messages", () => {
   const composer = read("renderer/components/council/composer.tsx");
   const app = read("renderer/components/council/council-app.tsx");
   const live = read("renderer/lib/council-live.ts");
@@ -505,7 +508,6 @@ test("renderer sends real file attachments with council and private messages", (
   assert.doesNotMatch(live, /\/api\/project-folder-picker/);
   assert.match(live, /\/api\/project\/import/);
   assert.match(app, /type FileAttachment/);
-  assert.match(app, /attachments,\s*\n\s*runtimeGroup/);
   assert.match(app, /attachments,\s*\n\s*\}/);
 });
 

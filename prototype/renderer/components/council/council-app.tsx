@@ -61,6 +61,7 @@ import { RightPanel } from "./right-panel"
 import { MemberConfigSheet } from "./member-config-sheet"
 import { SettingsSheet } from "./settings-sheet"
 import { ChatHistorySheet } from "./chat-history-sheet"
+import { PrivateChatSheet } from "./private-chat-sheet"
 
 const LAYOUT_KEY = "ai-council:layout-v3-template"
 const THEME_KEY = "ai-council:theme"
@@ -132,6 +133,7 @@ export function CouncilApp() {
   const [createMemberDraft, setCreateMemberDraft] = useState<AgentMember | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [historyOpen, setHistoryOpen] = useState(false)
+  const [privateChatOpen, setPrivateChatOpen] = useState(false)
   const [mutedSeatIds, setMutedSeatIds] = useState<string[]>([])
 
   const activeRun = useRef<AbortController | null>(null)
@@ -627,61 +629,9 @@ export function CouncilApp() {
 
   async function handleSend(
     text: string,
-    options: { privateMode: boolean; targetId: string; attachments: FileAttachment[] },
+    options: { attachments: FileAttachment[] },
   ) {
-    if (options.privateMode) {
-      await handlePrivateMessage(text, options.targetId, options.attachments)
-      return
-    }
     await startCouncil(text, options.attachments)
-  }
-
-  async function handlePrivateMessage(text: string, targetId: string, attachments: FileAttachment[] = []) {
-    const groupPath = group.path
-    if (!groupPath || !workspaceGroup) {
-      addSystemItem("请先加载一个本地小组，再私聊成员。")
-      return
-    }
-    const target = members.find((member) => member.id === targetId)
-    setItems((current) => [
-      ...current,
-      {
-        kind: "private-hint",
-        id: `private-${Date.now()}`,
-        agentId: targetId,
-        time: formatTime(),
-        preview: `你向 ${target?.name || targetId} 发送了一条私聊。`,
-      },
-    ])
-    try {
-      const result = await api<{ reply?: { text?: string; createdAt?: string; status?: string } }>("/api/private-chat", {
-        groupPath,
-        seatId: targetId,
-        text,
-        attachments,
-        runtimeGroup: buildRuntimeGroup(workspaceGroup, maxRounds, [], mode, agentTimeoutMinutes),
-      })
-      const reply = result.reply
-      if (reply?.text) {
-        const replyText = reply.text
-        setItems((current) => [
-          ...current,
-          {
-            kind: "message",
-            id: `private-reply-${Date.now()}`,
-            agentId: targetId,
-            visibility: "public",
-            time: formatTime(reply.createdAt),
-            state: reply.status === "error" || replyText.startsWith("（回复失败：")
-              ? "unavailable"
-              : "completed",
-            body: replyText,
-          },
-        ])
-      }
-    } catch (error) {
-      addSystemItem(`私聊失败：${errorMessage(error)}`)
-    }
   }
 
   async function startCouncil(question: string, attachments: FileAttachment[] = []) {
@@ -949,6 +899,7 @@ export function CouncilApp() {
             running={running}
             draftKey={group.path || group.id || ""}
             onSend={handleSend}
+            onOpenPrivateChat={() => setPrivateChatOpen(true)}
             onStop={stopRun}
             onContinue={continueRound}
           />
@@ -1013,6 +964,13 @@ export function CouncilApp() {
         open={historyOpen}
         onClose={() => setHistoryOpen(false)}
         groupPath={group.path || ""}
+      />
+      <PrivateChatSheet
+        open={privateChatOpen}
+        onClose={() => setPrivateChatOpen(false)}
+        groupPath={group.path || ""}
+        members={members}
+        runtimeGroup={workspaceGroup ? buildRuntimeGroup(workspaceGroup, maxRounds, mutedSeatIds, mode, agentTimeoutMinutes) : null}
       />
     </div>
   )

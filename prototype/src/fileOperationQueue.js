@@ -11,17 +11,10 @@ export function enqueueFileOperationProposals(options = {}) {
   const groupPath = requirePath(options.groupPath, "groupPath");
   const accepted = Array.isArray(options.accepted) ? options.accepted : [];
   const rejected = Array.isArray(options.rejected) ? options.rejected : [];
-  const approved = executionStandardsApproved(groupPath);
   const queued = [];
   const queueRejected = [];
 
   for (const proposal of accepted) {
-    if (WRITE_LIKE_OPS.has(proposal.op) && !approved) {
-      const rejection = rejectQueuedProposal(proposal, "execution_standards_not_approved", "Write-like file operations require approved execution standards.");
-      queueRejected.push(rejection);
-      appendAuditLog(groupPath, auditRecord("rejected", rejection));
-      continue;
-    }
     const pending = writePendingProposal(groupPath, proposal);
     queued.push(pending);
     appendAuditLog(groupPath, auditRecord("queued", pending));
@@ -180,17 +173,6 @@ function rejectQueuedProposal(proposal, code, reason) {
     reason,
     content_summary: summarizeContent(proposal.content)
   };
-}
-
-function executionStandardsApproved(groupPath) {
-  const manifestPath = path.join(groupPath, "shared", "harness", "standards.json");
-  if (!fs.existsSync(manifestPath)) return false;
-  try {
-    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
-    return manifest.status === "approved";
-  } catch {
-    return false;
-  }
 }
 
 function appendAuditLog(groupPath, record) {

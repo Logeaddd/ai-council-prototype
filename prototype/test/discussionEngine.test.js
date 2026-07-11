@@ -3741,7 +3741,7 @@ test("group sessions preserve sandboxed file operation proposals without executi
   fs.writeFileSync(path.join(groupPath, "group.json"), JSON.stringify({
     groupPath,
     seats: [{ seatId: "runtime", displayName: "Runtime Agent", privateFolder: "members/Runtime" }],
-    permissions: { defaultTier: "text", seatTiers: { runtime: "full" } }
+    permissions: { defaultTier: "text", seatTiers: { runtime: "tool" } }
   }, null, 2), "utf8");
 
   let callCount = 0;
@@ -3823,21 +3823,15 @@ test("group sessions preserve sandboxed file operation proposals without executi
     assert.equal(session.fileOperationProposals[0].path, "src/output.js");
     assert.equal(session.fileOperationProposals[0].op, "write");
     assert.equal(session.fileOperationProposals[0].source_agent_id, "runtime");
-    assert.equal(session.pendingFileOperationProposals.length, 0);
-    assert.deepEqual(session.rejectedFileOperationProposals.map((item) => item.code).sort(), [
-      "execution_standards_not_approved",
-      "forbidden_secret_file"
-    ]);
+    assert.equal(session.pendingFileOperationProposals.length, 1);
+    assert.deepEqual(session.rejectedFileOperationProposals.map((item) => item.code).sort(), ["forbidden_secret_file"]);
     assert.equal(session.messages[0].fileOperationProposals.length, 1);
-    assert.equal(session.messages[0].pendingFileOperationProposals.length, 0);
+    assert.equal(session.messages[0].pendingFileOperationProposals.length, 1);
     assert.equal(fs.existsSync(path.join(groupPath, "src", "output.js")), false);
 
     const written = JSON.parse(fs.readFileSync(sessionPath, "utf8"));
     assert.equal(written.fileOperationProposals[0].path, "src/output.js");
-    assert.deepEqual(written.rejectedFileOperationProposals.map((item) => item.code).sort(), [
-      "execution_standards_not_approved",
-      "forbidden_secret_file"
-    ]);
+    assert.deepEqual(written.rejectedFileOperationProposals.map((item) => item.code).sort(), ["forbidden_secret_file"]);
     assert.ok(fs.existsSync(path.join(groupPath, "shared", "logs", "file-ops.jsonl")));
   } finally {
     await close(server);
@@ -3909,8 +3903,8 @@ test("workspace round prompts gate file_operations by seat permission tier", asy
     await runCouncil("Create a file.", group, tmp, { groupPath });
 
     assert.match(requests[0].messages[0].content, /text-only file permission/);
-    assert.doesNotMatch(requests[0].messages[0].content, /MUST propose the change in file_operations/);
-    assert.match(requests[1].messages[0].content, /MUST propose the change in file_operations/);
+    assert.doesNotMatch(requests[0].messages[0].content, /emit exactly one write or append file_operations item/);
+    assert.match(requests[1].messages[0].content, /emit exactly one write or append file_operations item/);
   } finally {
     await close(server);
   }
@@ -3941,15 +3935,6 @@ test("full permission executes approved file operation proposals during the roun
   execFileSync("git", ["config", "user.name", "Test User"], { cwd: groupPath, stdio: "pipe" });
   execFileSync("git", ["add", "--", "."], { cwd: groupPath, stdio: "pipe" });
   execFileSync("git", ["commit", "-m", "test: initialize group"], { cwd: groupPath, stdio: "pipe" });
-  prepareExecutionStandards({
-    groupPath,
-    finalAnswer: "Create the requested file.",
-    recorderSeatId: "runtime"
-  });
-  approveExecutionStandards({ groupPath, approvedBy: "test" });
-  execFileSync("git", ["add", "--", "."], { cwd: groupPath, stdio: "pipe" });
-  execFileSync("git", ["commit", "-m", "test: approve standards"], { cwd: groupPath, stdio: "pipe" });
-
   let callCount = 0;
   const server = http.createServer(async (req, res) => {
     for await (const _ of req) {
@@ -3957,6 +3942,8 @@ test("full permission executes approved file operation proposals during the roun
     }
     callCount += 1;
     const payload = callCount === 1
+      ? "{\"status\":\"speak\",\"argument\":\"truncated"
+      : callCount === 2
       ? {
         status: "speak",
         argument: "I wrote the file.",
@@ -3983,7 +3970,7 @@ test("full permission executes approved file operation proposals during the roun
         selected_file_operation_ids: [],
         memory_candidates: []
       };
-    writeOpenAiStream(res, JSON.stringify(payload));
+    writeOpenAiStream(res, typeof payload === "string" ? payload : JSON.stringify(payload));
   });
   await listen(server);
   const apiBaseUrl = `http://127.0.0.1:${server.address().port}/v1`;
@@ -4020,6 +4007,7 @@ test("full permission executes approved file operation proposals during the roun
     const { session } = await runCouncil("Create a file.", group, tmp, { groupPath });
 
     assert.equal(fs.readFileSync(path.join(groupPath, "src", "output.js"), "utf8"), "export const ok = true;\n");
+    assert.equal(callCount, 3);
     assert.equal(session.fileOperationExecutionResults.some((item) => item.status === "executed" && item.path === "src/output.js"), true);
     assert.equal(session.messages[0].fileOperationExecutionResults.some((item) => item.status === "executed" && item.path === "src/output.js"), true);
     assert.match(execFileSync("git", ["log", "--oneline", "-1"], { cwd: groupPath, encoding: "utf8" }), /files: apply write src\/output\.js/);
@@ -4196,7 +4184,7 @@ test("ready final state auto-executes safe file proposals for full tier", async 
     const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
     requests.push(body);
     callCount += 1;
-    const roundPromptRequiresFileOperations = body.messages?.[0]?.content?.includes("MUST propose the change in file_operations");
+    const roundPromptRequiresFileOperations = body.messages?.[0]?.content?.includes("emit exactly one write or append file_operations item");
     const payload = callCount === 1
       ? roundPromptRequiresFileOperations
         ? {
@@ -4269,7 +4257,7 @@ test("ready final state auto-executes safe file proposals for full tier", async 
     const targetPath = path.join(groupPath, "src", "auto-created.js");
 
     assert.equal(requests.length, 2);
-    assert.match(requests[0].messages[0].content, /MUST propose the change in file_operations/);
+    assert.match(requests[0].messages[0].content, /emit exactly one write or append file_operations item/);
     assert.equal(session.fileOperationProposals.length, 1);
     assert.equal(session.pendingFileOperationProposals.length, 1);
     assert.equal(fs.readFileSync(targetPath, "utf8"), "export const autoCreated = true;\n");
@@ -4331,7 +4319,7 @@ test("full permission executes approved round proposals before final selection",
     requests.push(body);
     callCount += 1;
     if (callCount === 1) {
-      const roundPromptRequiresFileOperations = body.messages?.[0]?.content?.includes("MUST propose the change in file_operations");
+      const roundPromptRequiresFileOperations = body.messages?.[0]?.content?.includes("emit exactly one write or append file_operations item");
       writeOpenAiStream(res, JSON.stringify(roundPromptRequiresFileOperations ? {
         status: "speak",
         argument: "I propose one rejected and one selected file operation.",
@@ -4413,7 +4401,7 @@ test("full permission executes approved round proposals before final selection",
     const { session } = await runCouncil("Create only the selected module.", group, tmp, { groupPath });
 
     assert.equal(requests.length, 2);
-    assert.match(requests[0].messages[0].content, /MUST propose the change in file_operations/);
+    assert.match(requests[0].messages[0].content, /emit exactly one write or append file_operations item/);
     assert.equal(session.fileOperationProposals.length, 2);
     assert.equal(session.pendingFileOperationProposals.length, 2);
     assert.equal(fs.existsSync(path.join(groupPath, "src", "selected.js")), true);

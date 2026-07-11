@@ -3,7 +3,6 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { approveExecutionStandards, prepareExecutionStandards } from "../src/executionStandards.js";
 import { parseFileOperationProposals } from "../src/fileOperations.js";
 import { enqueueFileOperationProposals, listFileOperationReviewItems, listPendingFileOperationProposals, readFileOperationAuditLog } from "../src/fileOperationQueue.js";
 import { initGroupWorkspace } from "../src/workspaceManager.js";
@@ -37,7 +36,7 @@ test("file operation queue allows read/list pending without approved execution s
   assert.equal(listPendingFileOperationProposals(group.groupPath).length, 1);
 });
 
-test("file operation queue rejects write-like proposals until standards are approved", () => {
+test("file operation queue keeps write-like proposals pending for the member permission path", () => {
   const group = createGroup();
   const fakeSecret = "sk" + "-test-should-not-log";
   const parsed = parseFileOperationProposals({
@@ -62,24 +61,15 @@ test("file operation queue rejects write-like proposals until standards are appr
   });
   const auditText = fs.readFileSync(path.join(group.groupPath, "shared", "logs", "file-ops.jsonl"), "utf8");
 
-  assert.equal(result.queued.length, 0);
-  assert.equal(result.rejected[0].code, "execution_standards_not_approved");
-  assert.equal(listPendingFileOperationProposals(group.groupPath).length, 0);
+  assert.equal(result.queued.length, 1);
+  assert.equal(result.queued[0].status, "pending_user_approval");
+  assert.equal(listPendingFileOperationProposals(group.groupPath).length, 1);
   assert.doesNotMatch(auditText, new RegExp(fakeSecret));
   assert.match(auditText, /content_summary/);
 });
 
-test("file operation queue stores approved write-like proposals and audit records", () => {
+test("file operation queue stores write-like proposals and audit records", () => {
   const group = createGroup();
-  prepareExecutionStandards({
-    groupPath: group.groupPath,
-    finalAnswer: "Create a small module.",
-    recorderSeatId: "executor"
-  });
-  approveExecutionStandards({
-    groupPath: group.groupPath,
-    approvedBy: "user"
-  });
   const parsed = parseFileOperationProposals({
     groupRoot: group.groupPath,
     source: {
@@ -124,12 +114,6 @@ test("file operation queue stores approved write-like proposals and audit record
 test("file operation review items hide raw content and show redacted preview", () => {
   const group = createGroup();
   const fakeSecret = "sk" + "-secret-review-preview";
-  prepareExecutionStandards({
-    groupPath: group.groupPath,
-    finalAnswer: "Create a small module.",
-    recorderSeatId: "executor"
-  });
-  approveExecutionStandards({ groupPath: group.groupPath, approvedBy: "user" });
   const parsed = parseFileOperationProposals({
     groupRoot: group.groupPath,
     source: {

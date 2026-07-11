@@ -532,7 +532,7 @@ function persistSummarizerPublicMemory(groupPath, candidates, options = {}) {
   }
 }
 
-async function* callRoundModel({ options, session, phase, round, agent, messages, timeoutMs, toolIteration }) {
+async function* callRoundModel({ options, session, phase, round, agent, messages, timeoutMs, toolIteration, formatRecovery = true }) {
   const modelCallRecord = notifyModelCall(options, {
     sessionId: session.id,
     phase,
@@ -559,13 +559,34 @@ async function* callRoundModel({ options, session, phase, round, agent, messages
   }
   const raw = await streamingCall.result();
   completeModelCall(modelCallRecord, raw);
+  const parsedResponse = raw.error
+    ? { status: "unavailable", reason: raw.error, retryable: true }
+    : parseRoundResponse(raw.text);
+  if (formatRecovery && isInvalidStructuredResponse(parsedResponse)) {
+    return yield* callRoundModel({
+      options,
+      session,
+      phase: "format_recovery",
+      round,
+      agent,
+      timeoutMs,
+      toolIteration,
+      formatRecovery: false,
+      messages: [...messages, {
+        role: "user",
+        content: "Your previous response was not valid JSON, so no work was accepted. Retry once now. Return one compact JSON object only. Do not repeat analysis or a plan. If this task needs a file change, include exactly one file_operations write or append item with content under 1200 characters; otherwise use status=skip with a reason."
+      }]
+    });
+  }
   return {
-    response: raw.error
-      ? { status: "unavailable", reason: raw.error, retryable: true }
-      : parseRoundResponse(raw.text),
+    response: parsedResponse,
     rawTextForMessage: raw.error ? "" : raw.text,
     errorForMessage: raw.error
   };
+}
+
+function isInvalidStructuredResponse(response = {}) {
+  return response.status === "unavailable" && String(response.reason || "").startsWith("invalid_json_response");
 }
 
 function applyRoundResponseRules(response, agent, round) {
