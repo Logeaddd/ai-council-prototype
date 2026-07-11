@@ -527,6 +527,9 @@ test("renderer keeps per-group drafts and opens real chat history", () => {
   assert.match(topBar, /聊天记录/);
   assert.match(history, /fetchChatSessions/);
   assert.match(history, /fetchChatSession/);
+  assert.match(history, /window\.setInterval/);
+  assert.match(history, /window\.clearInterval/);
+  assert.match(history, /setSelectedId\(\(currentId\)/);
   assert.match(live, /\/api\/sessions\?groupPath=/);
   assert.match(live, /\/api\/session\?groupPath=/);
   assert.match(data, /完全允许就是自主执行/);

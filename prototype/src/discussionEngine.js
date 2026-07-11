@@ -86,6 +86,14 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
     messages: []
   };
 
+  // The history API reads this file directly, so update it only at real event boundaries.
+  const persistRunningSession = () => {
+    if (!options.groupPath) return undefined;
+    session.durationMs = elapsedMs(sessionStartMs);
+    return writeGroupSession(session, options.groupPath);
+  };
+  persistRunningSession();
+
   let consensus = scoreConsensus(enabledAgents, session);
   for (let round = 1; round <= group.settings.maxRounds; round += 1) {
     const agentsToCall = selectAgents(enabledAgents, session, round, firstRoundAgents);
@@ -134,6 +142,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
         results.push(message);
         session.messages.push(message);
         recordObjections(session, agent, message.response, round, group.settings);
+        persistRunningSession();
         yield {
           type: "agent_message",
           message,
@@ -155,6 +164,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
         results.push(message);
         session.messages.push(message);
         recordObjections(session, agent, message.response, round, group.settings);
+        persistRunningSession();
         yield {
           type: "agent_message",
           message,
@@ -260,6 +270,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
         session.toolRequests.push(...toolResult.accepted);
         session.toolExecutionResults.push(...toolResult.results);
         session.rejectedToolRequests.push(...toolResult.rejected);
+        persistRunningSession();
         for (const event of toolResult.events || []) {
           yield event;
         }
@@ -343,6 +354,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
       results.push(message);
       session.messages.push(message);
       recordObjections(session, agent, message.response, round, group.settings);
+      persistRunningSession();
       yield {
         type: "agent_message",
         message,
@@ -354,6 +366,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
 
     consensus = scoreConsensus(enabledAgents, session, { round });
     session.consensusByRound.push({ round, ...consensus });
+    persistRunningSession();
     yield {
       type: "round_complete",
       round,
@@ -463,7 +476,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
   session.status = "completed";
 
   const sessionPath = options.groupPath
-    ? writeGroupSession(session, options.groupPath)
+    ? persistRunningSession()
     : writeSession(session, baseDir);
   const contextArchive = options.groupPath
     ? writeContextArchive(session, options.groupPath, { attachments })

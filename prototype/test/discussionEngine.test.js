@@ -12,10 +12,63 @@ import { appendSessionUsage, readGroupUsage } from "../src/usageStats.js";
 import { approveExecutionStandards, prepareExecutionStandards } from "../src/executionStandards.js";
 import { appendPrivateChatMessage } from "../src/privateChat.js";
 import { listPublicMemories, upsertPublicMemory } from "../src/publicMemory.js";
-import { readMemoryPending, writeContextArchive } from "../src/storage.js";
+import { readGroupSession, readMemoryPending, writeContextArchive } from "../src/storage.js";
 import { enableSkillForGroup, installSkillMarkdown } from "../src/skillPacks.js";
 import { writeTaskState } from "../src/taskState.js";
 
+
+test("running group sessions are saved before completion and refresh after each real message", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-live-history-"));
+  const group = validateGroupConfig({
+    id: "live-history",
+    name: "Live History",
+    settings: {
+      maxRounds: 1,
+      minConsensusWeight: 1,
+      stopWhenAllSkip: true,
+      agentTimeoutMs: 1000,
+      allowSoloCouncil: true
+    },
+    agents: [{
+      id: "judge",
+      name: "Judge",
+      role: "Judge",
+      provider: "mock",
+      apiBaseUrl: "mock://local",
+      model: "mock-judge",
+      weight: 1,
+      enabled: true,
+      judge: true
+    }]
+  });
+
+  const events = runCouncilEvents("Keep this session visible while it runs.", group, tmp, { groupPath: tmp });
+  const started = await events.next();
+  assert.equal(started.value.type, "agent_start");
+
+  const createdFiles = fs.readdirSync(path.join(tmp, "sessions")).filter((name) => name.endsWith(".json"));
+  assert.equal(createdFiles.length, 1);
+  const sessionId = path.basename(createdFiles[0], ".json");
+  assert.equal(readGroupSession(tmp, sessionId).status, "running");
+  assert.equal(readGroupSession(tmp, sessionId).messages.length, 0);
+
+  let messageEvent = await events.next();
+  while (!messageEvent.done && messageEvent.value.type !== "agent_message") {
+    messageEvent = await events.next();
+  }
+  assert.equal(messageEvent.value.type, "agent_message");
+  const running = readGroupSession(tmp, sessionId);
+  assert.equal(running.status, "running");
+  assert.equal(running.messages.length, 1);
+  assert.match(running.messages[0].response.argument, /current direction is sound/);
+
+  for await (const _event of events) {
+    // Finish the generator so the completed snapshot is written.
+  }
+  const completed = readGroupSession(tmp, sessionId);
+  assert.equal(completed.status, "completed");
+  assert.ok(completed.finalDecision?.answer);
+});
 
 test("onModelCall records round and final model payloads", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-model-call-"));

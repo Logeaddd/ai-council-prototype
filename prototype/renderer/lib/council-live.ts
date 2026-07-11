@@ -147,6 +147,7 @@ export interface CouncilSession {
 export interface ChatSessionSummary {
   id: string
   question: string
+  status?: string
   createdAt: string
   completedAt?: string
   durationMs?: number

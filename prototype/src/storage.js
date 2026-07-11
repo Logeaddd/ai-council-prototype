@@ -686,6 +686,7 @@ function summarizeSession(session, fallbackTime) {
   return {
     id: session.id || "",
     question: session.question || "",
+    status: session.status || "",
     createdAt,
     completedAt,
     durationMs: Number(session.durationMs || durationBetween(createdAt, completedAt) || 0),

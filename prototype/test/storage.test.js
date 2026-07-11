@@ -45,6 +45,22 @@ test("group session history lists real saved sessions and reads details", () => 
   assert.equal(detail.finalDecision.answer, "真实保存的结论");
 });
 
+test("group session history preserves a running session status", () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-running-history-"));
+  writeGroupSession({
+    id: "session_running_1",
+    question: "Still running",
+    status: "running",
+    createdAt: "2026-07-11T10:00:00.000Z",
+    durationMs: 1_000,
+    messages: []
+  }, tmp);
+
+  const history = listGroupSessions(tmp);
+  assert.equal(history.length, 1);
+  assert.equal(history[0].status, "running");
+});
+
 test("group session reader rejects unsafe session ids", () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-history-guard-"));
   assert.throws(() => readGroupSession(tmp, "../group"), /Invalid session id/);

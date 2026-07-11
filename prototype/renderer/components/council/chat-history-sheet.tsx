@@ -30,24 +30,35 @@ export function ChatHistorySheet({
   useEffect(() => {
     if (!open || !groupPath) return
     let cancelled = false
-    async function load() {
-      setLoading(true)
-      setError("")
-      setSelected(null)
+    async function load(initial = false) {
+      if (initial) {
+        setLoading(true)
+        setSelected(null)
+      }
       try {
         const data = await fetchChatSessions(groupPath)
         if (cancelled) return
-        setSessions(data.sessions || [])
-        setSelectedId(data.sessions?.[0]?.id || "")
+        const nextSessions = data.sessions || []
+        setSessions(nextSessions)
+        setSelectedId((currentId) => (
+          nextSessions.some((session) => session.id === currentId)
+            ? currentId
+            : nextSessions[0]?.id || ""
+        ))
+        setError("")
       } catch (err) {
         if (!cancelled) setError(errorMessage(err))
       } finally {
-        if (!cancelled) setLoading(false)
+        if (initial && !cancelled) setLoading(false)
       }
     }
-    load()
+    void load(true)
+    const interval = window.setInterval(() => {
+      void load()
+    }, 1000)
     return () => {
       cancelled = true
+      window.clearInterval(interval)
     }
   }, [open, groupPath])
 
@@ -55,17 +66,23 @@ export function ChatHistorySheet({
     if (!open || !groupPath || !selectedId) return
     let cancelled = false
     async function loadDetail() {
-      setError("")
       try {
         const data = await fetchChatSession(groupPath, selectedId)
-        if (!cancelled) setSelected(data.session || null)
+        if (!cancelled) {
+          setSelected(data.session || null)
+          setError("")
+        }
       } catch (err) {
         if (!cancelled) setError(errorMessage(err))
       }
     }
-    loadDetail()
+    void loadDetail()
+    const interval = window.setInterval(() => {
+      void loadDetail()
+    }, 1000)
     return () => {
       cancelled = true
+      window.clearInterval(interval)
     }
   }, [open, groupPath, selectedId])
 
