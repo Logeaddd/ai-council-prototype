@@ -133,7 +133,7 @@ export async function executeToolRequests(options = {}) {
       appendProcessAuditLog(options.groupPath, "rejected", rejection);
       continue;
     }
-    if (permissionTier === "text") {
+    if (permissionTier === "text" && !CONTEXT_TOOLS.has(normalized.tool)) {
       const rejection = reject(base, "permission_denied", "Seat has text-only permission and cannot use tools.");
       rejected.push(rejection);
       events.push(toolEvent("tool_failure", base, { status: "rejected", code: rejection.code, error: rejection.error }));
@@ -299,7 +299,8 @@ async function executeOne(request, options) {
       }
       const query = request.query || request.reason;
       const archiveResults = searchSessionContextArchive(options.groupPath, query, {
-        limit: request.count || 5
+        limit: request.count || 5,
+        excludeSessionId: options.currentSession?.id
       });
       const liveResults = searchLiveSessionContext(options.currentSession, query, {
         limit: request.count || 5,

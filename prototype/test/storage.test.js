@@ -61,6 +61,30 @@ test("group session history preserves a running session status", () => {
   assert.equal(history[0].status, "running");
 });
 
+test("raw interrupted sessions remain searchable and loadable without a completed archive", () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-interrupted-context-"));
+  writeGroupSession({
+    id: "session_interrupted_1",
+    question: "Interrupted task",
+    status: "running",
+    createdAt: "2026-07-11T11:00:00.000Z",
+    messages: [{ round: 3, agentId: "builder", agentName: "Builder", response: { status: "speak", argument: "INTERRUPTED_PUBLIC_FACT" } }],
+    toolExecutionResults: [{ round: 3, source_agent_id: "builder", tool: "execute_command", status: "completed", result: { stdout: "INTERRUPTED_TOOL_FACT" } }],
+    fileOperationExecutionResults: [],
+    fileOperationProposals: []
+  }, tmp);
+
+  const catalogue = listSessionHistoryCatalogue(tmp);
+  const searched = searchSessionContextArchive(tmp, "INTERRUPTED_PUBLIC_FACT");
+  const loaded = loadSessionContextArchiveItem(tmp, { sessionId: "session_interrupted_1", round: 3 });
+
+  assert.equal(catalogue[0].sessionId, "session_interrupted_1");
+  assert.match(JSON.stringify(searched), /INTERRUPTED_PUBLIC_FACT/);
+  assert.equal(loaded.source, "stored_session_context");
+  assert.equal(loaded.sourceType, "stored_round_full");
+  assert.match(JSON.stringify(loaded.content), /INTERRUPTED_TOOL_FACT/);
+});
+
 test("group session reader rejects unsafe session ids", () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-history-guard-"));
   assert.throws(() => readGroupSession(tmp, "../group"), /Invalid session id/);

@@ -813,12 +813,17 @@ function normalizeContinuationContext(value) {
   return {
     previousSessionId: String(value.previousSessionId || value.sessionId || "").trim(),
     previousQuestion: String(value.previousQuestion || value.question || "").trim(),
+    previousStatus: String(value.previousStatus || value.status || "").trim(),
     finalState: String(value.finalState || value.final_state || "").trim(),
     finalAnswer: String(value.finalAnswer || value.answer || "").trim(),
     summary: String(value.summary || "").trim(),
+    sourcePath: String(value.sourcePath || value.source_path || "").trim(),
     blockingIssues: normalizeTextList(value.blockingIssues || value.blocking_issues),
     risks: normalizeTextList(value.risks || value.unresolved_risks),
-    nextActions: normalizeTextList(value.nextActions || value.next_actions)
+    nextActions: normalizeTextList(value.nextActions || value.next_actions),
+    participantMessages: normalizeContinuationMessages(value.participantMessages || value.participant_messages, 12),
+    recentMessages: normalizeContinuationMessages(value.recentMessages || value.recent_messages, 12),
+    recentActivity: normalizeTextList(value.recentActivity || value.recent_activity).slice(0, 12)
   };
 }
 
@@ -826,14 +831,40 @@ function formatContinuationContext(context) {
   if (!context) return [];
   return [
     context.previousSessionId ? `Previous session: ${context.previousSessionId}` : "",
+    context.sourcePath ? `Saved public source: ${context.sourcePath}` : "",
     context.previousQuestion ? `Previous question: ${context.previousQuestion}` : "",
+    context.previousStatus ? `Previous session status: ${context.previousStatus}` : "",
     context.finalState ? `Previous final state: ${context.finalState}` : "",
     context.finalAnswer ? `Previous final answer: ${context.finalAnswer}` : "",
     context.summary ? `Previous compressed summary: ${context.summary}` : "",
     ...context.blockingIssues.map((item) => `Previous blocking issue: ${item}`),
     ...context.risks.map((item) => `Previous risk: ${item}`),
-    ...context.nextActions.map((item) => `Previous next action: ${item}`)
+    ...context.nextActions.map((item) => `Previous next action: ${item}`),
+    ...context.participantMessages.map((message) => `Previous participant latest: ${formatContinuationMessage(message)}`),
+    ...context.recentMessages.map((message) => `Previous recent message: ${formatContinuationMessage(message)}`),
+    ...context.recentActivity.map((item) => `Previous real activity: ${item}`),
+    context.previousSessionId ? `Use load_context with sessionId=${context.previousSessionId} and an optional round whenever exact older public messages or execution records are needed.` : ""
   ].filter(Boolean);
+}
+
+function normalizeContinuationMessages(value, limit) {
+  return (Array.isArray(value) ? value : []).slice(-limit).map((message) => ({
+    round: Number(message?.round || 0),
+    agentId: String(message?.agentId || message?.agent_id || "").trim(),
+    agentName: String(message?.agentName || message?.agent_name || message?.agentId || "").trim(),
+    status: String(message?.status || "unknown").trim(),
+    text: String(message?.text || message?.argument || message?.reason || "").trim().slice(0, 420),
+    createdAt: String(message?.createdAt || message?.created_at || "").trim()
+  })).filter((message) => message.agentName || message.text);
+}
+
+function formatContinuationMessage(message) {
+  return [
+    message.round ? `R${message.round}` : "",
+    message.agentName || message.agentId || "unknown member",
+    `[${message.status || "unknown"}]`,
+    message.text || "(no public text)"
+  ].filter(Boolean).join(" ");
 }
 
 function normalizeTextList(value) {

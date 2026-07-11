@@ -4,7 +4,7 @@ import { buildContextPromptSections, buildMemberContext } from "./contextBuilder
 import { parseFinalDecision, parseRoundResponse } from "./responseParser.js";
 import { makeId, nowIso } from "./types.js";
 import { isConsensusParticipant, scoreConsensus, shouldStop, updateUnresolvedObjections } from "./consensusEngine.js";
-import { appendMemoryCandidates, listSessionHistoryCatalogue, searchSessionContextArchive, writeContextArchive, writeGroupSession, writeSession } from "./storage.js";
+import { appendMemoryCandidates, listSessionHistoryCatalogue, readRecentGroupSessions, searchSessionContextArchive, writeContextArchive, writeGroupSession, writeSession } from "./storage.js";
 import { assessBudgetUsage, assessSizeUsage } from "./tokenLimits.js";
 import { appendSessionTranscriptChunk, readSummaryCache, updateDeterministicSummaries } from "./summaryCache.js";
 import { appendSessionUsage, estimateCost, estimateMemberAccruedCost } from "./usageStats.js";
@@ -48,19 +48,40 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
     workMode
   });
   const globalRequirement = options.globalRequirement || group.settings?.globalRequirement || "";
-  const continuationContext = normalizeContinuationContext(options.continuationContext);
   const workspaceGroup = options.groupPath ? readWorkspaceGroup(options.groupPath) : undefined;
   const memoryEnabled = capabilityEnabled(options.appSettings, "memory");
+  const recentGroupSessions = options.groupPath && memoryEnabled
+    ? readRecentGroupSessions(options.groupPath, { limit: 12 })
+    : [];
+  const automaticContinuationSource = isContinuationRequest(question)
+    ? selectAutomaticContinuationSource(recentGroupSessions)
+    : undefined;
+  const continuationContext = normalizeContinuationContext(options.continuationContext)
+    || (options.groupPath && memoryEnabled && automaticContinuationSource
+      ? buildAutomaticContinuationContext(automaticContinuationSource)
+      : null);
+  const excludedLegacyContinuationIds = automaticContinuationSource
+    ? recentGroupSessions.filter(isLegacyContinuationShell).map((session) => session.id)
+    : [];
   const taskState = options.groupPath && memoryEnabled ? readTaskState(options.groupPath) : undefined;
   const runtimeDiscoveryOptions = { managedToolRoots: [path.join(baseDir, "tools")] };
   const runtimeEnvironment = formatRuntimeEnvironment(discoverRuntimeEnvironment(options.groupPath || baseDir, runtimeDiscoveryOptions));
   const retrievedContext = options.groupPath && memoryEnabled
-    ? searchSessionContextArchive(options.groupPath, [question, options.latestBossInstruction].filter(Boolean).join("\n"), {
-      limit: options.contextSearchLimit || group.settings?.contextSearchLimit || 5
+    ? searchSessionContextArchive(options.groupPath, [
+      options.latestBossInstruction,
+      continuationContext?.previousQuestion,
+      continuationContext?.finalAnswer,
+      continuationContext ? "" : question
+    ].filter(Boolean).join("\n"), {
+      limit: options.contextSearchLimit || group.settings?.contextSearchLimit || 5,
+      excludeSessionIds: excludedLegacyContinuationIds
     })
     : [];
   const historyCatalogue = options.groupPath && memoryEnabled
-    ? listSessionHistoryCatalogue(options.groupPath, { limit: group.settings?.historyCatalogueLimit || 12 })
+    ? listSessionHistoryCatalogue(options.groupPath, {
+      limit: group.settings?.historyCatalogueLimit || 12,
+      excludeSessionIds: excludedLegacyContinuationIds
+    })
     : [];
   const session = {
     id: makeId("session"),
@@ -765,11 +786,117 @@ function normalizeContinuationContext(value) {
     finalState: String(value.finalState || value.final_state || "").trim(),
     finalAnswer: String(value.finalAnswer || value.answer || "").trim(),
     summary: String(value.summary || "").trim(),
+    sourcePath: String(value.sourcePath || value.source_path || "").trim(),
+    previousStatus: String(value.previousStatus || value.status || "").trim(),
     blockingIssues,
     risks,
-    nextActions
+    nextActions,
+    participantMessages: normalizeContinuationMessages(value.participantMessages || value.participant_messages, 12),
+    recentMessages: normalizeContinuationMessages(value.recentMessages || value.recent_messages, 12),
+    recentActivity: normalizeTextList(value.recentActivity || value.recent_activity).slice(0, 12)
   };
   return Object.values(normalized).some((item) => Array.isArray(item) ? item.length : Boolean(item)) ? normalized : null;
+}
+
+function isContinuationRequest(question) {
+  const text = String(question || "").trim().toLowerCase();
+  if (!text) return false;
+  return /^(?:好(?:的)?|可以|行|嗯|那)?[\s，,。.!！?？]*(?:继续|接着|往下(?:做)?|继续完善|继续完成|continue\b|go\s+on\b|keep\s+going\b)/iu.test(text);
+}
+
+function buildAutomaticContinuationContext(previousSession) {
+  if (!previousSession?.id) return null;
+  const inherited = normalizeContinuationContext(previousSession.continuationContext);
+  const messages = Array.isArray(previousSession.messages) ? previousSession.messages : [];
+  const latestByAgent = new Map();
+  for (const message of messages) {
+    const key = String(message.agentId || message.agentName || "").trim();
+    if (key) latestByAgent.set(key, message);
+  }
+  const finalDecision = previousSession.finalDecision || {};
+  const participantMessages = messages.length
+    ? [...latestByAgent.values()].slice(-12).map(compactContinuationMessage)
+    : inherited?.participantMessages || [];
+  const participantKeys = new Set(participantMessages.map(continuationMessageKey));
+  const recentMessages = messages.length
+    ? messages.slice(-24).map(compactContinuationMessage).filter((message) => !participantKeys.has(continuationMessageKey(message))).slice(-12)
+    : inherited?.recentMessages || [];
+  const recentActivity = [
+    ...(Array.isArray(previousSession.toolExecutionResults) ? previousSession.toolExecutionResults.slice(-8).map((item) => compactContinuationActivity("tool", item)) : []),
+    ...(Array.isArray(previousSession.fileOperationExecutionResults) ? previousSession.fileOperationExecutionResults.slice(-8).map((item) => compactContinuationActivity("file result", item)) : []),
+    ...(Array.isArray(previousSession.fileOperationProposals) ? previousSession.fileOperationProposals.slice(-8).map((item) => compactContinuationActivity("file proposal", item)) : [])
+  ].filter(Boolean).slice(-12);
+  return normalizeContinuationContext({
+    previousSessionId: previousSession.id,
+    previousQuestion: inherited?.previousQuestion || previousSession.question,
+    previousStatus: previousSession.status,
+    finalState: finalDecision.final_state || inherited?.finalState,
+    finalAnswer: finalDecision.answer || inherited?.finalAnswer,
+    summary: `Saved public session with ${messages.length} member messages across ${Math.max(0, ...messages.map((message) => Number(message.round || 0)))} rounds.`,
+    sourcePath: `sessions/${previousSession.id}.json`,
+    blockingIssues: finalDecision.blocking_issues || finalDecision.unresolved_blockers || inherited?.blockingIssues,
+    risks: finalDecision.risks || finalDecision.unresolved_risks || inherited?.risks,
+    nextActions: finalDecision.next_actions || inherited?.nextActions,
+    participantMessages,
+    recentMessages,
+    recentActivity: recentActivity.length ? recentActivity : inherited?.recentActivity
+  });
+}
+
+function selectAutomaticContinuationSource(sessions) {
+  const recent = Array.isArray(sessions) ? sessions : [];
+  if (!recent.length) return undefined;
+  return recent.find((session) => (
+    !isContinuationRequest(session?.question)
+    || normalizeContinuationContext(session?.continuationContext)?.previousSessionId
+  )) || recent[0];
+}
+
+function isLegacyContinuationShell(session) {
+  return Boolean(session?.id)
+    && isContinuationRequest(session?.question)
+    && !normalizeContinuationContext(session?.continuationContext)?.previousSessionId;
+}
+
+function compactContinuationMessage(message = {}) {
+  const response = message.response || {};
+  return {
+    round: Number(message.round || 0),
+    agentId: String(message.agentId || ""),
+    agentName: String(message.agentName || message.agentId || ""),
+    status: String(response.status || "unknown"),
+    text: truncateContinuationText(response.argument || response.reason || response.position || message.displayText || "", 420),
+    createdAt: String(message.createdAt || "")
+  };
+}
+
+function normalizeContinuationMessages(value, limit) {
+  return (Array.isArray(value) ? value : []).slice(-limit).map((message) => ({
+    round: Number(message?.round || 0),
+    agentId: String(message?.agentId || message?.agent_id || "").trim(),
+    agentName: String(message?.agentName || message?.agent_name || message?.agentId || "").trim(),
+    status: String(message?.status || "unknown").trim(),
+    text: truncateContinuationText(message?.text || message?.argument || message?.reason || "", 420),
+    createdAt: String(message?.createdAt || message?.created_at || "").trim()
+  })).filter((message) => message.agentName || message.text);
+}
+
+function compactContinuationActivity(label, item = {}) {
+  const result = item.result || {};
+  const identity = item.tool || item.op || item.action || result.action || "activity";
+  const target = item.path || result.path || result.destinationPath || item.query || item.url || item.command || "";
+  const status = item.status || result.status || result.code || "unknown";
+  const detail = result.error || result.stderr || result.stdout || result.message || item.error || "";
+  return truncateContinuationText(`${label}: ${identity} status=${status}${target ? ` target=${target}` : ""}${detail ? ` detail=${detail}` : ""}`, 500);
+}
+
+function continuationMessageKey(message = {}) {
+  return `${message.round || 0}|${message.agentId || message.agentName || ""}|${message.text || ""}`;
+}
+
+function truncateContinuationText(value, max) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  return text.length > max ? `${text.slice(0, max - 3)}...` : text;
 }
 
 function normalizeTextList(value) {

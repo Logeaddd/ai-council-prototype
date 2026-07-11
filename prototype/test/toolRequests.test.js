@@ -8,7 +8,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { executeFileTool, extractImportedProjectRoots } from "../src/fileTools.js";
 import { executeToolRequests } from "../src/toolRequests.js";
-import { writeContextArchive } from "../src/storage.js";
+import { writeContextArchive, writeGroupSession } from "../src/storage.js";
 
 test("controlled file tool requests list, read, search, and grep real workspace files", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-tools-"));
@@ -282,6 +282,40 @@ test("context tools search and load earlier rounds from the active session", asy
   assert.match(JSON.stringify(searched.results[0].result), /LIVE_CONTEXT_TOOL_FACT/);
   assert.equal(loaded.results[0].result.source, "live_session_context");
   assert.match(JSON.stringify(loaded.results[0].result), /LIVE_CONTEXT_TOOL_FACT/);
+});
+
+test("text-only members can retrieve public group history but still cannot read workspace files", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-text-history-tool-"));
+  fs.writeFileSync(path.join(tmp, "private.txt"), "FILE_MUST_STAY_DENIED", "utf8");
+  writeGroupSession({
+    id: "session_text_history_1",
+    question: "Prior public task",
+    status: "running",
+    createdAt: "2026-07-11T12:00:00.000Z",
+    messages: [{ round: 1, agentId: "builder", agentName: "Builder", response: { status: "speak", argument: "TEXT_MEMBER_HISTORY_FACT" } }],
+    toolExecutionResults: [],
+    fileOperationExecutionResults: [],
+    fileOperationProposals: []
+  }, tmp);
+
+  const result = await executeToolRequests({
+    permissionTier: "text",
+    groupPath: tmp,
+    agent: { id: "reader", name: "Reader" },
+    round: 2,
+    requests: [
+      { tool: "search_context", query: "TEXT_MEMBER_HISTORY_FACT", reason: "Find prior public discussion." },
+      { tool: "load_context", sessionId: "session_text_history_1", round: 1, reason: "Load the exact public round." },
+      { tool: "read_file", path: "private.txt", reason: "This must remain denied." }
+    ]
+  });
+
+  assert.deepEqual(result.accepted.map((item) => item.tool), ["search_context", "load_context"]);
+  assert.equal(result.results.length, 2);
+  assert.match(JSON.stringify(result.results), /TEXT_MEMBER_HISTORY_FACT/);
+  assert.equal(result.rejected.length, 1);
+  assert.equal(result.rejected[0].tool, "read_file");
+  assert.equal(result.rejected[0].code, "permission_denied");
 });
 
 test("extract_archive extracts safe zip files for full permission only", async () => {

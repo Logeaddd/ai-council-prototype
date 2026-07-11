@@ -348,7 +348,9 @@ test("text-only workspace round prompt does not ask the member to propose file_o
   });
 
   assert.match(messages[0].content, /text-only file permission/);
-  assert.match(messages[0].content, /Do not request .*api_request.*search_context.*load_context.*extract_archive.*execute_command.*process_control.*run_code.*install_package.*run_tests.*git_operation.*browser_control.*database_query.*mcp_search_npm.*mcp_install_npm.*mcp_uninstall.*mcp_list_tools.*mcp_call.*mcp_list_resources.*mcp_read_resource.*mcp_list_prompts.*mcp_get_prompt/);
+  assert.match(messages[0].content, /may still use search_context and load_context/);
+  assert.match(messages[0].content, /Do not request web_search.*api_request.*list_directory.*extract_archive.*execute_command.*run_tests.*git_operation.*browser_control.*database_query/);
+  assert.doesNotMatch(messages[0].content, /Do not request .*search_context.*load_context/);
   assert.match(messages[0].content, /do not propose file_operations yourself/);
   assert.doesNotMatch(messages[0].content, /MUST propose the change in file_operations/);
 });

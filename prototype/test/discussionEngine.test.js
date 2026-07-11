@@ -12,7 +12,7 @@ import { appendSessionUsage, readGroupUsage } from "../src/usageStats.js";
 import { approveExecutionStandards, prepareExecutionStandards } from "../src/executionStandards.js";
 import { appendPrivateChatMessage } from "../src/privateChat.js";
 import { listPublicMemories, upsertPublicMemory } from "../src/publicMemory.js";
-import { readGroupSession, readMemoryPending, writeContextArchive } from "../src/storage.js";
+import { readGroupSession, readMemoryPending, writeContextArchive, writeGroupSession } from "../src/storage.js";
 import { enableSkillForGroup, installSkillMarkdown } from "../src/skillPacks.js";
 import { writeTaskState } from "../src/taskState.js";
 
@@ -5190,6 +5190,86 @@ test("cycle continuation context is injected into the next council prompt", asyn
     assert.match(firstPrompt, /上一轮最终结论/);
     assert.match(firstPrompt, /阻断问题仍未解决/);
     assert.match(firstPrompt, /下一步动作/);
+  } finally {
+    await close(server);
+  }
+});
+
+test("a plain continue message automatically carries the latest real group discussion", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-auto-continuation-"));
+  writeGroupSession({
+    id: "session_previous_mod_work",
+    question: "PREVIOUS_MOD_QUESTION build the real mod",
+    status: "running",
+    createdAt: "2026-07-11T10:00:00.000Z",
+    messages: [
+      { round: 1, agentId: "designer", agentName: "Designer", response: { status: "speak", argument: "DESIGNER_PREVIOUS_STATEMENT" }, createdAt: "2026-07-11T10:00:10.000Z" },
+      { round: 2, agentId: "builder", agentName: "Builder", response: { status: "speak", argument: "BUILDER_PREVIOUS_STATEMENT wrote the Forge source" }, createdAt: "2026-07-11T10:00:20.000Z" }
+    ],
+    toolExecutionResults: [{ round: 2, source_agent_id: "builder", tool: "run_tests", status: "completed", result: { status: "completed", stdout: "PREVIOUS_BUILD_ACTIVITY" } }],
+    fileOperationExecutionResults: [{ round: 2, source_agent_id: "builder", action: "write", path: "src/main/java/Mod.java", result: { status: "written" } }],
+    fileOperationProposals: []
+  }, tmp);
+  writeGroupSession({
+    id: "session_legacy_continue_shell",
+    question: "继续",
+    status: "completed",
+    createdAt: "2026-07-11T11:00:00.000Z",
+    completedAt: "2026-07-11T11:01:00.000Z",
+    messages: [{ round: 1, agentId: "builder", agentName: "Builder", response: { status: "speak", argument: "LEGACY_NO_CONTEXT_REPLY" } }],
+    toolExecutionResults: [],
+    fileOperationExecutionResults: [],
+    fileOperationProposals: [],
+    finalDecision: { answer: "No prior context was available." }
+  }, tmp);
+  const requests = [];
+  const server = http.createServer(async (req, res) => {
+    const body = JSON.parse(await readRequestBody(req));
+    requests.push(body);
+    const finalCall = JSON.stringify(body.messages || []).includes("FinalDecision JSON object");
+    writeOpenAiStream(res, JSON.stringify(finalCall ? {
+      answer: "Continuation checked.",
+      consensus_score: 1,
+      supporting_agents: ["Builder"],
+      dissenting_agents: [],
+      minority_report: "",
+      risks: [],
+      next_actions: [],
+      selected_file_operation_ids: [],
+      memory_candidates: []
+    } : {
+      status: "skip",
+      reason: "Prior public discussion is present.",
+      memory_candidates: []
+    }));
+  });
+  await listen(server);
+
+  try {
+    const apiBaseUrl = `http://127.0.0.1:${server.address().port}/v1`;
+    const group = validateGroupConfig({
+      id: "auto-continuation",
+      name: "Auto Continuation",
+      settings: { maxRounds: 1, minConsensusWeight: 1, stopWhenAllSkip: true, agentTimeoutMs: 1000 },
+      agents: [
+        { id: "builder", name: "Builder", role: "Builder", provider: "openai-compatible", apiBaseUrl, allowUnsafePrivateNetwork: true, apiKey: "test-key", model: "test-model", weight: 1, enabled: true },
+        { id: "finalizer", name: "Finalizer", role: "Finalizer", provider: "openai-compatible", apiBaseUrl, allowUnsafePrivateNetwork: true, apiKey: "test-key", model: "test-model", weight: 1, enabled: true, judge: true }
+      ]
+    });
+
+    const result = await runCouncil("继续", group, tmp, { groupPath: tmp });
+    const firstPrompt = requests[0].messages.at(-1).content;
+    assert.equal(result.session.continuationContext.previousSessionId, "session_previous_mod_work");
+    assert.match(firstPrompt, /PREVIOUS_MOD_QUESTION/);
+    assert.match(firstPrompt, /DESIGNER_PREVIOUS_STATEMENT/);
+    assert.match(firstPrompt, /BUILDER_PREVIOUS_STATEMENT/);
+    assert.match(firstPrompt, /PREVIOUS_BUILD_ACTIVITY/);
+    assert.match(firstPrompt, /src\/main\/java\/Mod\.java/);
+    assert.match(firstPrompt, /load_context with sessionId=session_previous_mod_work/);
+    assert.doesNotMatch(firstPrompt, /LEGACY_NO_CONTEXT_REPLY/);
+
+    const unrelated = await runCouncil("Start a completely unrelated fresh task.", group, tmp, { groupPath: tmp });
+    assert.equal(unrelated.session.continuationContext, null);
   } finally {
     await close(server);
   }

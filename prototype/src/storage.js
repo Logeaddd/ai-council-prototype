@@ -83,6 +83,21 @@ export function readGroupSession(groupPath, sessionId) {
   return JSON.parse(fs.readFileSync(filePath, "utf8"));
 }
 
+export function readRecentGroupSessions(groupPath, options = {}) {
+  const excludedIds = new Set([
+    String(options.excludeSessionId || "").trim(),
+    ...(Array.isArray(options.excludeSessionIds) ? options.excludeSessionIds.map((item) => String(item || "").trim()) : [])
+  ].filter(Boolean));
+  const sessions = [];
+  for (const summary of listGroupSessions(groupPath, { limit: options.limit || 200 })) {
+    if (!summary.id || excludedIds.has(summary.id)) continue;
+    try {
+      sessions.push(readGroupSession(groupPath, summary.id));
+    } catch {}
+  }
+  return sessions;
+}
+
 export function readSessionContextArchive(groupPath, sessionId) {
   const id = requireSafeSessionId(sessionId);
   const root = path.resolve(groupPath, "sessions");
@@ -113,12 +128,14 @@ export function loadSessionContextArchiveItem(groupPath, request = {}, options =
   if (archiveDir !== sessionsDir && !archiveDir.startsWith(`${sessionsDir}${path.sep}`)) {
     throw new Error("Session archive path escapes group workspace");
   }
-  if (!fs.existsSync(archiveDir) || !fs.statSync(archiveDir).isDirectory()) {
-    throw new Error(`Unknown session archive: ${id}`);
-  }
-
   const round = normalizeRoundNumber(request.round);
   const maxBytes = clampNumber(options.maxBytes || request.maxBytes || request.max_bytes || 128 * 1024, 4096, 512 * 1024);
+  if (!fs.existsSync(archiveDir) || !fs.statSync(archiveDir).isDirectory()) {
+    const storedSession = readStoredSessionFile(sessionsDir, id);
+    if (!storedSession) throw new Error(`Unknown session archive: ${id}`);
+    return limitArchivePayload(buildStoredSessionLoadPayload(storedSession, round), maxBytes);
+  }
+
   const indexRecord = readSessionIndexRecords(sessionsDir).find((item) => item.sessionId === id);
   const payload = round
     ? {
@@ -149,13 +166,20 @@ export function searchSessionContextArchive(groupPath, query, options = {}) {
 
   const limit = clampNumber(options.limit || 6, 1, 20);
   const maxSessions = clampNumber(options.maxSessions || 80, 1, 300);
+  const excludedIds = normalizeExcludedSessionIds(options);
   const records = readSessionIndexRecords(sessionsDir)
+    .filter((record) => !excludedIds.has(String(record.sessionId || "")))
     .sort((a, b) => new Date(b.completedAt || b.createdAt || 0).getTime() - new Date(a.completedAt || a.createdAt || 0).getTime())
     .slice(0, maxSessions);
 
   const hits = [];
   for (const record of records) {
     hits.push(...buildSearchCandidates(root, record, terms));
+  }
+  const indexedIds = new Set(records.map((record) => String(record.sessionId || "")));
+  for (const session of readStoredSessionFiles(sessionsDir, { limit: maxSessions })) {
+    if (!session?.id || indexedIds.has(String(session.id)) || excludedIds.has(String(session.id))) continue;
+    hits.push(...buildStoredSessionSearchCandidates(session, terms));
   }
 
   return hits
@@ -168,7 +192,24 @@ export function listSessionHistoryCatalogue(groupPath, options = {}) {
   const sessionsDir = path.resolve(groupPath, "sessions");
   if (!fs.existsSync(sessionsDir)) return [];
   const limit = clampNumber(options.limit || 12, 1, 40);
-  return readSessionIndexRecords(sessionsDir)
+  const excludedIds = normalizeExcludedSessionIds(options);
+  const byId = new Map(readSessionIndexRecords(sessionsDir)
+    .filter((record) => !excludedIds.has(String(record.sessionId || "")))
+    .map((record) => [String(record.sessionId || ""), record]));
+  for (const summary of listGroupSessions(groupPath, { limit: 200 })) {
+    if (!summary.id || excludedIds.has(summary.id) || byId.has(summary.id)) continue;
+    byId.set(summary.id, {
+      sessionId: summary.id,
+      question: summary.question,
+      createdAt: summary.createdAt,
+      completedAt: summary.completedAt,
+      status: summary.status,
+      finalState: summary.finalState,
+      roundCount: summary.rounds,
+      messageCount: summary.messageCount
+    });
+  }
+  return [...byId.values()]
     .sort((a, b) => new Date(b.completedAt || b.createdAt || 0).getTime() - new Date(a.completedAt || a.createdAt || 0).getTime())
     .slice(0, limit)
     .map((record) => ({
@@ -414,6 +455,104 @@ function readSessionIndexRecords(sessionsDir) {
       }
     })
     .filter(Boolean);
+}
+
+function readStoredSessionFiles(sessionsDir, options = {}) {
+  if (!fs.existsSync(sessionsDir)) return [];
+  const limit = clampNumber(options.limit || 200, 1, 500);
+  return fs.readdirSync(sessionsDir)
+    .filter((name) => /^session_[A-Za-z0-9_-]+\.json$/.test(name))
+    .map((name) => readStoredSessionFile(sessionsDir, path.basename(name, ".json")))
+    .filter(Boolean)
+    .sort((a, b) => new Date(b.completedAt || b.createdAt || b.startedAt || 0).getTime() - new Date(a.completedAt || a.createdAt || a.startedAt || 0).getTime())
+    .slice(0, limit);
+}
+
+function normalizeExcludedSessionIds(options = {}) {
+  return new Set([
+    String(options.excludeSessionId || "").trim(),
+    ...(Array.isArray(options.excludeSessionIds) ? options.excludeSessionIds.map((item) => String(item || "").trim()) : [])
+  ].filter(Boolean));
+}
+
+function readStoredSessionFile(sessionsDir, sessionId) {
+  const id = String(sessionId || "").trim();
+  if (!/^[A-Za-z0-9_-]+$/.test(id)) return undefined;
+  const filePath = path.join(sessionsDir, `${id}.json`);
+  if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) return undefined;
+  try {
+    return JSON.parse(fs.readFileSync(filePath, "utf8"));
+  } catch {
+    return undefined;
+  }
+}
+
+function buildStoredSessionLoadPayload(session, round) {
+  const visible = visibleLiveSession(session, {}, "full");
+  const content = round
+    ? {
+      schema: "ai-council.stored-round.v1",
+      sessionId: session.id || "",
+      question: session.question || "",
+      round,
+      messages: visible.messages.filter((message) => Number(message.round || 0) === round),
+      toolExecutionResults: filterByRound(visible.toolExecutionResults, round),
+      fileOperationExecutionResults: filterByRound(visible.fileOperationExecutionResults, round),
+      fileOperationProposals: filterByRound(visible.fileOperationProposals, round)
+    }
+    : {
+      schema: "ai-council.stored-session.v1",
+      sessionId: session.id || "",
+      question: session.question || "",
+      status: session.status || "",
+      createdAt: session.createdAt || session.startedAt || "",
+      completedAt: session.completedAt || "",
+      messages: visible.messages,
+      toolExecutionResults: visible.toolExecutionResults,
+      fileOperationExecutionResults: visible.fileOperationExecutionResults,
+      fileOperationProposals: visible.fileOperationProposals,
+      artifacts: Array.isArray(session.artifacts) ? session.artifacts : [],
+      unresolvedObjections: session.unresolvedObjections || {},
+      consensusByRound: Array.isArray(session.consensusByRound) ? session.consensusByRound : [],
+      finalDecision: session.finalDecision || null
+    };
+  return {
+    source: "stored_session_context",
+    sourceType: round ? "stored_round_full" : "stored_session_full",
+    sessionId: session.id || "",
+    round: round || undefined,
+    sourcePath: `sessions/${session.id || ""}.json${round ? `#round-${round}` : ""}`,
+    content
+  };
+}
+
+function buildStoredSessionSearchCandidates(session, terms) {
+  const record = liveSessionRecord(session);
+  const visible = visibleLiveSession(session, {}, "full");
+  const sourcePath = `sessions/${record.sessionId}.json`;
+  const candidates = [makeSearchHit({
+    record,
+    sourceType: "stored_session",
+    sourcePath,
+    text: [
+      record.question,
+      session.finalDecision?.answer,
+      ...(Array.isArray(session.finalDecision?.risks) ? session.finalDecision.risks : []),
+      ...(Array.isArray(session.finalDecision?.next_actions) ? session.finalDecision.next_actions : [])
+    ].filter(Boolean).join("\n"),
+    terms
+  })];
+  for (const round of liveRoundNumbers(visible.messages)) {
+    candidates.push(makeSearchHit({
+      record,
+      round,
+      sourceType: "stored_round",
+      sourcePath: `${sourcePath}#round-${round}`,
+      text: liveRoundSearchText(visible, round),
+      terms
+    }));
+  }
+  return candidates.filter(Boolean);
 }
 
 function buildSearchCandidates(root, record, terms) {

@@ -561,7 +561,12 @@ test("context prompt sections include cycle continuation memory", () => {
       summary: "Builder proposed API v1; reviewer kept timeout risk visible.",
       blockingIssues: [{ id: "risk-1", issue: "Timeout policy still ambiguous." }],
       risks: ["Latency could spike."],
-      nextActions: ["Define timeout defaults."]
+      nextActions: ["Define timeout defaults."],
+      sourcePath: "sessions/session_prev.json",
+      previousStatus: "running",
+      participantMessages: [{ round: 2, agentName: "Builder", status: "speak", text: "BUILDER_LATEST_CONTEXT" }],
+      recentMessages: [{ round: 2, agentName: "Reviewer", status: "speak", text: "REVIEWER_RECENT_CONTEXT" }],
+      recentActivity: ["tool: run_tests status=completed"]
     }
   });
   const sections = buildContextPromptSections(context);
@@ -572,6 +577,11 @@ test("context prompt sections include cycle continuation memory", () => {
   assert.match(continuation, /Use the simpler API shape/);
   assert.match(continuation, /Timeout policy still ambiguous/);
   assert.match(continuation, /Define timeout defaults/);
+  assert.match(continuation, /sessions\/session_prev\.json/);
+  assert.match(continuation, /BUILDER_LATEST_CONTEXT/);
+  assert.match(continuation, /REVIEWER_RECENT_CONTEXT/);
+  assert.match(continuation, /run_tests status=completed/);
+  assert.match(continuation, /load_context with sessionId=session_prev/);
 });
 
 test("context prompt sections expose enabled skill metadata without loading skill instructions", () => {
