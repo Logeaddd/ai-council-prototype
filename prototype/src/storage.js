@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { makeId, nowIso } from "./types.js";
+import { syncPublicEventJournal } from "./publicEventJournal.js";
 
 export function writeSession(session, baseDir) {
   const dir = path.resolve(baseDir, "sessions");
@@ -15,6 +16,7 @@ export function writeGroupSession(session, groupPath) {
   fs.mkdirSync(dir, { recursive: true });
   const filePath = path.join(dir, `${session.id}.json`);
   fs.writeFileSync(filePath, JSON.stringify(session, null, 2), "utf8");
+  syncPublicEventJournal(session, groupPath);
   return filePath;
 }
 

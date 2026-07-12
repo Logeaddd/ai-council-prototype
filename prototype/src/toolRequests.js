@@ -33,6 +33,7 @@ import {
   searchSkillCandidates
 } from "./skillPacks.js";
 import { loadLiveSessionContext, loadSessionContextArchiveItem, searchLiveSessionContext, searchSessionContextArchive } from "./storage.js";
+import { loadPublicEvent, queryPublicEvents } from "./publicEventJournal.js";
 import { disabledCapabilityForRequest } from "./capabilityPolicy.js";
 import fs from "node:fs";
 import path from "node:path";
@@ -300,10 +301,13 @@ function observationSignature(request = {}) {
     return `${tool}:${normalizeObservationValue(request.path || request.root || ".")}:${normalizeObservationValue(request.pattern || request.query)}`;
   }
   if (tool === "search_context") {
-    return `${tool}:${normalizeObservationValue(request.query)}`;
+    return `${tool}:${normalizeObservationValue([
+      request.query, request.eventType, request.actorId, request.taskId, request.file, request.commit,
+      request.toolFilter, request.statusFilter, request.fromTime, request.toTime
+    ].join(":"))}`;
   }
   if (tool === "load_context") {
-    return `${tool}:${normalizeObservationValue(request.sessionId)}:${normalizeObservationValue(request.archiveRound)}`;
+    return `${tool}:${normalizeObservationValue(request.eventId || request.sessionId)}:${normalizeObservationValue(request.archiveRound)}`;
   }
   return "";
 }
@@ -379,7 +383,29 @@ async function executeOne(request, options) {
           error: "Local context search requires a group workspace."
         });
       }
-      const query = request.query || request.reason;
+      const hasEventFilters = Boolean(request.eventType || request.actorId || request.taskId || request.file || request.commit || request.toolFilter || request.statusFilter || request.fromTime || request.toTime);
+      const query = request.query || (hasEventFilters ? "" : request.reason);
+      const eventResults = queryPublicEvents(options.groupPath, {
+        query,
+        eventType: request.eventType,
+        actorId: request.actorId,
+        taskId: request.taskId,
+        file: request.file,
+        commit: request.commit,
+        tool: request.toolFilter,
+        status: request.statusFilter,
+        from: request.fromTime,
+        to: request.toTime,
+        sessionId: request.contextSessionId,
+        excludeSessionId: options.currentSession?.id,
+        limit: request.count || 5
+      }).map((item) => ({
+        ...item,
+        sourceType: item.type,
+        snippet: item.text,
+        createdAt: item.occurredAt,
+        eventId: item.id
+      }));
       const archiveResults = searchSessionContextArchive(options.groupPath, query, {
         limit: request.count || 5,
         excludeSessionId: options.currentSession?.id
@@ -389,14 +415,14 @@ async function executeOne(request, options) {
         agent: options.agent,
         transcriptVisibility: options.transcriptVisibility
       });
-      const results = [...liveResults, ...archiveResults]
+      const results = [...eventResults, ...liveResults, ...archiveResults]
         .sort((a, b) => Number(b.score || 0) - Number(a.score || 0))
         .slice(0, Math.max(1, Math.min(20, Number(request.count || 5))));
       return resultRecord(request, {
         status: "completed",
         result: {
           ok: true,
-          source: liveResults.length ? "group_history_with_live_session" : "local_context_archive",
+          source: eventResults.length ? "public_event_journal" : liveResults.length ? "group_history_with_live_session" : "local_context_archive",
           query,
           results
         }
@@ -410,14 +436,16 @@ async function executeOne(request, options) {
           error: "Local context load requires a group workspace."
         });
       }
-      if (!request.sessionId) {
+      if (!request.sessionId && !request.eventId) {
         return resultRecord(request, {
           status: "failed",
-          code: "missing_session_id",
-          error: "load_context requires sessionId."
+          code: "missing_context_pointer",
+          error: "load_context requires sessionId or eventId."
         });
       }
-      const result = request.sessionId === options.currentSession?.id
+      const result = request.eventId
+        ? loadPublicEvent(options.groupPath, request.eventId)
+        : request.sessionId === options.currentSession?.id
         ? loadLiveSessionContext(options.currentSession, {
           ...request,
           round: request.archiveRound
@@ -774,6 +802,17 @@ function normalizeToolRequest(item, index) {
     pattern: stringField(item.pattern),
     root: stringField(item.root),
     sessionId: stringField(item.sessionId || item.session_id),
+    eventId: stringField(item.eventId || item.event_id),
+    contextSessionId: stringField(item.contextSessionId || item.context_session_id),
+    eventType: stringField(item.eventType || item.event_type || item.typeFilter || item.type_filter),
+    actorId: stringField(item.actorId || item.actor_id || item.actor),
+    taskId: stringField(item.taskId || item.task_id || item.task),
+    file: stringField(item.file || item.filePath || item.file_path),
+    commit: stringField(item.commit || item.commitHash || item.commit_hash),
+    toolFilter: stringField(item.toolFilter || item.tool_filter),
+    statusFilter: stringField(item.statusFilter || item.status_filter),
+    fromTime: stringField(item.fromTime || item.from_time || item.from),
+    toTime: stringField(item.toTime || item.to_time || item.to),
     method: stringField(item.method),
     action: stringField(item.action || item.operation),
     oldText: contentField(item.oldText ?? item.old_text ?? item.before),
@@ -847,6 +886,17 @@ function reject(request, code, reason) {
     pattern: request.pattern,
     root: request.root,
     sessionId: request.sessionId,
+    eventId: request.eventId,
+    contextSessionId: request.contextSessionId,
+    eventType: request.eventType,
+    actorId: request.actorId,
+    taskId: request.taskId,
+    file: request.file,
+    commit: request.commit,
+    toolFilter: request.toolFilter,
+    statusFilter: request.statusFilter,
+    fromTime: request.fromTime,
+    toTime: request.toTime,
     method: request.method,
     action: request.action,
     oldText: request.oldText ? summarizeBodyForStorage(request.oldText) : undefined,
@@ -922,6 +972,17 @@ function resultRecord(request, extra) {
     pattern: request.pattern,
     root: request.root,
     sessionId: request.sessionId,
+    eventId: request.eventId,
+    contextSessionId: request.contextSessionId,
+    eventType: request.eventType,
+    actorId: request.actorId,
+    taskId: request.taskId,
+    file: request.file,
+    commit: request.commit,
+    toolFilter: request.toolFilter,
+    statusFilter: request.statusFilter,
+    fromTime: request.fromTime,
+    toTime: request.toTime,
     method: request.method,
     action: request.action,
     oldText: request.oldText ? summarizeBodyForStorage(request.oldText) : undefined,
@@ -1029,6 +1090,17 @@ function toolEvent(type, request, extra = {}) {
     pattern: request.pattern,
     root: request.root,
     sessionId: request.sessionId,
+    eventId: request.eventId,
+    contextSessionId: request.contextSessionId,
+    eventType: request.eventType,
+    actorId: request.actorId,
+    taskId: request.taskId,
+    file: request.file,
+    commit: request.commit,
+    toolFilter: request.toolFilter,
+    statusFilter: request.statusFilter,
+    fromTime: request.fromTime,
+    toTime: request.toTime,
     method: request.method,
     action: request.action,
     processId: request.processId,
@@ -1096,6 +1168,7 @@ function summarizeToolResult(record = {}) {
   }
   if (record.tool === "load_context") {
     return {
+      eventId: record.eventId,
       sessionId: record.sessionId,
       round: record.archiveRound,
       sourceType: result.sourceType,
