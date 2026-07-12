@@ -34,6 +34,7 @@ import {
 } from "./skillPacks.js";
 import { loadLiveSessionContext, loadSessionContextArchiveItem, searchLiveSessionContext, searchSessionContextArchive } from "./storage.js";
 import { loadPublicEvent, queryPublicEvents } from "./publicEventJournal.js";
+import { loadGitCommitContext } from "./gitContext.js";
 import { disabledCapabilityForRequest } from "./capabilityPolicy.js";
 import fs from "node:fs";
 import path from "node:path";
@@ -307,7 +308,7 @@ function observationSignature(request = {}) {
     ].join(":"))}`;
   }
   if (tool === "load_context") {
-    return `${tool}:${normalizeObservationValue(request.eventId || request.sessionId)}:${normalizeObservationValue(request.archiveRound)}`;
+    return `${tool}:${normalizeObservationValue(request.eventId || request.sessionId || request.commit)}:${normalizeObservationValue(request.archiveRound ?? request.offset)}`;
   }
   return "";
 }
@@ -436,14 +437,16 @@ async function executeOne(request, options) {
           error: "Local context load requires a group workspace."
         });
       }
-      if (!request.sessionId && !request.eventId) {
+      if (!request.sessionId && !request.eventId && !request.commit) {
         return resultRecord(request, {
           status: "failed",
           code: "missing_context_pointer",
-          error: "load_context requires sessionId or eventId."
+          error: "load_context requires sessionId, eventId, or commit."
         });
       }
-      const result = request.eventId
+      const result = request.commit
+        ? loadGitCommitContext(options.groupPath, request)
+        : request.eventId
         ? loadPublicEvent(options.groupPath, request.eventId)
         : request.sessionId === options.currentSession?.id
         ? loadLiveSessionContext(options.currentSession, {
