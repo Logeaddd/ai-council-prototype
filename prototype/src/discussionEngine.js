@@ -29,6 +29,7 @@ import path from "node:path";
 import { createObservationCache, hasMaterialWorkspaceChange } from "./observationCache.js";
 import { advanceExecutionState, createExecutionState, executionInstruction, isDeliveryTask, selectExecutionAgents } from "./executionState.js";
 import { nativeToolDefinitions } from "./nativeToolProtocol.js";
+import { readPublicEventHotCache } from "./publicEventJournal.js";
 
 export async function runCouncil(question, group, baseDir, options = {}) {
   let finalResult;
@@ -87,6 +88,12 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
       excludeSessionIds: excludedLegacyContinuationIds
     })
     : [];
+  const publicEventHotCache = options.groupPath && memoryEnabled
+    ? readPublicEventHotCache(options.groupPath, {
+      limit: group.settings?.publicEventHotCacheLimit || 12,
+      excludeSessionIds: excludedLegacyContinuationIds
+    })
+    : { events: [] };
   const session = {
     id: makeId("session"),
     question,
@@ -161,6 +168,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
         taskState,
         retrievedContext,
         historyCatalogue,
+        publicEventHotCache,
         enabledSkills: loadEnabledSkills(baseDir, options.groupPath, options.appSettings),
         ...loadSummaryContext(options.groupPath, agent, options.appSettings),
         privateBossMessages: loadPrivateBossMessages(options.groupPath, agent, options.appSettings)
@@ -339,6 +347,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
           taskState,
           retrievedContext,
           historyCatalogue,
+          publicEventHotCache,
           enabledSkills: loadEnabledSkills(baseDir, options.groupPath, options.appSettings),
           ...loadSummaryContext(options.groupPath, agent, options.appSettings),
           privateBossMessages: loadPrivateBossMessages(options.groupPath, agent, options.appSettings)
@@ -461,6 +470,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
     attachments,
     taskState,
     retrievedContext,
+    publicEventHotCache,
     enabledSkills: loadEnabledSkills(baseDir, options.groupPath, options.appSettings),
     ...loadSummaryContext(options.groupPath, judge, options.appSettings),
     privateBossMessages: loadPrivateBossMessages(options.groupPath, judge, options.appSettings)

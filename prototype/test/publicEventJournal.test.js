@@ -4,7 +4,7 @@ import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { executeToolRequests } from "../src/toolRequests.js";
-import { loadPublicEvent, queryPublicEvents, rebuildPublicEventIndex } from "../src/publicEventJournal.js";
+import { loadPublicEvent, queryPublicEvents, readPublicEventHotCache, rebuildPublicEventIndex } from "../src/publicEventJournal.js";
 import { writeGroupSession } from "../src/storage.js";
 
 test("public event journal appends typed session events without duplicating repeated saves", () => {
@@ -37,6 +37,9 @@ test("public event journal appends typed session events without duplicating repe
   assert.equal(events.filter((event) => event.type === "session_status").length, 2);
   assert.equal(events.some((event) => event.type === "final_decision"), true);
   assert.equal(JSON.stringify(events).includes("PRIVATE_ONLY_VALUE"), false);
+  const cache = readPublicEventHotCache(groupPath, { limit: 20 });
+  assert.equal(cache.events.at(-1).type, "session_status");
+  assert.equal(JSON.stringify(cache).includes("PRIVATE_ONLY_VALUE"), false);
 });
 
 test("public event index queries actor type task file commit tool status and exact source event", () => {
@@ -81,6 +84,10 @@ test("public event index rebuilds from the append-only journal", () => {
   assert.equal(rebuilt.invalidLines, 0);
   assert.ok(rebuilt.events.length >= 4);
   assert.equal(queryPublicEvents(groupPath, { query: "implementation" }).length, 1);
+  const hotPath = path.join(groupPath, "shared", "memory", "events", "public-events.hot.json");
+  fs.writeFileSync(hotPath, "stale", "utf8");
+  const hot = readPublicEventHotCache(groupPath);
+  assert.ok(hot.events.length >= 4);
 });
 
 test("text-only members can search and load exact retained public events", async () => {

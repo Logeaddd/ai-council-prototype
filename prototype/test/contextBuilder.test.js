@@ -653,6 +653,33 @@ test("context prompt sections expose a bounded public group history catalogue", 
   assert.match(catalogue, /load_context/);
 });
 
+test("context prompt sections include a rebuildable recent public event cache with exact pointers", () => {
+  const context = buildMemberContext(agent, {
+    question: "Continue retained work.",
+    unresolvedObjections: {},
+    artifacts: [],
+    messages: []
+  }, {
+    publicEventHotCache: {
+      sourceJournalPath: "shared/memory/events/public-events.jsonl",
+      events: [{
+        eventId: "session_1:message:0",
+        sequence: 7,
+        type: "member_message",
+        actorName: "Builder",
+        status: "speak",
+        occurredAt: "2026-07-12T10:00:00.000Z",
+        text: "HOT_CACHE_PUBLIC_FACT",
+        sourcePath: "shared/memory/events/public-events.jsonl#event=session_1:message:0"
+      }]
+    }
+  });
+  const section = buildContextPromptSections(context).find((item) => item.title === "Recent public activity cache")?.content || "";
+  assert.match(section, /HOT_CACHE_PUBLIC_FACT/);
+  assert.match(section, /session_1:message:0/);
+  assert.match(section, /load_context with eventId/);
+});
+
 test("retrieved archive context is budgeted and keeps load pointers", () => {
   const context = buildMemberContext(agent, {
     question: "Use compact archive context.",

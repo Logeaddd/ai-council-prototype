@@ -54,6 +54,7 @@ export function buildMemberContext(agent, session, options = {}) {
       maxTokens: options.retrievedContextMaxTokens || options.groupSettings?.contextArchiveInjectionTokens
     }),
     historyCatalogue: normalizeHistoryCatalogue(options.historyCatalogue),
+    publicEventHotCache: normalizePublicEventHotCache(options.publicEventHotCache),
     privateBossMessages: Array.isArray(options.privateBossMessages) ? options.privateBossMessages : [],
     enabledSkills: String(options.enabledSkills || "").trim()
   };
@@ -157,6 +158,7 @@ export function buildContextPromptSections(context) {
     ]],
     ["Relevant archived context", formatRetrievedContext(context.summaries.retrievedContext)],
     ["Group history catalogue", formatHistoryCatalogue(context.summaries.historyCatalogue)],
+    ["Recent public activity cache", formatPublicEventHotCache(context.summaries.publicEventHotCache)],
     ["Cycle continuation", formatContinuationContext(context.summaries.continuationContext)],
     ["Private boss messages", context.summaries.privateBossMessages.map(formatPrivateBossMessage)],
     ["Enabled skills", context.summaries.enabledSkills ? [context.summaries.enabledSkills] : []],
@@ -640,6 +642,7 @@ function contextMessagesFromSummaries(summaries) {
     { role: "user", content: summaries.enabledSkills },
     { role: "user", content: formatRetrievedContext(summaries.retrievedContext).join("\n") },
     { role: "user", content: formatHistoryCatalogue(summaries.historyCatalogue).join("\n") },
+    { role: "user", content: formatPublicEventHotCache(summaries.publicEventHotCache).join("\n") },
     { role: "user", content: formatContinuationContext(summaries.continuationContext).join("\n") },
     ...summaries.privateBossMessages.map((message) => ({
       role: isFromBoss(message) ? "user" : "assistant",
@@ -664,6 +667,37 @@ function formatHistoryCatalogue(items) {
   return [
     "Saved public group discussions are available on demand. Use search_context to find details by words, or load_context with a sessionId and optional round to read the full public record, including shared tool and file-operation results. Do not claim an older discussion was read unless its tool result is present.",
     ...normalized.map((item, index) => `${index + 1}. session=${item.sessionId} rounds=${item.roundCount || 0}${item.finalState ? ` state=${item.finalState}` : ""}${item.completedAt ? ` completed=${item.completedAt}` : ""}\nQuestion: ${item.question}`)
+  ];
+}
+
+function normalizePublicEventHotCache(value) {
+  const events = Array.isArray(value?.events) ? value.events : [];
+  return {
+    sourceJournalPath: String(value?.sourceJournalPath || ""),
+    events: events.slice(-40).map((item) => ({
+      eventId: String(item?.eventId || ""),
+      sequence: Number(item?.sequence || 0),
+      type: String(item?.type || ""),
+      occurredAt: String(item?.occurredAt || ""),
+      actorName: String(item?.actorName || item?.actorId || ""),
+      status: String(item?.status || ""),
+      tool: String(item?.tool || ""),
+      text: String(item?.text || "").trim().slice(0, 700),
+      sourcePath: String(item?.sourcePath || "")
+    })).filter((item) => item.eventId && item.text)
+  };
+}
+
+function formatPublicEventHotCache(value) {
+  const cache = normalizePublicEventHotCache(value);
+  if (!cache.events.length) return [];
+  return [
+    `Recent retained public events from ${cache.sourceJournalPath || "the group event journal"}. These are compact previews with exact eventId pointers; use load_context with eventId for the full event.`,
+    ...cache.events.map((item) => [
+      `event=${item.eventId} seq=${item.sequence} type=${item.type}${item.actorName ? ` actor=${item.actorName}` : ""}${item.tool ? ` tool=${item.tool}` : ""}${item.status ? ` status=${item.status}` : ""}${item.occurredAt ? ` at=${item.occurredAt}` : ""}`,
+      item.sourcePath ? `Source: ${item.sourcePath}` : "",
+      `Preview: ${item.text}`
+    ].filter(Boolean).join("\n"))
   ];
 }
 

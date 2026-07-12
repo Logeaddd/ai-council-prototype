@@ -3,7 +3,10 @@ import path from "node:path";
 
 const JOURNAL_SCHEMA = "ai-council.public-event.v1";
 const INDEX_SCHEMA = "ai-council.public-event-index.v1";
+const HOT_CACHE_SCHEMA = "ai-council.public-event-hot-cache.v1";
 const MAX_INDEX_TEXT = 2400;
+const DEFAULT_HOT_EVENTS = 40;
+const MAX_HOT_EVENTS = 120;
 
 export function syncPublicEventJournal(session, groupPath) {
   if (!session?.id || !groupPath) return { appended: 0, total: 0 };
@@ -27,7 +30,27 @@ export function syncPublicEventJournal(session, groupPath) {
   }
   fs.appendFileSync(paths.journal, lines.join(""), "utf8");
   writeIndex(paths.index, index);
+  writeHotCache(paths, index);
   return { appended: candidates.length, total: index.events.length, journalPath: paths.relativeJournal };
+}
+
+export function readPublicEventHotCache(groupPath, options = {}) {
+  const paths = journalPaths(groupPath);
+  const limit = clamp(options.limit || DEFAULT_HOT_EVENTS, 1, MAX_HOT_EVENTS);
+  const journalBytes = fs.existsSync(paths.journal) ? fs.statSync(paths.journal).size : 0;
+  try {
+    const cache = JSON.parse(fs.readFileSync(paths.hotCache, "utf8"));
+    if (cache?.schema !== HOT_CACHE_SCHEMA || !Array.isArray(cache.events) || Number(cache.sourceJournalBytes || 0) !== journalBytes) {
+      throw new Error("stale hot cache");
+    }
+    const filtered = filteredHotCache(cache, options);
+    return { ...filtered, events: filtered.events.slice(-limit) };
+  } catch {
+    const index = readOrRebuildIndex(groupPath);
+    const cache = writeHotCache(paths, index);
+    const filtered = filteredHotCache(cache, options);
+    return { ...filtered, events: filtered.events.slice(-limit) };
+  }
 }
 
 export function queryPublicEvents(groupPath, filters = {}) {
@@ -113,6 +136,7 @@ export function rebuildPublicEventIndex(groupPath) {
     start = end;
   }
   writeIndex(paths.index, index);
+  writeHotCache(paths, index);
   return index;
 }
 
@@ -247,6 +271,7 @@ function indexEntry(event, offset, length) {
     tool: event.tool || "",
     filePaths: array(event.filePaths),
     commitHashes: array(event.commitHashes),
+    preview: truncate(event.text, 700),
     text: truncate([event.taskText, event.text, event.tool, ...array(event.filePaths), ...array(event.commitHashes)].filter(Boolean).join("\n"), MAX_INDEX_TEXT),
     offset,
     length
@@ -300,6 +325,45 @@ function writeIndex(filePath, index) {
   fs.renameSync(temporary, filePath);
 }
 
+function writeHotCache(paths, index) {
+  const events = index.events.slice(-MAX_HOT_EVENTS).map((item) => ({
+    eventId: item.id,
+    sequence: item.sequence,
+    type: item.type,
+    occurredAt: item.occurredAt,
+    sessionId: item.sessionId,
+    round: item.round,
+    actorId: item.actorId,
+    actorName: item.actorName,
+    status: item.status,
+    tool: item.tool,
+    filePaths: item.filePaths,
+    commitHashes: item.commitHashes,
+    text: truncate(item.preview || item.text, 700),
+    sourcePath: `${index.journalPath}#event=${item.id}`
+  }));
+  const cache = {
+    schema: HOT_CACHE_SCHEMA,
+    source: "derived_from_public_event_journal",
+    sourceJournalPath: index.journalPath,
+    sourceJournalBytes: fs.existsSync(paths.journal) ? fs.statSync(paths.journal).size : 0,
+    rebuiltAt: new Date().toISOString(),
+    events
+  };
+  const temporary = `${paths.hotCache}.tmp`;
+  fs.writeFileSync(temporary, JSON.stringify(cache, null, 2), "utf8");
+  fs.renameSync(temporary, paths.hotCache);
+  return cache;
+}
+
+function filteredHotCache(cache, options) {
+  const excluded = stringSet(options.excludeSessionId || options.excludeSessionIds);
+  return {
+    ...cache,
+    events: cache.events.filter((item) => !excluded.has(normalize(item.sessionId)))
+  };
+}
+
 function emptyIndex(journalPath) {
   return { schema: INDEX_SCHEMA, journalPath, journalBytes: 0, lastSequence: 0, invalidLines: 0, updatedAt: "", events: [] };
 }
@@ -311,6 +375,7 @@ function journalPaths(groupPath) {
     dir,
     journal: path.join(dir, "public-events.jsonl"),
     index: path.join(dir, "public-events.index.json"),
+    hotCache: path.join(dir, "public-events.hot.json"),
     relativeJournal: "shared/memory/events/public-events.jsonl"
   };
 }
