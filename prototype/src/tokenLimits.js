@@ -1,5 +1,4 @@
 const DEFAULT_CONTEXT_WINDOW = 16000;
-const DEFAULT_MAX_OUTPUT_TOKENS = 2048;
 const DEFAULT_WARNING_THRESHOLD = 0.6;
 const DEFAULT_COMPRESSION_THRESHOLD = 0.75;
 const DEFAULT_HARD_STOP_THRESHOLD = 0.9;
@@ -33,10 +32,10 @@ export function resolveEffectiveLimits(agent = {}, groupSettings = {}) {
   };
 
   const providerContextWindow = positiveNumber(provider.contextWindow) ?? DEFAULT_CONTEXT_WINDOW;
-  const providerMaxOutput = positiveNumber(provider.maxOutputTokens) ?? DEFAULT_MAX_OUTPUT_TOKENS;
-  const softMaxOutput = positiveNumber(soft.maxOutputTokensPerCall) ?? providerMaxOutput;
-  const effectiveOutputLimit = Math.max(1, Math.min(providerMaxOutput, softMaxOutput));
-  const requestedReserved = positiveNumber(soft.reservedOutputTokens) ?? effectiveOutputLimit;
+  const providerMaxOutput = positiveNumber(provider.maxOutputTokens);
+  const softMaxOutput = positiveNumber(soft.maxOutputTokensPerCall);
+  const effectiveOutputLimit = minKnown(providerMaxOutput, softMaxOutput) ?? 0;
+  const requestedReserved = positiveNumber(soft.reservedOutputTokens) ?? 0;
   const reservedOutputTokens = Math.max(requestedReserved, effectiveOutputLimit);
   const providerInputLimit = Math.max(1, providerContextWindow - reservedOutputTokens);
   const softInputLimit = positiveNumber(soft.maxInputTokensPerCall) ?? providerInputLimit;

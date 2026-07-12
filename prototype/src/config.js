@@ -45,9 +45,9 @@ export function validateGroupConfig(group) {
     stopWhenAllSkip: true,
     agentTimeoutMs: 900000,
     toolTimeoutMs: 12000,
-    maxToolIterations: 12,
-    maxModelCalls: 48,
-    noProgressModelCalls: 12,
+    maxToolIterations: 0,
+    maxModelCalls: 0,
+    noProgressModelCalls: 0,
     contextSearchLimit: 5,
     contextArchiveInjectionLimit: 5,
     contextArchiveInjectionTokens: 900,
@@ -63,9 +63,9 @@ export function validateGroupConfig(group) {
   group.settings.contextArchiveInjectionLimit = clampInteger(group.settings.contextArchiveInjectionLimit, 1, 12, 5);
   group.settings.contextArchiveInjectionTokens = clampInteger(group.settings.contextArchiveInjectionTokens, 120, 4000, 900);
   group.settings.recentMessageLimit = clampInteger(group.settings.recentMessageLimit, 0, 30, 6);
-  group.settings.maxToolIterations = clampInteger(group.settings.maxToolIterations, 0, 24, 12);
-  group.settings.maxModelCalls = clampInteger(group.settings.maxModelCalls, 4, 200, 48);
-  group.settings.noProgressModelCalls = clampInteger(group.settings.noProgressModelCalls, 4, 100, 12);
+  group.settings.maxToolIterations = normalizeOptionalLimit(group.settings.maxToolIterations);
+  group.settings.maxModelCalls = normalizeOptionalLimit(group.settings.maxModelCalls);
+  group.settings.noProgressModelCalls = normalizeOptionalLimit(group.settings.noProgressModelCalls);
   group.settings.maxWorkspaceSnapshotEntries = clampInteger(group.settings.maxWorkspaceSnapshotEntries, 100, 100000, 20000);
   group.settings.maxWorkspaceChanges = clampInteger(group.settings.maxWorkspaceChanges, 10, 5000, 1000);
 
@@ -97,4 +97,10 @@ function clampInteger(value, min, max, fallback) {
   const number = Number.parseInt(String(value), 10);
   if (!Number.isFinite(number)) return fallback;
   return Math.min(max, Math.max(min, number));
+}
+
+function normalizeOptionalLimit(value) {
+  const number = Number.parseInt(String(value ?? 0), 10);
+  if (!Number.isFinite(number) || number <= 0) return 0;
+  return number;
 }

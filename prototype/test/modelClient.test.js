@@ -143,7 +143,7 @@ test("OpenAI-compatible payload does not add provider cache metadata by default"
 
   assert.equal(payload.messages, messages);
   assert.equal(typeof payload.messages[1].content, "string");
-  assert.equal(payload.max_tokens, 4096);
+  assert.equal(payload.max_tokens, undefined);
 });
 
 test("OpenAI-compatible payload includes configurable max_tokens for Claude-style proxies", () => {
@@ -153,6 +153,20 @@ test("OpenAI-compatible payload includes configurable max_tokens for Claude-styl
   });
 
   assert.equal(payload.max_tokens, 1234);
+});
+
+test("provider payloads do not clamp explicit output limits to 64k", () => {
+  const openai = buildOpenAiCompatiblePayload({ maxTokens: 250000 }, {
+    model: "runtime-model",
+    messages: [{ role: "user", content: "Question" }]
+  });
+  const anthropic = buildAnthropicMessagesPayload({ maxTokens: 250000 }, {
+    model: "claude-test-model",
+    messages: [{ role: "user", content: "Question" }]
+  });
+
+  assert.equal(openai.max_tokens, 250000);
+  assert.equal(anthropic.max_tokens, 250000);
 });
 
 test("OpenAI-compatible payload sends reasoning effort only for known OpenAI reasoning models", () => {

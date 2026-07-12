@@ -276,7 +276,9 @@ test("round prompt advertises artifacts in speak schema", () => {
   assert.match(messages[0].content, /Do not invent tool results/);
   assert.match(messages[0].content, /Do not use proposed_files/);
   assert.match(messages[0].content, /Durable file contents must be in file_operations\.content/);
-  assert.match(messages[0].content, /one write\/append item per response/);
+  assert.match(messages[0].content, /Write each complete file in a single operation/);
+  assert.match(messages[0].content, /include several file_operations or tool_requests in one response/);
+  assert.match(messages[0].content, /There is no per-turn limit on how many tools you may call or how much you may write/);
   assert.match(messages[0].content, /no file writes will run/);
   assert.match(messages[0].content, /Do not put full source code/);
   assert.match(messages[0].content, /Use fetch_url only for text\/html\/json pages/);

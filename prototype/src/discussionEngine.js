@@ -1,7 +1,7 @@
 import { callAgentResult } from "./modelClient.js";
 import { buildFinalPrompt, buildRoundPrompt } from "./promptBuilder.js";
 import { buildContextPromptSections, buildMemberContext } from "./contextBuilder.js";
-import { parseFinalDecision, parseRoundModelResult } from "./responseParser.js";
+import { hasValidFinalDecision, parseFinalDecision, parseRoundModelResult } from "./responseParser.js";
 import { makeId, nowIso } from "./types.js";
 import { isConsensusParticipant, scoreConsensus, shouldStop, updateUnresolvedObjections } from "./consensusEngine.js";
 import { appendMemoryCandidates, listSessionHistoryCatalogue, readRecentGroupSessions, searchSessionContextArchive, writeContextArchive, writeGroupSession, writeSession } from "./storage.js";
@@ -119,8 +119,9 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
     rejectedFileOperationProposals: [],
     pendingFileOperationProposals: [],
     modelCallCount: 0,
-    modelCallBudget: normalizeModelCallBudget(group.settings.maxModelCalls),
+    modelCallBudget: Number(group.settings.maxModelCalls || 0),
     guardStopReason: "",
+    finalizationStatus: { status: "pending", reason: "" },
     messages: [],
     executionState: createExecutionState({
       question: executionQuestion,
@@ -383,13 +384,19 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
         processResponseFileOperations(response);
       }
 
-      if (response.status === "speak" && response.tool_requests?.length && toolIterations >= maxToolIterations) {
-        response = {
-          status: "unavailable",
-          reason: `tool_iteration_limit_exceeded:${maxToolIterations}`,
-          retryable: true
+      if (response.status === "speak" && response.tool_requests?.length && Number.isFinite(maxToolIterations) && toolIterations >= maxToolIterations) {
+        session.toolContinuation = {
+          agentId: agent.id,
+          round,
+          completedIterations: toolIterations,
+          reason: `user_configured_tool_iteration_pause:${maxToolIterations}`,
+          pendingRequests: response.tool_requests
         };
-        errorForMessage = response.reason;
+        response = {
+          ...response,
+          tool_requests: [],
+          continuation_required: true
+        };
       }
 
       const artifacts = collectMessageArtifacts(response, agent, round);
@@ -465,6 +472,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
   const finalStartMs = Date.now();
   const finalStartedAt = nowIso();
   const fallback = fallbackFinalDecision(session, consensus);
+  let finalizationFailure = "";
   const finalSeat = findWorkspaceSeat(workspaceGroup, judge);
   const finalContext = buildMemberContext(judge, session, {
     question,
@@ -498,6 +506,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
     createdAt: finalStartedAt
   };
   if (finalContext.coreOverflow) {
+    finalizationFailure = `non_compressible_core_exceeds_input_limit:${finalContextStatus.nonCompressibleCoreTokens}/${finalContextStatus.effectiveInputLimit}`;
     session.finalDecision = {
       ...fallback,
       risks: [
@@ -506,6 +515,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
       ]
     };
   } else if (finalBudgetBlockReason) {
+    finalizationFailure = finalBudgetBlockReason;
     session.finalDecision = {
       ...fallback,
       risks: [
@@ -514,12 +524,14 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
       ]
     };
   } else if (session.guardStopReason) {
+    finalizationFailure = session.guardStopReason;
     session.finalDecision = {
       ...fallback,
       risks: [...fallback.risks, session.guardStopReason]
     };
   } else if (!reserveModelCall(session)) {
     session.guardStopReason = "model_call_budget_exhausted";
+    finalizationFailure = session.guardStopReason;
     session.finalDecision = {
       ...fallback,
       risks: [...fallback.risks, session.guardStopReason]
@@ -541,13 +553,22 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
     throwIfAborted(options.signal);
     const finalRaw = await safeCall(judge, finalMessages, group.settings.agentTimeoutMs, options.signal);
     completeModelCall(modelCallRecord, finalRaw);
-    session.finalDecision = finalRaw.error
-      ? { ...fallback, risks: [...fallback.risks, finalRaw.error] }
-      : parseFinalDecision(finalRaw.text, fallback);
+    if (finalRaw.error) {
+      finalizationFailure = finalRaw.error;
+      session.finalDecision = { ...fallback, risks: [...fallback.risks, finalRaw.error] };
+    } else {
+      if (!hasValidFinalDecision(finalRaw.text)) finalizationFailure = "invalid_finalizer_response";
+      session.finalDecision = parseFinalDecision(finalRaw.text, fallback);
+    }
   }
+  session.finalizationStatus = finalizationFailure
+    ? { status: "failed", reason: finalizationFailure }
+    : { status: "completed", reason: "" };
   session.finalDecision.startedAt = finalStartedAt;
   session.finalDecision.durationMs = elapsedMs(finalStartMs);
   applyEngineFinalState(session, consensus, group.settings);
+  applyFinalizationFailure(session);
+  applyIncompleteExecutionState(session);
   if (session.guardStopReason) {
     session.finalDecision.final_state = "needs_revision";
     session.finalDecision.blocking_issues = [
@@ -591,7 +612,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
   });
   session.completedAt = nowIso();
   session.durationMs = elapsedMs(sessionStartMs);
-  session.status = session.guardStopReason ? "guard_stopped" : "completed";
+  session.status = deriveSessionStatus(session);
   options.signal?.removeEventListener("abort", persistInterruptedSession);
 
   const sessionPath = options.groupPath
@@ -746,16 +767,16 @@ function applyRoundResponseRules(response, agent, round) {
   return response;
 }
 
-function normalizeMaxToolIterations(value) {
-  const number = Number.parseInt(String(value), 10);
-  if (!Number.isFinite(number)) return 12;
-  return Math.min(24, Math.max(0, number));
-}
-
 function normalizeModelCallBudget(value) {
   const number = Number.parseInt(String(value), 10);
-  if (!Number.isFinite(number)) return 48;
-  return Math.min(200, Math.max(4, number));
+  if (!Number.isFinite(number) || number <= 0) return Number.POSITIVE_INFINITY;
+  return number;
+}
+
+function normalizeMaxToolIterations(value) {
+  const number = Number.parseInt(String(value), 10);
+  if (!Number.isFinite(number) || number <= 0) return Number.POSITIVE_INFINITY;
+  return number;
 }
 
 function reserveModelCall(session) {
@@ -768,7 +789,8 @@ function reserveModelCall(session) {
 
 function noProgressGuardReason(session, question, settings = {}) {
   if (!isDeliveryTask(question) || hasMaterialWorkspaceProgress(session)) return "";
-  const threshold = Math.min(100, Math.max(4, Number(settings.noProgressModelCalls) || 12));
+  const threshold = Number(settings.noProgressModelCalls || 0);
+  if (!Number.isFinite(threshold) || threshold <= 0) return "";
   if (Number(session.modelCallCount || 0) < threshold) return "";
   return `no_workspace_progress_after_${session.modelCallCount}_model_calls`;
 }
@@ -1135,7 +1157,7 @@ function fallbackFinalDecision(session, consensus) {
   const redTeamObjections = Object.entries(session.unresolvedObjections)
     .flatMap(([agentId, objections]) => objections.map((objection) => `${agentId}: ${objection}`));
   return {
-    answer: "The council completed, but the finalizer did not provide a valid final answer.",
+    answer: "The council could not complete because the finalizer did not provide a valid final answer.",
     consensus_score: consensus.score,
     supporting_agents: consensus.supportingAgents,
     dissenting_agents: consensus.dissentingAgents,
@@ -1144,6 +1166,63 @@ function fallbackFinalDecision(session, consensus) {
     next_actions: ["Review the session transcript."],
     memory_candidates: []
   };
+}
+
+function applyFinalizationFailure(session) {
+  if (session.finalizationStatus?.status !== "failed") return;
+  const reason = session.finalizationStatus.reason || "invalid_finalizer_response";
+  const issue = {
+    id: "finalizer-failed",
+    issue: `Final synthesis failed: ${reason}`,
+    severity: "critical",
+    blocks_final: true,
+    in_scope: true,
+    source_agent_id: "engine",
+    source_agent_name: "AI Council",
+    status: "open"
+  };
+  if (session.finalDecision.final_state !== "failed_to_converge") session.finalDecision.final_state = "needs_revision";
+  session.finalDecision.blocking_issues = mergeBlockingIssue(session.finalDecision.blocking_issues, issue);
+  session.finalDecision.risks = mergeRiskTexts(session.finalDecision.risks, [issue], []);
+}
+
+function applyIncompleteExecutionState(session) {
+  const execution = session.executionState;
+  const pausedToolLoop = session.toolContinuation;
+  if (!pausedToolLoop && (!execution?.active || execution.phase === "complete")) return;
+  const executorId = execution?.executorId || pausedToolLoop?.agentId || "engine";
+  const latestExecutorMessage = [...(session.messages || [])].reverse().find((message) => message.agentId === executorId);
+  const responseStatus = latestExecutorMessage?.response?.status || "missing";
+  const detail = pausedToolLoop
+    ? pausedToolLoop.reason
+    : `phase=${execution?.phase || "unknown"}, executor_status=${responseStatus}`;
+  const issue = {
+    id: "execution-incomplete",
+    issue: `Execution did not reach complete (${detail}).`,
+    severity: "critical",
+    blocks_final: true,
+    in_scope: true,
+    source_agent_id: executorId,
+    source_agent_name: execution?.executorName || latestExecutorMessage?.agentName || "AI Council",
+    status: "open"
+  };
+  if (session.finalDecision.final_state !== "failed_to_converge") session.finalDecision.final_state = "needs_revision";
+  session.finalDecision.blocking_issues = mergeBlockingIssue(session.finalDecision.blocking_issues, issue);
+  session.finalDecision.risks = mergeRiskTexts(session.finalDecision.risks, [issue], []);
+}
+
+function mergeBlockingIssue(items = [], issue) {
+  const existing = Array.isArray(items) ? items : [];
+  return existing.some((item) => item?.id === issue.id) ? existing : [...existing, issue];
+}
+
+function deriveSessionStatus(session) {
+  if (session.guardStopReason) return "guard_stopped";
+  const state = session.finalDecision?.final_state;
+  if (state === "ready_to_execute" || state === "usable_with_risks") return "completed";
+  if (state === "failed_to_converge") return "failed";
+  if (state === "needs_revision") return "incomplete";
+  return "failed";
 }
 
 function applyEngineFinalState(session, consensus, settings) {

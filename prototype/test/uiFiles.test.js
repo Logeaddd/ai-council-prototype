@@ -544,6 +544,11 @@ test("renderer data layer exposes real public memory APIs for the future setting
   assert.match(live, /\/api\/public-memory/);
 });
 
+test("renderer does not show failed or incomplete final decisions as completed", () => {
+  const live = fs.readFileSync(path.join(root, "renderer", "lib", "council-live.ts"), "utf8");
+  assert.match(live, /finalState === "ready_to_execute" \|\| finalState === "usable_with_risks" \? "completed" : "unavailable"/);
+});
+
 test("renderer displays real duration fields and configurable agent timeout", () => {
   const data = read("renderer/lib/council-data.ts");
   const live = read("renderer/lib/council-live.ts");

@@ -77,6 +77,23 @@ test("round response parser preserves unavailable status", () => {
   });
 });
 
+test("round response parser does not truncate tool requests above eight", () => {
+  const toolRequests = Array.from({ length: 12 }, (_, index) => ({
+    tool: "read_file",
+    path: `file-${index + 1}.txt`,
+    reason: `Read file ${index + 1}.`
+  }));
+  const parsed = parseRoundResponse(JSON.stringify({
+    status: "speak",
+    argument: "Inspect all files.",
+    tool_requests: toolRequests,
+    objections: []
+  }));
+
+  assert.equal(parsed.tool_requests.length, 12);
+  assert.equal(parsed.tool_requests.at(-1).path, "file-12.txt");
+});
+
 test("native tool calls remain actionable even when the provider returns no JSON text", () => {
   const parsed = parseRoundModelResult("", [{
     id: "call_1",

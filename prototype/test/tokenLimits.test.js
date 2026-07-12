@@ -53,6 +53,25 @@ test("unknown provider quota and balance do not participate in min", () => {
   assert.equal(limits.costBudget, 2.5);
 });
 
+test("unknown output capacity does not create an application speech limit or reservation", () => {
+  const limits = resolveEffectiveLimits({});
+
+  assert.equal(limits.effectiveOutputLimit, 0);
+  assert.equal(limits.reservedOutputTokens, 0);
+  assert.equal(limits.effectiveInputLimit, 16000);
+});
+
+test("explicit member output settings are preserved without an application ceiling", () => {
+  const limits = resolveEffectiveLimits({
+    providerLimits: { contextWindow: 500000 },
+    tokenLimits: { maxOutputTokensPerCall: 250000 }
+  });
+
+  assert.equal(limits.effectiveOutputLimit, 250000);
+  assert.equal(limits.reservedOutputTokens, 250000);
+  assert.equal(limits.effectiveInputLimit, 250000);
+});
+
 test("reserved output is always at least the effective output limit", () => {
   const limits = resolveEffectiveLimits({
     providerLimits: { contextWindow: 4096, maxOutputTokens: 1024 },

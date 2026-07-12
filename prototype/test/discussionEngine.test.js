@@ -246,6 +246,49 @@ test("onModelCall records round and final model payloads", async () => {
   assert.match(calls[1].rawText, /answer/);
 });
 
+test("invalid finalizer output makes the session incomplete instead of completed", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-invalid-finalizer-"));
+  const server = http.createServer(async (req, res) => {
+    const body = JSON.parse(await readRequestBody(req));
+    const prompt = JSON.stringify(body.messages || []);
+    if (prompt.includes("FinalDecision JSON object")) {
+      writeOpenAiStream(res, "did not provide a valid final answer");
+      return;
+    }
+    writeOpenAiStream(res, JSON.stringify({ status: "speak", argument: "Analysis is available.", objections: [], confidence: 1, memory_candidates: [] }));
+  });
+  await listen(server);
+  const address = server.address();
+  try {
+    const group = validateGroupConfig({
+      id: "invalid-finalizer",
+      name: "Invalid Finalizer",
+      settings: { maxRounds: 1, minConsensusWeight: 1, stopWhenAllSkip: true, agentTimeoutMs: 3000, allowSoloCouncil: true },
+      agents: [{
+        id: "member",
+        name: "Member",
+        role: "Member",
+        provider: "openai-compatible",
+        apiBaseUrl: `http://127.0.0.1:${address.port}/v1`,
+        allowUnsafePrivateNetwork: true,
+        apiKey: "secret-runtime-key",
+        model: "invalid-final-model",
+        weight: 1,
+        enabled: true
+      }]
+    });
+
+    const { session } = await runCouncil("Analyze this question.", group, tmp, { groupPath: tmp });
+
+    assert.equal(session.finalizationStatus.status, "failed");
+    assert.equal(session.finalDecision.final_state, "needs_revision");
+    assert.equal(session.status, "incomplete");
+    assert.equal(session.finalDecision.blocking_issues.some((item) => item.id === "finalizer-failed"), true);
+  } finally {
+    await close(server);
+  }
+});
+
 test("attached files reach round and final model prompts", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-attachments-"));
   const calls = [];
@@ -1699,7 +1742,7 @@ test("built-in web MCP can be joined and called from the council loop", async ()
   }
 });
 
-test("repeated tool requests stop at the configured iteration limit without fake success", async () => {
+test("an explicit user tool-iteration limit pauses with continuation instead of marking the member unavailable", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-tool-loop-limit-"));
   fs.writeFileSync(path.join(tmp, "group.json"), JSON.stringify({
     permissions: {
@@ -1776,9 +1819,91 @@ test("repeated tool requests stop at the configured iteration limit without fake
 
     assert.equal(requestBodies.length, 4);
     assert.equal(result.session.toolExecutionResults.length, 2);
-    assert.equal(result.session.messages[0].response.status, "unavailable");
-    assert.equal(result.session.messages[0].response.reason, "tool_iteration_limit_exceeded:2");
+    assert.equal(result.session.messages[0].response.status, "speak");
+    assert.equal(result.session.messages[0].response.continuation_required, true);
+    assert.equal(result.session.toolContinuation.reason, "user_configured_tool_iteration_pause:2");
     assert.equal(result.session.messages[0].toolExecutionResults.length, 2);
+    assert.equal(result.session.status, "incomplete");
+    assert.equal(result.session.finalDecision.final_state, "needs_revision");
+  } finally {
+    await close(server);
+  }
+});
+
+test("one member can complete more than twelve useful tool iterations without an application limit", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-long-tool-loop-"));
+  fs.writeFileSync(path.join(tmp, "group.json"), JSON.stringify({
+    permissions: { defaultTier: "tool", seatTiers: { worker: "tool" } }
+  }), "utf8");
+  for (let index = 1; index <= 15; index += 1) {
+    fs.writeFileSync(path.join(tmp, `fact-${index}.txt`), `FACT_${index}`, "utf8");
+  }
+  let memberCalls = 0;
+  const server = http.createServer(async (req, res) => {
+    const body = JSON.parse(await readRequestBody(req));
+    const prompt = JSON.stringify(body.messages || []);
+    if (prompt.includes("FinalDecision JSON object")) {
+      writeOpenAiStream(res, JSON.stringify({
+        answer: "All fifteen files were inspected successfully.",
+        consensus_score: 1,
+        supporting_agents: ["Worker"],
+        dissenting_agents: [],
+        minority_report: "",
+        risks: [],
+        next_actions: [],
+        memory_candidates: []
+      }));
+      return;
+    }
+    memberCalls += 1;
+    if (memberCalls <= 15) {
+      writeOpenAiStream(res, JSON.stringify({
+        status: "speak",
+        argument: `Inspecting file ${memberCalls}.`,
+        tool_requests: [{ tool: "read_file", path: `fact-${memberCalls}.txt`, reason: `Read fact ${memberCalls}.` }],
+        objections: [],
+        confidence: 0.5,
+        memory_candidates: []
+      }));
+      return;
+    }
+    writeOpenAiStream(res, JSON.stringify({
+      status: "speak",
+      argument: "Finished inspecting all fifteen files.",
+      tool_requests: [],
+      objections: [],
+      confidence: 1,
+      memory_candidates: []
+    }));
+  });
+  await listen(server);
+  const address = server.address();
+
+  try {
+    const group = validateGroupConfig({
+      id: "long-tool-loop",
+      name: "Long Tool Loop",
+      settings: { maxRounds: 1, minConsensusWeight: 1, stopWhenAllSkip: true, agentTimeoutMs: 3000, allowSoloCouncil: true },
+      agents: [{
+        id: "worker",
+        name: "Worker",
+        role: "Worker",
+        provider: "openai-compatible",
+        apiBaseUrl: `http://127.0.0.1:${address.port}/v1`,
+        allowUnsafePrivateNetwork: true,
+        apiKey: "secret-runtime-key",
+        model: "long-tool-model",
+        weight: 1,
+        enabled: true
+      }]
+    });
+    const result = await runCouncil("Inspect every supplied fact file and report when done.", group, tmp, { groupPath: tmp });
+
+    assert.equal(memberCalls, 16);
+    assert.equal(result.session.toolExecutionResults.length, 15);
+    assert.equal(result.session.messages[0].response.status, "speak");
+    assert.match(result.session.messages[0].response.argument, /Finished inspecting/);
+    assert.equal(result.session.status, "completed");
   } finally {
     await close(server);
   }

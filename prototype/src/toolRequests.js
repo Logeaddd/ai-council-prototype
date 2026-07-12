@@ -102,8 +102,7 @@ export function normalizeToolRequests(value) {
   if (!Array.isArray(value)) return [];
   return value
     .filter((item) => item && typeof item === "object" && !Array.isArray(item))
-    .map((item, index) => normalizeToolRequest(item, index))
-    .slice(0, 8);
+    .map((item, index) => normalizeToolRequest(item, index));
 }
 
 export async function executeToolRequests(options = {}) {

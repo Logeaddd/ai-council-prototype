@@ -9,7 +9,7 @@ export function parseRoundModelResult(rawText, nativeToolCalls = []) {
   const parsed = parseRoundResponse(rawText);
   if (!nativeRequests.length) return parsed;
   if (parsed.status === "speak") {
-    return { ...parsed, tool_requests: [...parsed.tool_requests, ...nativeRequests].slice(0, 8) };
+    return { ...parsed, tool_requests: [...parsed.tool_requests, ...nativeRequests] };
   }
   return {
     status: "speak",
@@ -90,6 +90,17 @@ export function parseFinalDecision(rawText, fallback) {
     ...fallback,
     answer: rawText.trim() || fallback.answer
   };
+}
+
+export function hasValidFinalDecision(rawText) {
+  const parsed = parseJsonLike(rawText);
+  return Boolean(
+    parsed
+    && typeof parsed === "object"
+    && typeof parsed.answer === "string"
+    && parsed.answer.trim()
+    && parsed.answer.trim().toLowerCase() !== "skip"
+  );
 }
 
 function parseJsonLike(rawText) {

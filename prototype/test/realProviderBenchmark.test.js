@@ -14,7 +14,7 @@ test("real-provider benchmark requires explicit caps, real providers, and pricin
     workspaceTemplate: workspace,
     outputDir: fs.mkdtempSync(path.join(os.tmpdir(), "benchmark-out-")),
     maxCostUsd: 1,
-    maxModelCalls: 2
+    maxModelCalls: 1000
   }), (error) => error.code === "mock_provider_denied");
 });
 

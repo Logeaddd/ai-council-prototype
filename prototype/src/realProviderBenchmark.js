@@ -10,7 +10,7 @@ export async function runRealProviderBenchmark(options = {}) {
   const group = structuredClone(options.group || {});
   const task = normalizeTask(options.task);
   const maxCostUsd = positiveNumber(options.maxCostUsd, "maxCostUsd");
-  const maxModelCalls = positiveInteger(options.maxModelCalls, "maxModelCalls", 1, 200);
+  const maxModelCalls = positiveInteger(options.maxModelCalls, "maxModelCalls", 1);
   assertRealPricedGroup(group);
   const workspaceTemplate = existingDirectory(options.workspaceTemplate, "workspaceTemplate");
   const outputRoot = path.resolve(options.outputDir || path.join(process.cwd(), "eval", "real-provider"));
@@ -221,9 +221,9 @@ function positiveNumber(value, label) {
   return number;
 }
 
-function positiveInteger(value, label, min, max) {
+function positiveInteger(value, label, min) {
   const number = Math.floor(positiveNumber(value, label));
-  if (number < min || number > max) throw benchmarkError(`invalid_${label}`, `${label} must be between ${min} and ${max}.`);
+  if (number < min) throw benchmarkError(`invalid_${label}`, `${label} must be at least ${min}.`);
   return number;
 }
 

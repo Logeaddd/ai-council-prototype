@@ -341,13 +341,14 @@ export function messageToTranscriptItem(message: CouncilMessage): TranscriptItem
 
 export function finalDecisionToTranscriptItem(event: CouncilEvent): TranscriptItem | null {
   if (!event.agentId || !event.finalDecision?.answer) return null
+  const finalState = event.finalDecision.final_state
   return {
     kind: "message",
     id: `final-${event.agentId}-${event.createdAt || Date.now()}`,
     agentId: event.agentId,
     visibility: "public",
     time: formatTime(event.createdAt),
-    state: "completed",
+    state: finalState === "ready_to_execute" || finalState === "usable_with_risks" ? "completed" : "unavailable",
     body: event.finalDecision.answer,
     durationMs: Number(event.durationMs || event.finalDecision.durationMs || 0) || undefined,
   }

@@ -50,7 +50,7 @@ test("allows explicit reviewer-only groups without forcing a separate non-review
   assert.equal(group.agents[0].judge, undefined);
 });
 
-test("normalizes context budget settings with safe defaults and clamps", () => {
+test("normalizes context settings without clamping explicit execution limits", () => {
   const group = validateGroupConfig({
     ...baseGroup([
       {
@@ -78,7 +78,7 @@ test("normalizes context budget settings with safe defaults and clamps", () => {
   assert.equal(group.settings.contextArchiveInjectionLimit, 12);
   assert.equal(group.settings.contextArchiveInjectionTokens, 4000);
   assert.equal(group.settings.recentMessageLimit, 0);
-  assert.equal(group.settings.maxToolIterations, 24);
+  assert.equal(group.settings.maxToolIterations, 99);
 });
 
 test("context budget settings get defaults when absent", () => {
@@ -99,7 +99,9 @@ test("context budget settings get defaults when absent", () => {
   assert.equal(group.settings.contextArchiveInjectionLimit, 5);
   assert.equal(group.settings.contextArchiveInjectionTokens, 900);
   assert.equal(group.settings.recentMessageLimit, 6);
-  assert.equal(group.settings.maxToolIterations, 12);
+  assert.equal(group.settings.maxToolIterations, 0);
+  assert.equal(group.settings.maxModelCalls, 0);
+  assert.equal(group.settings.noProgressModelCalls, 0);
 });
 
 test("reports missing env vars before real API runs", () => {

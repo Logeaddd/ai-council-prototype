@@ -145,10 +145,11 @@ async function callOpenAiCompatibleOnce({ agent, apiBaseUrl, apiKey, model, mess
 }
 
 export function buildOpenAiCompatiblePayload(agent, { model, messages, nativeTools }) {
+  const maxTokens = requestedMaxTokens(agent);
   return {
     model,
     messages: applyProviderPromptCache(agent, messages),
-    max_tokens: normalizeMaxTokens(agent.maxTokens ?? agent.max_tokens ?? 4096),
+    ...(maxTokens ? { max_tokens: maxTokens } : {}),
     temperature: 0.2,
     stream: true,
     ...(nativeTools?.length ? { tools: openAiToolDefinitions(nativeTools), tool_choice: "auto" } : {}),
@@ -170,7 +171,10 @@ export function buildAnthropicMessagesPayload(agent, { model, messages, nativeTo
     }))
     .filter((message) => message.content);
 
-  const maxTokens = normalizeMaxTokens(agent.maxTokens ?? agent.max_tokens ?? 4096);
+  const maxTokens = requestedMaxTokens(agent)
+    || normalizeMaxTokens(agent.providerLimits?.maxOutputTokens)
+    || normalizeMaxTokens(agent.tokenLimits?.maxOutputTokensPerCall)
+    || 64000;
   return {
     model,
     ...(system ? { system } : {}),
@@ -254,8 +258,12 @@ function stringifyMessageContent(content) {
 
 function normalizeMaxTokens(value) {
   const count = Number(value);
-  if (!Number.isFinite(count)) return 4096;
-  return Math.max(1, Math.min(64000, Math.floor(count)));
+  if (!Number.isFinite(count) || count <= 0) return undefined;
+  return Math.max(1, Math.floor(count));
+}
+
+function requestedMaxTokens(agent = {}) {
+  return normalizeMaxTokens(agent.maxTokens ?? agent.max_tokens);
 }
 
 function applyProviderPromptCache(agent = {}, messages = []) {
