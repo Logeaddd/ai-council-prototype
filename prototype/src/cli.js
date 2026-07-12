@@ -9,6 +9,7 @@ import { initGroupWorkspace, replaceMember } from "./workspaceManager.js";
 import { addReview, createRecorderDraft, finalizeDraft, listDrafts } from "./writeFlow.js";
 import { readAppSettings } from "./appSettings.js";
 import { runRealProviderBenchmark } from "./realProviderBenchmark.js";
+import { runProductHarnessCheck } from "./productHarness.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const baseDir = path.resolve(__dirname, "..");
@@ -63,6 +64,21 @@ async function main() {
 
   if (command === "benchmark-real") {
     await runRealBenchmarkCommand(args);
+    return;
+  }
+
+  if (command === "harness-check") {
+    const result = runProductHarnessCheck({
+      root: baseDir,
+      manifestPath: getArg(args, "--manifest", path.join("config", "product-harness.json")),
+      reportPath: getArg(args, "--report"),
+      runTests: !args.includes("--skip-tests")
+    });
+    console.log(JSON.stringify({
+      status: result.report.status,
+      reportPath: result.reportPath,
+      tasks: result.report.tasks.map((task) => ({ id: task.id, status: task.status, passedGates: task.passedGates, totalGates: task.totalGates }))
+    }, null, 2));
     return;
   }
 
@@ -282,6 +298,7 @@ function printHelp() {
   node src/cli.js eval-compare --baseline ./eval/reports/baseline --candidate ./eval/reports/candidate
   node src/cli.js eval-compare --baseline ./eval/reports/baseline --candidate ./eval/reports/candidate --mode council-current
   node src/cli.js benchmark-real --group ./config/group.real.json --task ./eval/real-task.json --workspace ./workspace-template --output ./eval/real-provider --max-cost-usd 1.00 --max-model-calls 24
+  node src/cli.js harness-check --report ./harness/reports/latest.json
   node src/cli.js workspace init-group --root "D:\\AI小组工作区" --group-folder "产品决策组" --members "gpt-5,claude"
   node src/cli.js workspace replace-member --group-path "D:\\AI小组工作区\\产品决策组" --seat-id seat_01 --next-name gpt-6
   node src/cli.js workspace replace-member --group-path "D:\\AI小组工作区\\产品决策组" --seat-id seat_01 --next-name gpt-6 --new-private-folder --folder-name gpt-6-fresh

@@ -1,0 +1,53 @@
+{
+  "schema": "ai-council.product-harness.v1",
+  "product": "AI Council",
+  "tasks": [
+    {
+      "id": "T105",
+      "title": "Execution-first autonomous delivery",
+      "gates": [
+        { "id": "execution_core", "type": "git_ancestor", "commit": "0e45620" },
+        { "id": "native_tool_calls", "type": "git_ancestor", "commit": "0ff2cea" },
+        { "id": "repair_and_artifact_benchmarks", "type": "git_ancestor", "commit": "0064ba4" },
+        { "id": "capped_real_benchmark", "type": "git_ancestor", "commit": "b52a2d4" },
+        { "id": "forge_task_gates", "type": "git_ancestor", "commit": "c2bd66c" },
+        { "id": "full_test_suite", "type": "test_suite" },
+        {
+          "id": "real_forge_provider_pass",
+          "type": "real_benchmark",
+          "taskId": "forge-1.20.1-random-surface",
+          "reportsRoot": "eval/real-provider",
+          "requireTaskChecks": true,
+          "requireArtifactVerified": true,
+          "requireWorkspaceMutations": true,
+          "requireModelCalls": true
+        }
+      ]
+    },
+    {
+      "id": "T106",
+      "title": "Unified context and enforceable harness",
+      "gates": [
+        { "id": "public_event_journal", "type": "git_ancestor", "commit": "3f9193b" },
+        { "id": "git_evidence_context", "type": "git_ancestor", "commit": "c9c9b91" },
+        { "id": "rebuildable_hot_cache", "type": "git_ancestor", "commit": "2a47d1d" },
+        { "id": "provenance_compression", "type": "git_ancestor", "commit": "b90edb3" },
+        {
+          "id": "machine_completion_gate",
+          "type": "file_contains",
+          "path": "src/productHarness.js",
+          "requireTracked": true,
+          "patterns": ["runProductHarnessCheck", "evaluateProductHarness", "real_benchmark"]
+        },
+        {
+          "id": "deletion_tombstones",
+          "type": "file_contains",
+          "path": "src/publicEventJournal.js",
+          "requireTracked": true,
+          "patterns": ["export function tombstonePublicEvents"]
+        },
+        { "id": "full_test_suite", "type": "test_suite" }
+      ]
+    }
+  ]
+}

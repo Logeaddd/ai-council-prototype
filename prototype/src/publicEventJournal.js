@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import crypto from "node:crypto";
 
 const JOURNAL_SCHEMA = "ai-council.public-event.v1";
 const INDEX_SCHEMA = "ai-council.public-event-index.v1";
@@ -33,6 +34,64 @@ export function syncPublicEventJournal(session, groupPath) {
   writeIndex(paths.index, index);
   writeHotCache(paths, index);
   return { appended: candidates.length, total: index.events.length, journalPath: paths.relativeJournal };
+}
+
+export function tombstonePublicEvents(groupPath, selector = {}, options = {}) {
+  const sessionId = String(selector.sessionId || selector.session_id || "").trim();
+  if (!sessionId) throw journalError("missing_session_id", "Deleting retained public history requires a sessionId.");
+  const paths = journalPaths(groupPath);
+  fs.mkdirSync(paths.dir, { recursive: true });
+  const index = readOrRebuildIndex(groupPath);
+  if (index.deletedSessionIds.includes(sessionId)) return { status: "already_deleted", sessionId, tombstonedEvents: 0 };
+  const targets = index.events.filter((item) => item.sessionId === sessionId && item.type !== "deletion_tombstone" && !item.tombstoned);
+  if (!targets.length) throw journalError("unknown_session", `No retained public events were found for session ${sessionId}.`);
+
+  const occurredAt = new Date().toISOString();
+  const targetEventIds = targets.map((item) => item.id);
+  const digest = crypto.createHash("sha256").update(`${sessionId}\n${targetEventIds.join("\n")}\n${occurredAt}`).digest("hex").slice(0, 16);
+  const event = {
+    schema: JOURNAL_SCHEMA,
+    id: `tombstone:${safePart(sessionId)}:${digest}`,
+    sequence: index.lastSequence + 1,
+    type: "deletion_tombstone",
+    occurredAt,
+    sessionId: "",
+    taskId: "",
+    taskText: "",
+    actor: { kind: "user", id: String(options.requestedBy || "user"), name: "User" },
+    round: 0,
+    status: "applied",
+    tool: "",
+    filePaths: [],
+    commitHashes: [],
+    text: `Deleted retained public session ${sessionId}.`,
+    source: { kind: "user_deletion", path: paths.relativeJournal, pointer: "" },
+    payload: {
+      scope: "session",
+      targetSessionId: sessionId,
+      targetEventIds,
+      reason: truncate(options.reason || "user_requested_deletion", 500)
+    }
+  };
+  const offset = fs.existsSync(paths.journal) ? fs.statSync(paths.journal).size : 0;
+  const line = `${JSON.stringify(event)}\n`;
+  fs.appendFileSync(paths.journal, line, "utf8");
+  index.lastSequence = event.sequence;
+  index.events.push(indexEntry(event, offset, Buffer.byteLength(line, "utf8")));
+  index.tombstonedIds = unique([...index.tombstonedIds, ...targetEventIds]);
+  index.deletedSessionIds = unique([...index.deletedSessionIds, sessionId]);
+  applyTombstones(index);
+  writeIndex(paths.index, index);
+  writeHotCache(paths, index);
+  return { status: "deleted", sessionId, tombstoneEventId: event.id, tombstonedEvents: targetEventIds.length };
+}
+
+export function listTombstonedPublicSessionIds(groupPath) {
+  return [...readOrRebuildIndex(groupPath).deletedSessionIds];
+}
+
+export function isPublicSessionTombstoned(groupPath, sessionId) {
+  return readOrRebuildIndex(groupPath).deletedSessionIds.includes(String(sessionId || ""));
 }
 
 export function readPublicEventHotCache(groupPath, options = {}) {
@@ -82,10 +141,11 @@ export function queryPublicEvents(groupPath, filters = {}) {
   const excludedSessionIds = stringSet(filters.excludeSessionId || filters.excludeSessionIds);
   const fromMs = timestamp(filters.from || filters.fromTime || filters.after);
   const toMs = timestamp(filters.to || filters.toTime || filters.before);
+  const includeDeleted = Boolean(filters.includeDeleted);
   const limit = clamp(filters.limit || filters.count || 20, 1, 200);
 
   return index.events
-    .map((item) => ({ item, score: matchScore(item, { terms, types, actors, tools, statuses, task, file, commit, sessionId, excludedSessionIds, fromMs, toMs }) }))
+    .map((item) => ({ item, score: matchScore(item, { terms, types, actors, tools, statuses, task, file, commit, sessionId, excludedSessionIds, fromMs, toMs, includeDeleted }) }))
     .filter(({ score }) => score >= 0)
     .sort((a, b) => b.score - a.score || b.item.sequence - a.item.sequence)
     .slice(0, limit)
@@ -97,13 +157,14 @@ export function queryPublicEvents(groupPath, filters = {}) {
     }));
 }
 
-export function loadPublicEvent(groupPath, eventId) {
+export function loadPublicEvent(groupPath, eventId, options = {}) {
   const id = String(eventId || "").trim();
   if (!id) throw new Error("Missing public event id");
   const paths = journalPaths(groupPath);
   const index = readOrRebuildIndex(groupPath);
   const entry = index.events.find((item) => item.id === id);
   if (!entry) throw new Error(`Unknown public event id: ${id}`);
+  if (entry.tombstoned && !options.includeDeleted) throw journalError("event_deleted", `Public event ${id} was deleted by a retained tombstone.`);
   const handle = fs.openSync(paths.journal, "r");
   try {
     const buffer = Buffer.alloc(entry.length);
@@ -128,7 +189,7 @@ export function rebuildPublicEventIndex(groupPath) {
   const index = emptyIndex(paths.relativeJournal);
   if (!fs.existsSync(paths.journal)) {
     writeIndex(paths.index, index);
-    return index;
+    return normalizeIndex(index);
   }
   const buffer = fs.readFileSync(paths.journal);
   let start = 0;
@@ -143,6 +204,10 @@ export function rebuildPublicEventIndex(groupPath) {
         if (event?.id && event?.schema === JOURNAL_SCHEMA) {
           index.events.push(indexEntry(event, start, end - start));
           index.lastSequence = Math.max(index.lastSequence, Number(event.sequence || 0));
+          if (event.type === "deletion_tombstone") {
+            index.tombstonedIds.push(...array(event.payload?.targetEventIds));
+            if (event.payload?.targetSessionId) index.deletedSessionIds.push(String(event.payload.targetSessionId));
+          }
         }
       } catch {
         index.invalidLines += 1;
@@ -150,6 +215,9 @@ export function rebuildPublicEventIndex(groupPath) {
     }
     start = end;
   }
+  index.tombstonedIds = unique(index.tombstonedIds);
+  index.deletedSessionIds = unique(index.deletedSessionIds);
+  applyTombstones(index);
   writeIndex(paths.index, index);
   writeHotCache(paths, index);
   writeCompression(paths, index);
@@ -295,6 +363,7 @@ function indexEntry(event, offset, length) {
 }
 
 function matchScore(item, filters) {
+  if (item.tombstoned && !filters.includeDeleted) return -1;
   if (filters.types.size && !filters.types.has(normalize(item.type))) return -1;
   if (filters.actors.size && ![normalize(item.actorId), normalize(item.actorName)].some((value) => filters.actors.has(value))) return -1;
   if (filters.tools.size && !filters.tools.has(normalize(item.tool))) return -1;
@@ -342,7 +411,7 @@ function writeIndex(filePath, index) {
 }
 
 function writeHotCache(paths, index) {
-  const events = index.events.slice(-MAX_HOT_EVENTS).map((item) => ({
+  const events = index.events.filter((item) => !item.tombstoned).slice(-MAX_HOT_EVENTS).map((item) => ({
     eventId: item.id,
     sequence: item.sequence,
     type: item.type,
@@ -382,7 +451,7 @@ function filteredHotCache(cache, options) {
 
 function writeCompression(paths, index) {
   const bySession = new Map();
-  for (const event of index.events) {
+  for (const event of index.events.filter((item) => !item.tombstoned)) {
     if (!bySession.has(event.sessionId)) bySession.set(event.sessionId, []);
     bySession.get(event.sessionId).push(event);
   }
@@ -442,7 +511,19 @@ function unique(values) {
 }
 
 function emptyIndex(journalPath) {
-  return { schema: INDEX_SCHEMA, journalPath, journalBytes: 0, lastSequence: 0, invalidLines: 0, updatedAt: "", events: [] };
+  return { schema: INDEX_SCHEMA, journalPath, journalBytes: 0, lastSequence: 0, invalidLines: 0, updatedAt: "", tombstonedIds: [], deletedSessionIds: [], events: [] };
+}
+
+function normalizeIndex(index) {
+  index.tombstonedIds = unique(array(index.tombstonedIds));
+  index.deletedSessionIds = unique(array(index.deletedSessionIds));
+  applyTombstones(index);
+  return index;
+}
+
+function applyTombstones(index) {
+  const deleted = new Set(index.tombstonedIds);
+  for (const event of index.events) event.tombstoned = deleted.has(event.id);
 }
 
 function journalPaths(groupPath) {
@@ -546,4 +627,10 @@ function truncate(value, max) {
 function clamp(value, min, max) {
   const number = Number(value);
   return Math.max(min, Math.min(max, Number.isFinite(number) ? Math.floor(number) : min));
+}
+
+function journalError(code, message) {
+  const error = new Error(message);
+  error.code = code;
+  return error;
 }

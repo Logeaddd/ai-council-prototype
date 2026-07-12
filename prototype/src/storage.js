@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { makeId, nowIso } from "./types.js";
-import { syncPublicEventJournal } from "./publicEventJournal.js";
+import { isPublicSessionTombstoned, listTombstonedPublicSessionIds, syncPublicEventJournal } from "./publicEventJournal.js";
 
 export function writeSession(session, baseDir) {
   const dir = path.resolve(baseDir, "sessions");
@@ -56,8 +56,10 @@ export function listGroupSessions(groupPath, options = {}) {
   const dir = path.resolve(groupPath, "sessions");
   const limit = Math.max(1, Math.min(200, Number(options.limit || 50)));
   if (!fs.existsSync(dir)) return [];
+  const deleted = new Set(listTombstonedPublicSessionIds(groupPath));
   return fs.readdirSync(dir)
     .filter((name) => name.endsWith(".json"))
+    .filter((name) => !deleted.has(name.slice(0, -5)))
     .map((name) => {
       const filePath = path.join(dir, name);
       try {
@@ -76,6 +78,7 @@ export function listGroupSessions(groupPath, options = {}) {
 export function readGroupSession(groupPath, sessionId) {
   const id = String(sessionId || "").trim();
   if (!/^[A-Za-z0-9_-]+$/.test(id)) throw new Error("Invalid session id");
+  if (isPublicSessionTombstoned(groupPath, id)) throw new Error(`Deleted session id: ${id}`);
   const root = path.resolve(groupPath, "sessions");
   const filePath = path.resolve(root, `${id}.json`);
   if (filePath !== root && !filePath.startsWith(`${root}${path.sep}`)) {
@@ -102,6 +105,7 @@ export function readRecentGroupSessions(groupPath, options = {}) {
 
 export function readSessionContextArchive(groupPath, sessionId) {
   const id = requireSafeSessionId(sessionId);
+  if (isPublicSessionTombstoned(groupPath, id)) throw new Error(`Deleted session archive: ${id}`);
   const root = path.resolve(groupPath, "sessions");
   const archiveDir = path.resolve(root, id);
   if (archiveDir !== root && !archiveDir.startsWith(`${root}${path.sep}`)) {
@@ -124,6 +128,7 @@ export function readSessionContextArchive(groupPath, sessionId) {
 
 export function loadSessionContextArchiveItem(groupPath, request = {}, options = {}) {
   const id = requireSafeSessionId(request.sessionId || request.session_id);
+  if (isPublicSessionTombstoned(groupPath, id)) throw new Error(`Deleted session archive: ${id}`);
   const root = path.resolve(groupPath);
   const sessionsDir = path.join(root, "sessions");
   const archiveDir = path.resolve(sessionsDir, id);
@@ -169,6 +174,7 @@ export function searchSessionContextArchive(groupPath, query, options = {}) {
   const limit = clampNumber(options.limit || 6, 1, 20);
   const maxSessions = clampNumber(options.maxSessions || 80, 1, 300);
   const excludedIds = normalizeExcludedSessionIds(options);
+  for (const id of listTombstonedPublicSessionIds(groupPath)) excludedIds.add(id);
   const records = readSessionIndexRecords(sessionsDir)
     .filter((record) => !excludedIds.has(String(record.sessionId || "")))
     .sort((a, b) => new Date(b.completedAt || b.createdAt || 0).getTime() - new Date(a.completedAt || a.createdAt || 0).getTime())
@@ -195,6 +201,7 @@ export function listSessionHistoryCatalogue(groupPath, options = {}) {
   if (!fs.existsSync(sessionsDir)) return [];
   const limit = clampNumber(options.limit || 12, 1, 40);
   const excludedIds = normalizeExcludedSessionIds(options);
+  for (const id of listTombstonedPublicSessionIds(groupPath)) excludedIds.add(id);
   const byId = new Map(readSessionIndexRecords(sessionsDir)
     .filter((record) => !excludedIds.has(String(record.sessionId || "")))
     .map((record) => [String(record.sessionId || ""), record]));

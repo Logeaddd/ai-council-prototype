@@ -1,0 +1,79 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import test from "node:test";
+import assert from "node:assert/strict";
+import { evaluateProductHarness } from "../src/productHarness.js";
+
+test("product harness cannot complete a real benchmark gate without a passed evidence report", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-product-harness-"));
+  fs.mkdirSync(path.join(root, "src"), { recursive: true });
+  fs.writeFileSync(path.join(root, "src", "feature.js"), "export const realFeature = true;", "utf8");
+  const manifest = {
+    tasks: [{
+      id: "T",
+      gates: [
+        { id: "source", type: "file_contains", path: "src/feature.js", patterns: ["realFeature"] },
+        { id: "tests", type: "test_suite" },
+        { id: "paid", type: "real_benchmark", taskId: "real-task", reportsRoot: "eval/real-provider", requireTaskChecks: true, requireArtifactVerified: true, requireWorkspaceMutations: true, requireModelCalls: true }
+      ]
+    }]
+  };
+  const missing = evaluateProductHarness({ root, manifest, testEvidence: { status: "passed", exitCode: 0 } });
+  assert.equal(missing.status, "incomplete");
+  assert.equal(missing.tasks[0].gates.find((gate) => gate.id === "paid").status, "failed");
+
+  const reportDir = path.join(root, "eval", "real-provider", "run-1");
+  fs.mkdirSync(reportDir, { recursive: true });
+  fs.writeFileSync(path.join(reportDir, "report.json"), JSON.stringify({
+    task: { id: "real-task" },
+    status: "passed",
+    taskChecks: { passed: true },
+    execution: { artifactVerification: { status: "verified" }, workspaceMutations: 3 },
+    accounting: { modelCalls: 2 }
+  }), "utf8");
+  const passed = evaluateProductHarness({ root, manifest, testEvidence: { status: "passed", exitCode: 0 } });
+  assert.equal(passed.status, "complete");
+  assert.equal(passed.tasks[0].gates.every((gate) => gate.status === "passed"), true);
+});
+
+test("product harness treats tests not run and missing source patterns as failed gates", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-product-harness-missing-"));
+  fs.writeFileSync(path.join(root, "feature.js"), "partial", "utf8");
+  const report = evaluateProductHarness({
+    root,
+    manifest: { tasks: [{ id: "T", gates: [
+      { id: "source", type: "file_contains", path: "feature.js", patterns: ["required"] },
+      { id: "tests", type: "test_suite" }
+    ] }] },
+    testEvidence: { status: "not_run" }
+  });
+  assert.equal(report.status, "incomplete");
+  assert.deepEqual(report.tasks[0].gates.map((gate) => gate.status), ["failed", "failed"]);
+});
+
+test("product harness can require completion source to be tracked by Git", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-product-harness-git-"));
+  fs.writeFileSync(path.join(root, "feature.js"), "required", "utf8");
+  const report = evaluateProductHarness({
+    root,
+    manifest: { tasks: [{ id: "T", gates: [{ id: "source", type: "file_contains", path: "feature.js", patterns: ["required"], requireTracked: true }] }] },
+    testEvidence: { status: "passed" }
+  });
+  assert.equal(report.status, "incomplete");
+  assert.equal(report.tasks[0].gates[0].evidence.tracked, false);
+});
+
+test("repository product harness keeps T105 incomplete without a paid Forge pass", () => {
+  const root = path.resolve(import.meta.dirname, "..");
+  const manifestPath = path.join(root, "config", "product-harness.json");
+  const report = evaluateProductHarness({
+    root,
+    manifestPath,
+    manifest: JSON.parse(fs.readFileSync(manifestPath, "utf8")),
+    testEvidence: { status: "passed", exitCode: 0 }
+  });
+  const t105 = report.tasks.find((task) => task.id === "T105");
+  assert.equal(t105.status, "incomplete");
+  assert.equal(t105.gates.find((gate) => gate.id === "real_forge_provider_pass").status, "failed");
+});

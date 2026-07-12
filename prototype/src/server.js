@@ -24,6 +24,7 @@ import { listGroupSessions, readGroupSession, readSessionContextArchive, searchS
 import { importProjectFolder } from "./projectImporter.js";
 import { deletePublicMemory, listPublicMemories, upsertPublicMemory } from "./publicMemory.js";
 import { readTaskState } from "./taskState.js";
+import { queryPublicEvents, tombstonePublicEvents } from "./publicEventJournal.js";
 import { listCapabilities } from "./capabilityRegistry.js";
 import { capabilityEnabled } from "./capabilityPolicy.js";
 import { createCouncilRunRegistry } from "./councilRunRegistry.js";
@@ -514,6 +515,36 @@ async function handleApi(req, res, url) {
         limit: url.searchParams.get("limit") || 10
       })
     });
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/context-events") {
+    const groupPath = resolveWorkspacePath(requireQuery(url, "groupPath"), "groupPath");
+    sendJson(res, 200, {
+      events: queryPublicEvents(groupPath, {
+        query: url.searchParams.get("query") || "",
+        eventType: url.searchParams.get("eventType") || "",
+        actorId: url.searchParams.get("actorId") || "",
+        taskId: url.searchParams.get("taskId") || "",
+        file: url.searchParams.get("file") || "",
+        commit: url.searchParams.get("commit") || "",
+        tool: url.searchParams.get("tool") || "",
+        status: url.searchParams.get("status") || "",
+        from: url.searchParams.get("from") || "",
+        to: url.searchParams.get("to") || "",
+        limit: url.searchParams.get("limit") || 50
+      })
+    });
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/context-events/delete-session") {
+    const body = await readBody(req);
+    const groupPath = resolveWorkspacePath(body.groupPath, "groupPath");
+    sendJson(res, 200, tombstonePublicEvents(groupPath, { sessionId: body.sessionId }, {
+      requestedBy: "user",
+      reason: body.reason || "user_requested_deletion"
+    }));
     return;
   }
 

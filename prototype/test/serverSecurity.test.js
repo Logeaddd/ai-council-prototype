@@ -188,6 +188,14 @@ test("server exposes guarded chat history endpoints", () => {
   assert.match(storageJs, /local_context_archive/);
 });
 
+test("server exposes guarded public event query and session deletion tombstones", () => {
+  const serverJs = fs.readFileSync(path.join(root, "src", "server.js"), "utf8");
+  assert.match(serverJs, /\/api\/context-events/);
+  assert.match(serverJs, /\/api\/context-events\/delete-session/);
+  assert.match(serverJs, /tombstonePublicEvents/);
+  assert.match(serverJs, /resolveWorkspacePath\(body\.groupPath/);
+});
+
 test("server exposes guarded public memory endpoints", () => {
   const serverJs = fs.readFileSync(path.join(root, "src", "server.js"), "utf8");
   const memoryJs = fs.readFileSync(path.join(root, "src", "publicMemory.js"), "utf8");

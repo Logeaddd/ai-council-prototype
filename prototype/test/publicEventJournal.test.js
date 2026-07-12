@@ -5,8 +5,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import { executeToolRequests } from "../src/toolRequests.js";
-import { loadPublicEvent, queryPublicEvents, readPublicEventCompression, readPublicEventHotCache, rebuildPublicEventIndex } from "../src/publicEventJournal.js";
-import { writeGroupSession } from "../src/storage.js";
+import { loadPublicEvent, queryPublicEvents, readPublicEventCompression, readPublicEventHotCache, rebuildPublicEventIndex, tombstonePublicEvents } from "../src/publicEventJournal.js";
+import { listGroupSessions, readGroupSession, readSessionContextArchive, searchSessionContextArchive, writeContextArchive, writeGroupSession } from "../src/storage.js";
 
 test("public event journal appends typed session events without duplicating repeated saves", () => {
   const groupPath = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-events-"));
@@ -135,6 +135,38 @@ test("derived compression keeps complete provenance and never rewrites the raw j
   const compressedPath = path.join(groupPath, "shared", "memory", "events", "public-events.compressed.json");
   fs.writeFileSync(compressedPath, "stale", "utf8");
   assert.equal(readPublicEventCompression(groupPath).windows[0].sourceEventIds.length, window.sourceEventIds.length);
+});
+
+test("session deletion tombstones hide retained history across events sessions archives caches and index rebuilds", () => {
+  const groupPath = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-event-delete-"));
+  const session = sampleSession();
+  session.status = "completed";
+  session.completedAt = "2026-07-12T10:05:00.000Z";
+  session.finalDecision = { final_state: "ready_to_execute", answer: "Verified." };
+  writeGroupSession(session, groupPath);
+  writeContextArchive(session, groupPath);
+  const event = queryPublicEvents(groupPath, { type: "member_message", sessionId: session.id })[0];
+  assert.ok(event);
+
+  const deleted = tombstonePublicEvents(groupPath, { sessionId: session.id }, { reason: "user cleared chat history" });
+  assert.equal(deleted.status, "deleted");
+  assert.ok(deleted.tombstonedEvents >= 4);
+  assert.equal(queryPublicEvents(groupPath, { sessionId: session.id, limit: 200 }).length, 0);
+  const retainedAudit = queryPublicEvents(groupPath, { sessionId: session.id, includeDeleted: true, limit: 200 });
+  assert.ok(retainedAudit.length >= 4);
+  assert.equal(retainedAudit.every((item) => item.tombstoned), true);
+  assert.throws(() => loadPublicEvent(groupPath, event.id), /deleted by a retained tombstone/);
+  assert.equal(loadPublicEvent(groupPath, event.id, { includeDeleted: true }).eventId, event.id);
+  assert.equal(listGroupSessions(groupPath).length, 0);
+  assert.throws(() => readGroupSession(groupPath, session.id), /Deleted session/);
+  assert.throws(() => readSessionContextArchive(groupPath, session.id), /Deleted session archive/);
+  assert.equal(searchSessionContextArchive(groupPath, "implementation").length, 0);
+  assert.equal(readPublicEventHotCache(groupPath).events.some((item) => item.sessionId === session.id), false);
+  assert.equal(readPublicEventCompression(groupPath).windows.some((item) => item.sessionId === session.id), false);
+
+  rebuildPublicEventIndex(groupPath);
+  assert.equal(queryPublicEvents(groupPath, { sessionId: session.id }).length, 0);
+  assert.equal(tombstonePublicEvents(groupPath, { sessionId: session.id }).status, "already_deleted");
 });
 
 function sampleSession() {
