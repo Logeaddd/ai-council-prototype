@@ -8,6 +8,7 @@ import { readMemoryPending } from "./storage.js";
 import { initGroupWorkspace, replaceMember } from "./workspaceManager.js";
 import { addReview, createRecorderDraft, finalizeDraft, listDrafts } from "./writeFlow.js";
 import { readAppSettings } from "./appSettings.js";
+import { runRealProviderBenchmark } from "./realProviderBenchmark.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const baseDir = path.resolve(__dirname, "..");
@@ -60,7 +61,40 @@ async function main() {
     return;
   }
 
+  if (command === "benchmark-real") {
+    await runRealBenchmarkCommand(args);
+    return;
+  }
+
   printHelp();
+}
+
+async function runRealBenchmarkCommand(args) {
+  const groupPath = getArg(args, "--group");
+  const taskPath = getArg(args, "--task");
+  const workspaceTemplate = getArg(args, "--workspace");
+  if (!groupPath || !taskPath || !workspaceTemplate) {
+    throw new Error("benchmark-real requires --group, --task, and --workspace.");
+  }
+  const group = validateGroupConfig(loadJson(groupPath));
+  validateRuntimeEnv(group);
+  const run = await runRealProviderBenchmark({
+    group,
+    task: loadJson(taskPath),
+    workspaceTemplate,
+    outputDir: getArg(args, "--output", path.join(baseDir, "eval", "real-provider")),
+    maxCostUsd: Number(getArg(args, "--max-cost-usd")),
+    maxModelCalls: Number(getArg(args, "--max-model-calls"))
+  });
+  console.log(JSON.stringify({
+    runDir: run.runDir,
+    workspacePath: run.workspacePath,
+    status: run.report.status,
+    modelCalls: run.report.accounting.modelCalls,
+    costUsd: run.report.accounting.costUsd,
+    finalState: run.report.execution.finalState,
+    artifactVerification: run.report.execution.artifactVerification?.status || "not_requested"
+  }, null, 2));
 }
 
 function runEvalCompareCommand(args) {
@@ -247,6 +281,7 @@ function printHelp() {
   node src/cli.js eval --tasks ./eval/tasks.json --output ./eval/reports/run
   node src/cli.js eval-compare --baseline ./eval/reports/baseline --candidate ./eval/reports/candidate
   node src/cli.js eval-compare --baseline ./eval/reports/baseline --candidate ./eval/reports/candidate --mode council-current
+  node src/cli.js benchmark-real --group ./config/group.real.json --task ./eval/real-task.json --workspace ./workspace-template --output ./eval/real-provider --max-cost-usd 1.00 --max-model-calls 24
   node src/cli.js workspace init-group --root "D:\\AI小组工作区" --group-folder "产品决策组" --members "gpt-5,claude"
   node src/cli.js workspace replace-member --group-path "D:\\AI小组工作区\\产品决策组" --seat-id seat_01 --next-name gpt-6
   node src/cli.js workspace replace-member --group-path "D:\\AI小组工作区\\产品决策组" --seat-id seat_01 --next-name gpt-6 --new-private-folder --folder-name gpt-6-fresh

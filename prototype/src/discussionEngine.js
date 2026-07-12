@@ -1,4 +1,4 @@
-import { callAgent, callAgentResult } from "./modelClient.js";
+import { callAgentResult } from "./modelClient.js";
 import { buildFinalPrompt, buildRoundPrompt } from "./promptBuilder.js";
 import { buildContextPromptSections, buildMemberContext } from "./contextBuilder.js";
 import { parseFinalDecision, parseRoundModelResult } from "./responseParser.js";
@@ -523,6 +523,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
       provider: judge.provider || "",
       inputMessages: finalMessages
     });
+    throwIfAborted(options.signal);
     const finalRaw = await safeCall(judge, finalMessages, group.settings.agentTimeoutMs, options.signal);
     completeModelCall(modelCallRecord, finalRaw);
     session.finalDecision = finalRaw.error
@@ -668,6 +669,7 @@ async function* callRoundModel({ options, session, phase, round, agent, messages
     provider: agent.provider || "",
     inputMessages: messages
   });
+  throwIfAborted(options.signal);
   const streamingCall = startAgentCallWithDeltaQueue(agent, messages, timeoutMs, options.signal, nativeToolDefinitions(nativeToolPermissionTier));
   while (!streamingCall.done() || streamingCall.hasDeltas()) {
     const delta = await streamingCall.nextDelta();
@@ -795,6 +797,7 @@ function completeModelCall(record, raw = {}) {
   if (!record) return;
   if (raw.error) record.error = raw.error;
   else record.rawText = raw.text || "";
+  if (raw.usage) record.usage = raw.usage;
   appendModelCallTrace(record, { event: "complete", raw });
 }
 
@@ -817,6 +820,7 @@ function appendModelCallTrace(record, { event, raw } = {}) {
   };
   if (raw?.error) payload.error = String(raw.error).slice(0, 500);
   if (raw?.text != null) payload.output = summarizeText(raw.text);
+  if (raw?.usage) payload.usage = raw.usage;
   fs.appendFileSync(filePath, `${JSON.stringify(payload)}\n`, "utf8");
 }
 
@@ -1076,11 +1080,7 @@ function startAgentCallWithDeltaQueue(agent, messages, timeoutMs, signal, native
 
 async function safeCall(agent, messages, timeoutMs, signal, onDelta, nativeTools) {
   try {
-    if (nativeTools?.length) {
-      return await callAgentResult(agent, messages, { timeoutMs, signal, onDelta, nativeTools });
-    }
-    const text = await callAgent(agent, messages, { timeoutMs, signal, onDelta });
-    return { text, nativeToolCalls: [] };
+    return await callAgentResult(agent, messages, { timeoutMs, signal, onDelta, nativeTools: nativeTools || [] });
   } catch (error) {
     if (error.name === "AbortError") throw error;
     return { error: `agent_call_failed:${agent.id}:${error.message}` };

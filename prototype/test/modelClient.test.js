@@ -374,6 +374,7 @@ test("OpenAI-compatible client reconstructs fragmented native tool calls", async
     res.writeHead(200, { "Content-Type": "text/event-stream; charset=utf-8" });
     res.write(`data: ${JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: "call_native", function: { name: "ai_council_tool", arguments: '{"tool":"workspace_' } }] } }] })}\n\n`);
     res.write(`data: ${JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: 'edit","action":"mkdir","path":"shared/project","reason":"Create folder"}' } }] } }] })}\n\n`);
+    res.write(`data: ${JSON.stringify({ choices: [], usage: { prompt_tokens: 12, completion_tokens: 3, total_tokens: 15 } })}\n\n`);
     res.write("data: [DONE]\n\n");
     res.end();
   });
@@ -394,6 +395,7 @@ test("OpenAI-compatible client reconstructs fragmented native tool calls", async
     assert.equal(result.nativeToolCalls[0].id, "call_native");
     assert.equal(result.nativeToolCalls[0].name, "ai_council_tool");
     assert.match(result.nativeToolCalls[0].arguments, /workspace_edit/);
+    assert.deepEqual(result.usage, { input_tokens: 12, output_tokens: 3, total_tokens: 15 });
   } finally {
     await close(server);
   }
@@ -439,7 +441,7 @@ test("Anthropic client returns native tool_use blocks", async () => {
   const server = http.createServer(async (req, res) => {
     for await (const _ of req) {}
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ content: [{
+    res.end(JSON.stringify({ usage: { input_tokens: 20, output_tokens: 4 }, content: [{
       type: "tool_use",
       id: "toolu_1",
       name: "ai_council_tool",
@@ -465,6 +467,7 @@ test("Anthropic client returns native tool_use blocks", async () => {
       name: "ai_council_tool",
       input: { tool: "read_file", path: "README.md", reason: "Inspect project" }
     });
+    assert.deepEqual(result.usage, { input_tokens: 20, output_tokens: 4, total_tokens: 24 });
   } finally {
     await close(server);
   }

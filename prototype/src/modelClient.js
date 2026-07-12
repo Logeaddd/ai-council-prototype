@@ -109,7 +109,7 @@ async function callAnthropicMessagesOnce({ agent, apiBaseUrl, apiKey, model, mes
     const text = readAnthropicText(parsed);
     const nativeToolCalls = readAnthropicToolCalls(parsed);
     if (text) options.onDelta?.(text);
-    return { text, nativeToolCalls };
+    return { text, nativeToolCalls, usage: normalizeProviderUsage(parsed.usage) };
   } finally {
     options.signal?.removeEventListener("abort", abortFromParent);
     clearTimeout(timeout);
@@ -307,12 +307,13 @@ async function httpError(response) {
 }
 
 async function readOpenAiStream(response, onDelta) {
-  if (!response.body) return { text: "", nativeToolCalls: [] };
+  if (!response.body) return { text: "", nativeToolCalls: [], usage: undefined };
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
   let content = "";
   const toolCalls = new Map();
+  let usage;
 
   while (true) {
     const { value, done } = await reader.read();
@@ -328,6 +329,7 @@ async function readOpenAiStream(response, onDelta) {
         onDelta?.(delta.text);
       }
       mergeOpenAiToolCallDeltas(toolCalls, delta.toolCalls);
+      usage = delta.usage || usage;
     }
   }
 
@@ -339,10 +341,11 @@ async function readOpenAiStream(response, onDelta) {
         onDelta?.(delta.text);
       }
       mergeOpenAiToolCallDeltas(toolCalls, delta.toolCalls);
+      usage = delta.usage || usage;
     }
   }
 
-  return { text: content, nativeToolCalls: [...toolCalls.values()] };
+  return { text: content, nativeToolCalls: [...toolCalls.values()], usage };
 }
 
 function parseOpenAiStreamFrame(frame) {
@@ -353,11 +356,13 @@ function parseOpenAiStreamFrame(frame) {
     .map((line) => line.slice(5).trim());
   let text = "";
   const toolCalls = [];
+  let usage;
   for (const data of dataLines) {
     if (!data || data === "[DONE]") continue;
     try {
       const parsed = JSON.parse(data);
       const delta = parsed?.choices?.[0]?.delta || {};
+      usage = normalizeProviderUsage(parsed.usage) || usage;
       text += delta.content || "";
       for (const call of Array.isArray(delta.tool_calls) ? delta.tool_calls : []) {
         toolCalls.push({
@@ -371,7 +376,7 @@ function parseOpenAiStreamFrame(frame) {
       // Ignore malformed stream frames; final parsing will handle incomplete JSON.
     }
   }
-  return { text, toolCalls };
+  return { text, toolCalls, usage };
 }
 
 function mergeOpenAiToolCallDeltas(target, deltas = []) {
@@ -383,6 +388,20 @@ function mergeOpenAiToolCallDeltas(target, deltas = []) {
     current.arguments += delta.arguments || "";
     target.set(key, current);
   }
+}
+
+function normalizeProviderUsage(value) {
+  if (!value || typeof value !== "object") return undefined;
+  const inputTokens = Number(value.prompt_tokens ?? value.input_tokens);
+  const outputTokens = Number(value.completion_tokens ?? value.output_tokens);
+  if (!Number.isFinite(inputTokens) && !Number.isFinite(outputTokens)) return undefined;
+  return {
+    input_tokens: Number.isFinite(inputTokens) ? inputTokens : 0,
+    output_tokens: Number.isFinite(outputTokens) ? outputTokens : 0,
+    total_tokens: Number.isFinite(Number(value.total_tokens))
+      ? Number(value.total_tokens)
+      : (Number.isFinite(inputTokens) ? inputTokens : 0) + (Number.isFinite(outputTokens) ? outputTokens : 0)
+  };
 }
 
 function resolveMaybeEnv(value) {
