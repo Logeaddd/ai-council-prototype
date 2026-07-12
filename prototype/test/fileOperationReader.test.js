@@ -4,6 +4,7 @@ import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { executeReadListFileOperations } from "../src/fileOperationReader.js";
+import { createObservationCache } from "../src/observationCache.js";
 
 test("read/list file operations execute inside the group sandbox", () => {
   const groupPath = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-read-list-"));
@@ -48,4 +49,24 @@ test("read/list refuses forbidden secret paths", () => {
   assert.equal(result.status, "failed");
   assert.match(result.error, /Forbidden secret file/);
   assert.equal("content" in result, false);
+});
+
+test("file-operation reads reuse a real observation across members", () => {
+  const groupPath = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-read-cache-"));
+  fs.writeFileSync(path.join(groupPath, "README.md"), "shared fact", "utf8");
+  const observationCache = createObservationCache();
+
+  const [first] = executeReadListFileOperations(groupPath, [
+    { id: "read-builder", op: "read", path: "README.md", source_agent_id: "builder", source_agent_name: "Builder" }
+  ], { observationCache });
+  fs.writeFileSync(path.join(groupPath, "README.md"), "changed outside engine", "utf8");
+  const [second] = executeReadListFileOperations(groupPath, [
+    { id: "read-reviewer", op: "read", path: "README.md", source_agent_id: "reviewer", source_agent_name: "Reviewer" }
+  ], { observationCache });
+
+  assert.equal(first.cacheHit, undefined);
+  assert.equal(second.cacheHit, true);
+  assert.equal(second.content, "shared fact");
+  assert.equal(second.sourceObservationId, "read-builder");
+  assert.equal(second.sourceObservationAgentId, "builder");
 });

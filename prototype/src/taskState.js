@@ -26,7 +26,7 @@ export function updateTaskStateFromSession(groupPath, session) {
   const finalDecision = session.finalDecision || {};
   const next = {
     ...previous,
-    schema: "ai-council.task-state.v1",
+    schema: "ai-council.task-state.v2",
     updatedAt: nowIso(),
     sourceSessionId: session.id || "",
     sourceQuestion: session.question || "",
@@ -36,9 +36,23 @@ export function updateTaskStateFromSession(groupPath, session) {
     risks: normalizeTextList(finalDecision.risks || finalDecision.unresolved_risks),
     nextActions: normalizeTextList(finalDecision.next_actions),
     pendingFiles: buildPendingFiles(session),
-    resolved: buildResolvedItems(previous.resolved, session)
+    resolved: buildResolvedItems(previous.resolved, session),
+    executionCheckpoint: normalizeExecutionCheckpoint(session.executionState, session)
   };
   return writeTaskState(groupPath, next);
+}
+
+export function updateExecutionCheckpoint(groupPath, session) {
+  if (!groupPath || !session?.executionState?.active) return undefined;
+  const previous = readTaskState(groupPath);
+  return writeTaskState(groupPath, {
+    ...previous,
+    schema: "ai-council.task-state.v2",
+    updatedAt: nowIso(),
+    sourceSessionId: session.id || previous.sourceSessionId,
+    sourceQuestion: session.executionState.taskQuestion || session.question || previous.sourceQuestion,
+    executionCheckpoint: normalizeExecutionCheckpoint(session.executionState, session)
+  });
 }
 
 export function formatTaskStateForPrompt(state) {
@@ -48,7 +62,8 @@ export function formatTaskStateForPrompt(state) {
     || normalized.risks.length
     || normalized.nextActions.length
     || normalized.pendingFiles.length
-    || normalized.resolved.length;
+    || normalized.resolved.length
+    || normalized.executionCheckpoint;
   if (!hasContent) return "";
   return JSON.stringify({
     source: "task_state_ledger",
@@ -62,7 +77,8 @@ export function formatTaskStateForPrompt(state) {
     risks: normalized.risks,
     nextActions: normalized.nextActions,
     pendingFiles: normalized.pendingFiles,
-    resolved: normalized.resolved.slice(-8)
+    resolved: normalized.resolved.slice(-8),
+    executionCheckpoint: normalized.executionCheckpoint
   }, null, 2);
 }
 
@@ -130,7 +146,7 @@ function buildResolvedItems(previous = [], session) {
 
 function normalizeTaskState(value = {}) {
   return {
-    schema: "ai-council.task-state.v1",
+    schema: "ai-council.task-state.v2",
     updatedAt: String(value.updatedAt || ""),
     sourceSessionId: String(value.sourceSessionId || ""),
     sourceQuestion: String(value.sourceQuestion || ""),
@@ -141,7 +157,27 @@ function normalizeTaskState(value = {}) {
     risks: normalizeTextList(value.risks),
     nextActions: normalizeTextList(value.nextActions),
     pendingFiles: normalizeObjects(value.pendingFiles),
-    resolved: normalizeObjects(value.resolved)
+    resolved: normalizeObjects(value.resolved),
+    executionCheckpoint: normalizeExecutionCheckpoint(value.executionCheckpoint)
+  };
+}
+
+function normalizeExecutionCheckpoint(value, session = {}) {
+  if (!value?.active) return null;
+  return {
+    active: true,
+    taskQuestion: String(value.taskQuestion || session.question || ""),
+    executorId: String(value.executorId || ""),
+    executorName: String(value.executorName || ""),
+    phase: String(value.phase || "inspect"),
+    nextAction: String(value.nextAction || ""),
+    checkpointVersion: Math.max(0, Number(value.checkpointVersion) || 0),
+    reviewedCheckpointVersion: Math.max(0, Number(value.reviewedCheckpointVersion) || 0),
+    artifactStatus: String(value.artifactStatus || "not_checked"),
+    lastAction: String(value.lastAction || ""),
+    lastError: truncate(value.lastError || "", 1200),
+    sourceSessionId: String(session.id || value.sourceSessionId || ""),
+    updatedAt: String(session.id ? nowIso() : value.updatedAt || "")
   };
 }
 

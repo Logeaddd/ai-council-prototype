@@ -3,21 +3,46 @@ import path from "node:path";
 import { validateFileOperationPath } from "./fileSandbox.js";
 import { appendFileOperationAuditLog } from "./fileOperationQueue.js";
 import { nowIso } from "./types.js";
+import { observationValueForConsumer } from "./observationCache.js";
 
 const READABLE_OPS = new Set(["read", "list"]);
 const MAX_READ_BYTES = 64 * 1024;
 const MAX_LIST_ENTRIES = 120;
 
-export function executeReadListFileOperations(groupPath, proposals = []) {
+export function executeReadListFileOperations(groupPath, proposals = [], options = {}) {
   if (!groupPath) return [];
   const results = [];
   for (const proposal of proposals) {
     if (!READABLE_OPS.has(proposal?.op)) continue;
-    const result = executeReadListProposal(groupPath, proposal);
+    const cached = options.observationCache?.get(proposal);
+    const result = cached
+      ? cachedReadListResult(proposal, cached)
+      : executeReadListProposal(groupPath, proposal);
+    if (!cached && result.status === "completed") {
+      options.observationCache?.set(proposal, observationValue(result), result);
+    }
     results.push(result);
     appendFileOperationAuditLog(groupPath, "read_result", result);
   }
   return results;
+}
+
+function cachedReadListResult(proposal, cached) {
+  return baseResult(proposal, {
+    status: "completed",
+    ...observationValueForConsumer(proposal, cached.value),
+    cacheHit: true,
+    sourceObservationId: cached.sourceId,
+    sourceObservationAgentId: cached.sourceAgentId,
+    sourceObservationAgentName: cached.sourceAgentName,
+    workspaceRevision: cached.workspaceRevision,
+    observedAt: cached.observedAt
+  });
+}
+
+function observationValue(result = {}) {
+  const { proposalId, op, path, source_agent_id, source_agent_name, createdAt, ...value } = result;
+  return value;
 }
 
 function executeReadListProposal(groupPath, proposal) {

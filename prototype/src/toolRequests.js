@@ -36,6 +36,8 @@ import { loadLiveSessionContext, loadSessionContextArchiveItem, searchLiveSessio
 import { disabledCapabilityForRequest } from "./capabilityPolicy.js";
 import fs from "node:fs";
 import path from "node:path";
+import { hasMaterialWorkspaceChange, isObservationRequest, observationValueForConsumer } from "./observationCache.js";
+import { executeWorkspaceEdit } from "./workspaceEditTools.js";
 
 const ALLOWED_TOOLS = new Set([
   "fetch_url",
@@ -47,6 +49,7 @@ const ALLOWED_TOOLS = new Set([
   "search_context",
   "load_context",
   "extract_archive",
+  "workspace_edit",
   "execute_command",
   "process_control",
   "run_code",
@@ -76,6 +79,7 @@ const ALLOWED_TOOLS = new Set([
 const FILE_TOOLS = new Set(["list_directory", "read_file", "search_files", "grep_content"]);
 const CONTEXT_TOOLS = new Set(["search_context", "load_context"]);
 const ARCHIVE_TOOLS = new Set(["extract_archive"]);
+const WORKSPACE_EDIT_TOOLS = new Set(["workspace_edit"]);
 const COMMAND_TOOLS = new Set(["execute_command"]);
 const PROCESS_TOOLS = new Set(["process_control"]);
 const CODE_TOOLS = new Set(["run_code"]);
@@ -87,7 +91,7 @@ const BROWSER_TOOLS = new Set(["browser_control"]);
 const DATABASE_TOOLS = new Set(["database_query"]);
 const MCP_TOOLS = new Set(["mcp_list_tools", "mcp_call", "mcp_list_resources", "mcp_read_resource", "mcp_list_prompts", "mcp_get_prompt", "mcp_search_npm", "mcp_install_npm", "mcp_uninstall"]);
 const SKILL_TOOLS = new Set(["skill_read", "skill_list", "skill_search", "skill_install", "skill_enable", "skill_disable", "skill_remove"]);
-const FULL_PERMISSION_TOOLS = new Set(["extract_archive", "execute_command", "process_control", "run_code", "install_package", "run_tests", "git_operation", "browser_control", "mcp_list_tools", "mcp_call", "mcp_list_resources", "mcp_read_resource", "mcp_list_prompts", "mcp_get_prompt", "mcp_search_npm", "mcp_install_npm", "mcp_uninstall", "skill_list", "skill_search", "skill_install", "skill_enable", "skill_disable", "skill_remove"]);
+const FULL_PERMISSION_TOOLS = new Set(["extract_archive", "workspace_edit", "execute_command", "process_control", "run_code", "install_package", "run_tests", "git_operation", "browser_control", "mcp_list_tools", "mcp_call", "mcp_list_resources", "mcp_read_resource", "mcp_list_prompts", "mcp_get_prompt", "mcp_search_npm", "mcp_install_npm", "mcp_uninstall", "skill_list", "skill_search", "skill_install", "skill_enable", "skill_disable", "skill_remove"]);
 
 export function normalizeToolRequests(value) {
   if (!Array.isArray(value)) return [];
@@ -186,7 +190,31 @@ export async function executeToolRequests(options = {}) {
       appendProcessAuditLog(options.groupPath, "rejected", rejection);
       continue;
     }
-    if (isRepeatedObservation(normalized, [...(options.previousResults || []), ...results])) {
+    const cachedObservation = options.observationCache?.get(base);
+    if (cachedObservation) {
+      accepted.push(safeRequestForStorage(base));
+      const cachedResult = resultRecord(base, {
+        status: "completed",
+        result: observationValueForConsumer(base, cachedObservation.value),
+        cacheHit: true,
+        sourceObservationId: cachedObservation.sourceId,
+        sourceObservationAgentId: cachedObservation.sourceAgentId,
+        sourceObservationAgentName: cachedObservation.sourceAgentName,
+        workspaceRevision: cachedObservation.workspaceRevision,
+        observedAt: cachedObservation.observedAt
+      });
+      results.push(cachedResult);
+      events.push(toolEvent("tool_success", base, {
+        status: "completed",
+        durationMs: 0,
+        cacheHit: true,
+        sourceObservationId: cachedObservation.sourceId,
+        resultSummary: summarizeToolResult(cachedResult)
+      }));
+      appendToolAuditLog(options.groupPath, "completed", cachedResult);
+      continue;
+    }
+    if (!options.observationCache && isRepeatedObservation(normalized, [...(options.previousResults || []), ...results])) {
       const rejection = reject(base, "repeated_observation_limit", "This exact file or context observation already completed twice without enough new progress. Use the recorded result, inspect a different target, or perform a material action before reading it again.");
       rejected.push(rejection);
       events.push(toolEvent("tool_failure", base, { status: "rejected", code: rejection.code, error: rejection.error }));
@@ -217,6 +245,12 @@ export async function executeToolRequests(options = {}) {
     events.push(toolEvent("tool_start", base, { status: "running" }));
     const result = await executeOne(base, options);
     results.push(result);
+    if (result.status === "completed" && isObservationRequest(base)) {
+      options.observationCache?.set(base, result.result, result);
+    }
+    if (hasMaterialWorkspaceChange(result)) {
+      options.observationCache?.invalidate(`tool:${base.tool}`);
+    }
     const eventType = result.status === "completed" ? "tool_success" : "tool_failure";
     events.push(toolEvent(eventType, base, {
       status: result.status,
@@ -323,6 +357,10 @@ async function executeOne(request, options) {
         maxGrepResults: options.maxGrepResults,
         maxScanFiles: options.maxScanFiles
       });
+      return resultRecord(request, { status: "completed", result });
+    }
+    if (WORKSPACE_EDIT_TOOLS.has(request.tool)) {
+      const result = executeWorkspaceEdit(request, { groupPath: options.groupPath });
       return resultRecord(request, { status: "completed", result });
     }
     if (request.tool === "fetch_url") {
@@ -726,7 +764,7 @@ function normalizeToolRequest(item, index) {
     path: stringField(item.path),
     destination: stringField(item.destination || item.destinationPath || item.outputPath || item.dest),
     command: stringField(item.command || item.cmd || item.shellCommand || item.shell_command),
-    code: stringField(item.code || item.content || item.source),
+    code: contentField(item.code ?? item.content ?? item.source),
     language: stringField(item.language || item.lang),
     packageName: stringField(item.packageName || item.package || item.package_name || item.name),
     manager: stringField(item.manager || item.packageManager || item.package_manager || item.ecosystem),
@@ -738,6 +776,9 @@ function normalizeToolRequest(item, index) {
     sessionId: stringField(item.sessionId || item.session_id),
     method: stringField(item.method),
     action: stringField(item.action || item.operation),
+    oldText: contentField(item.oldText ?? item.old_text ?? item.before),
+    newText: typeof (item.newText ?? item.new_text ?? item.after) === "string" ? (item.newText ?? item.new_text ?? item.after) : "",
+    replaceAll: Boolean(item.replaceAll || item.replace_all),
     processId: stringField(item.processId || item.process_id || item.backgroundProcessId || item.background_process_id),
     stream: stringField(item.stream),
     offset: normalizeOptionalNumber(item.offset),
@@ -808,6 +849,9 @@ function reject(request, code, reason) {
     sessionId: request.sessionId,
     method: request.method,
     action: request.action,
+    oldText: request.oldText ? summarizeBodyForStorage(request.oldText) : undefined,
+    newText: request.newText ? summarizeBodyForStorage(request.newText) : undefined,
+    replaceAll: request.replaceAll,
     processId: request.processId,
     stream: request.stream,
     offset: request.offset,
@@ -880,6 +924,9 @@ function resultRecord(request, extra) {
     sessionId: request.sessionId,
     method: request.method,
     action: request.action,
+    oldText: request.oldText ? summarizeBodyForStorage(request.oldText) : undefined,
+    newText: request.newText ? summarizeBodyForStorage(request.newText) : undefined,
+    replaceAll: request.replaceAll,
     processId: request.processId,
     stream: request.stream,
     offset: request.offset,
@@ -932,6 +979,10 @@ function resultRecord(request, extra) {
 function stringField(value) {
   if (typeof value !== "string") return "";
   return value.trim();
+}
+
+function contentField(value) {
+  return typeof value === "string" ? value : "";
 }
 
 function normalizeCount(value, tool) {
@@ -1083,6 +1134,22 @@ function summarizeToolResult(record = {}) {
       extracted: result.extracted?.length || 0,
       skipped: result.skipped?.length || 0,
       totalBytes: result.totalBytes || 0
+    };
+  }
+  if (record.tool === "workspace_edit") {
+    const changes = result.workspaceChanges || {};
+    return {
+      action: record.action,
+      path: record.path,
+      destination: record.destination,
+      bytesWritten: result.bytesWritten || 0,
+      replacements: result.replacements || 0,
+      workspaceChanges: {
+        created: changes.created?.length || 0,
+        modified: changes.modified?.length || 0,
+        deleted: changes.deleted?.length || 0,
+        total: changes.totalChanges || 0
+      }
     };
   }
   if (record.tool === "execute_command") {

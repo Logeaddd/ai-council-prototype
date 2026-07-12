@@ -1,0 +1,141 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { advanceExecutionState, createExecutionState, executionInstruction, selectExecutionAgents } from "../src/executionState.js";
+
+const agents = [
+  { id: "designer", name: "Designer", enabled: true },
+  { id: "builder", name: "Builder", enabled: true },
+  { id: "reviewer", name: "Reviewer", enabled: true, mandatoryRedTeam: true },
+  { id: "judge", name: "Judge", enabled: true, judge: true }
+];
+const workspaceGroup = {
+  permissions: {
+    defaultTier: "text",
+    seatTiers: { designer: "tool", builder: "full", reviewer: "tool" }
+  }
+};
+
+test("delivery tasks choose one highest-permission executor", () => {
+  const state = createExecutionState({ question: "Build a real project.", agents, workspaceGroup });
+  assert.equal(state.active, true);
+  assert.equal(state.executorId, "builder");
+  assert.deepEqual(selectExecutionAgents(state, agents).map((agent) => agent.id), ["builder"]);
+  assert.match(executionInstruction(state, agents[1]), /primary executor/);
+});
+
+test("reviewers join only after a real checkpoint and own the review phase", () => {
+  const state = createExecutionState({ question: "Create the project files.", agents, workspaceGroup });
+  state.phase = "verify";
+  state.checkpointVersion = 1;
+  assert.deepEqual(selectExecutionAgents(state, agents).map((agent) => agent.id), ["builder", "reviewer"]);
+  state.phase = "review";
+  assert.deepEqual(selectExecutionAgents(state, agents).map((agent) => agent.id), ["reviewer"]);
+});
+
+test("workspace mutation advances the executor to verification", () => {
+  const state = createExecutionState({ question: "Create a source file.", agents, workspaceGroup });
+  const session = {
+    toolExecutionResults: [{
+      id: "command-write",
+      tool: "execute_command",
+      status: "completed",
+      result: { ok: true, workspaceChanges: { totalChanges: 1, created: [{ path: "src/App.java" }] } }
+    }],
+    fileOperationExecutionResults: [],
+    groupSnapshot: { agents }
+  };
+  advanceExecutionState({ state, session, agent: agents[1], question: "Create a source file." });
+  assert.equal(state.phase, "verify");
+  assert.equal(state.checkpointVersion, 1);
+  assert.match(state.nextAction, /build or test/);
+});
+
+test("failed build transitions to repair with exact error evidence", () => {
+  const state = createExecutionState({ question: "Build a JAR.", agents, workspaceGroup });
+  const session = {
+    toolExecutionResults: [{
+      id: "gradle-build",
+      tool: "execute_command",
+      command: ".\\gradlew.bat build",
+      status: "failed",
+      error: "Java compilation failed",
+      result: { ok: false, exitCode: 1, stderr: "cannot find symbol" }
+    }],
+    fileOperationExecutionResults: [],
+    groupSnapshot: { agents }
+  };
+  advanceExecutionState({ state, session, agent: agents[1], question: "Build a JAR." });
+  assert.equal(state.phase, "repair");
+  assert.match(state.lastError, /Java compilation failed/);
+  assert.match(state.nextAction, /patch/);
+});
+
+test("successful verification enters review and a clean reviewer closes the checkpoint", () => {
+  const state = createExecutionState({ question: "Create and test a source project.", agents, workspaceGroup });
+  const session = {
+    toolExecutionResults: [{
+      id: "npm-test",
+      tool: "run_tests",
+      status: "completed",
+      result: { ok: true, passed: true, exitCode: 0 }
+    }],
+    fileOperationExecutionResults: [],
+    groupSnapshot: { agents }
+  };
+
+  advanceExecutionState({ state, session, agent: agents[1], question: state.taskQuestion });
+  assert.equal(state.phase, "review");
+  assert.equal(state.artifactStatus, "not_requested");
+  advanceExecutionState({ state, session, agent: agents[2], response: { status: "skip", objection_items: [] } });
+  assert.equal(state.phase, "complete");
+  assert.equal(state.reviewedCheckpointVersion, state.checkpointVersion);
+});
+
+test("reviewer blocking evidence sends the same executor back to repair", () => {
+  const state = createExecutionState({ question: "Create and test a source project.", agents, workspaceGroup });
+  state.phase = "review";
+  state.checkpointVersion = 2;
+  state.artifactStatus = "not_requested";
+
+  advanceExecutionState({
+    state,
+    session: { toolExecutionResults: [], fileOperationExecutionResults: [] },
+    agent: agents[2],
+    response: {
+      status: "speak",
+      objection_items: [{ id: "missing-test", issue: "The required integration test is missing.", blocks_final: true, in_scope: true }]
+    }
+  });
+
+  assert.equal(state.phase, "repair");
+  assert.match(state.lastError, /integration test/);
+  assert.deepEqual(selectExecutionAgents(state, agents).map((agent) => agent.id), ["builder"]);
+});
+
+test("an interrupted continuation resumes the execution owner and pending phase", () => {
+  const previousState = createExecutionState({ question: "构建一个真实项目并打包。", agents, workspaceGroup });
+  previousState.phase = "repair";
+  previousState.checkpointVersion = 3;
+  previousState.lastError = "Compilation failed";
+  previousState.processedToolResults = 9;
+
+  const resumed = createExecutionState({
+    question: "构建一个真实项目并打包。",
+    agents,
+    workspaceGroup,
+    previousState
+  });
+
+  assert.equal(resumed.active, true);
+  assert.equal(resumed.resumed, true);
+  assert.equal(resumed.phase, "repair");
+  assert.equal(resumed.executorId, "builder");
+  assert.equal(resumed.taskQuestion, "构建一个真实项目并打包。");
+  assert.equal(resumed.processedToolResults, 0);
+});
+
+test("Chinese project requests activate delivery execution", () => {
+  const state = createExecutionState({ question: "做一个模组，写完代码后构建成 jar 包。", agents, workspaceGroup });
+  assert.equal(state.active, true);
+  assert.equal(state.executorId, "builder");
+});

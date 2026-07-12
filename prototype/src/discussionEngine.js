@@ -19,13 +19,15 @@ import { runAutoFileOperations } from "./fileOperationAutoRunner.js";
 import { enqueueFileOperationProposals } from "./fileOperationQueue.js";
 import { readPrivateContextMessages } from "./privateChat.js";
 import { normalizeFileAttachments } from "./attachments.js";
-import { readTaskState, updateTaskStateFromSession } from "./taskState.js";
+import { readTaskState, updateExecutionCheckpoint, updateTaskStateFromSession } from "./taskState.js";
 import { discoverRuntimeEnvironment, formatRuntimeEnvironment } from "./runtimeEnvironment.js";
 import { applyDeliverableVerification, enforceRequestedArtifactRequirements, verifyFinalDeliverables } from "./deliverableVerification.js";
 import { formatEnabledSkillMetadataForPrompt, listEnabledSkillMetadata } from "./skillPacks.js";
 import { capabilityEnabled } from "./capabilityPolicy.js";
 import fs from "node:fs";
 import path from "node:path";
+import { createObservationCache, hasMaterialWorkspaceChange } from "./observationCache.js";
+import { advanceExecutionState, createExecutionState, executionInstruction, isDeliveryTask, selectExecutionAgents } from "./executionState.js";
 
 export async function runCouncil(question, group, baseDir, options = {}) {
   let finalResult;
@@ -60,6 +62,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
     || (options.groupPath && memoryEnabled && automaticContinuationSource
       ? buildAutomaticContinuationContext(automaticContinuationSource)
       : null);
+  const executionQuestion = continuationContext?.previousQuestion || question;
   const excludedLegacyContinuationIds = automaticContinuationSource
     ? recentGroupSessions.filter(isLegacyContinuationShell).map((session) => session.id)
     : [];
@@ -107,8 +110,16 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
     modelCallCount: 0,
     modelCallBudget: normalizeModelCallBudget(group.settings.maxModelCalls),
     guardStopReason: "",
-    messages: []
+    messages: [],
+    executionState: createExecutionState({
+      question: executionQuestion,
+      agents: enabledAgents,
+      workspaceGroup,
+      previousState: automaticContinuationSource?.executionState
+        || (isContinuationRequest(question) ? taskState?.executionCheckpoint : undefined)
+    })
   };
+  const observationCache = createObservationCache();
 
   // The history API reads this file directly, so update it only at real event boundaries.
   const persistRunningSession = () => {
@@ -137,13 +148,14 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
       const agentStartedAt = nowIso();
       const seat = findWorkspaceSeat(workspaceGroup, agent);
       const transcriptVisibility = contextVisibilityForAgent(agent, workMode);
+      const executionDirective = executionInstruction(session.executionState, agent);
       const memberContext = buildMemberContext(agent, session, {
         question,
         groupSettings: group.settings,
         globalRequirement,
         continuationContext,
         transcriptVisibility,
-        latestBossInstruction: options.latestBossInstruction || "",
+        latestBossInstruction: [options.latestBossInstruction, executionDirective].filter(Boolean).join("\n\n"),
         attachments,
         taskState,
         retrievedContext,
@@ -250,7 +262,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
         );
         if (!fileOperationResult.accepted.length && !fileOperationResult.rejected.length) return;
         session.fileOperationProposals.push(...fileOperationResult.accepted);
-        const readListResults = executeReadListFileOperations(options.groupPath, fileOperationResult.accepted);
+        const readListResults = executeReadListFileOperations(options.groupPath, fileOperationResult.accepted, { observationCache });
         session.fileOperationExecutionResults.push(...readListResults);
         const queueResult = queueFileOperationProposals(fileOperationResult, options.groupPath);
         session.pendingFileOperationProposals.push(...queueResult.queued);
@@ -264,6 +276,9 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
           permissionTier: fileOperationPermissionTier,
           appSettings: options.appSettings
         });
+        if (autoFileExecutionResults.some(hasMaterialWorkspaceChange)) {
+          observationCache.invalidate("file_operation_mutation");
+        }
         accumulatedFileOperationProposals.push(...fileOperationResult.accepted);
         accumulatedFileOperationExecutionResults.push(...readListResults, ...autoFileExecutionResults);
         accumulatedPendingFileOperationProposals.push(...queueResult.queued);
@@ -294,6 +309,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
           maxWorkspaceChanges: group.settings.maxWorkspaceChanges,
           managedToolRoots: runtimeDiscoveryOptions.managedToolRoots,
           signal: options.signal,
+          observationCache,
           previousResults: session.toolExecutionResults.filter((item) => item.source_agent_id === agent.id)
         });
         accumulatedToolRequests.push(...toolResult.accepted);
@@ -316,7 +332,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
           globalRequirement,
           continuationContext,
           transcriptVisibility,
-          latestBossInstruction: toolFollowupInstruction,
+          latestBossInstruction: [toolFollowupInstruction, executionDirective].filter(Boolean).join("\n\n"),
           attachments,
           taskState,
           retrievedContext,
@@ -385,6 +401,15 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
       };
       results.push(message);
       session.messages.push(message);
+      advanceExecutionState({
+        state: session.executionState,
+        session,
+        agent,
+        groupPath: options.groupPath,
+        question: executionQuestion,
+        response: message.response
+      });
+      updateExecutionCheckpoint(options.groupPath, session);
       recordObjections(session, agent, message.response, round, group.settings);
       persistRunningSession();
       yield {
@@ -535,7 +560,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
     }));
     enforceRequestedArtifactRequirements({
       groupPath: options.groupPath,
-      question,
+      question: session.executionState?.taskQuestion || executionQuestion,
       session
     });
   }
@@ -721,7 +746,7 @@ function reserveModelCall(session) {
 }
 
 function noProgressGuardReason(session, question, settings = {}) {
-  if (!isFileDeliveryTask(question) || hasMaterialWorkspaceProgress(session)) return "";
+  if (!isDeliveryTask(question) || hasMaterialWorkspaceProgress(session)) return "";
   const threshold = Math.min(100, Math.max(4, Number(settings.noProgressModelCalls) || 12));
   if (Number(session.modelCallCount || 0) < threshold) return "";
   return `no_workspace_progress_after_${session.modelCallCount}_model_calls`;
@@ -817,6 +842,8 @@ function effectiveWorkspacePermissionTier(workspaceGroup, agent) {
 }
 
 function selectAgents(enabledAgents, session, round, firstRoundAgents = enabledAgents) {
+  const executionAgents = selectExecutionAgents(session.executionState, enabledAgents);
+  if (executionAgents) return executionAgents;
   const roundEligibleAgents = enabledAgents.filter((agent) => participatesInRound(agent, enabledAgents));
   const firstRoundEligible = firstRoundAgents.filter((agent) => participatesInRound(agent, enabledAgents));
   if (round === 1) return firstRoundEligible;

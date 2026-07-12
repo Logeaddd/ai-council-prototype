@@ -8,7 +8,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { executeFileTool, extractImportedProjectRoots } from "../src/fileTools.js";
 import { executeToolRequests } from "../src/toolRequests.js";
+import { executeReadListFileOperations } from "../src/fileOperationReader.js";
 import { writeContextArchive, writeGroupSession } from "../src/storage.js";
+import { createObservationCache } from "../src/observationCache.js";
 
 test("controlled file tool requests list, read, search, and grep real workspace files", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-tools-"));
@@ -69,6 +71,136 @@ test("repeated unchanged file observations are bounded across tool loops", async
 
   assert.equal(blocked.results.length, 0);
   assert.equal(blocked.rejected[0].code, "repeated_observation_limit");
+});
+
+test("tool reads reuse file-operation observations across members and refresh after mutation", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-cross-protocol-cache-"));
+  fs.writeFileSync(path.join(tmp, "README.md"), "version one", "utf8");
+  const observationCache = createObservationCache();
+  executeReadListFileOperations(tmp, [{
+    id: "proposal-read",
+    op: "read",
+    path: "README.md",
+    source_agent_id: "designer",
+    source_agent_name: "Designer"
+  }], { observationCache });
+
+  const cached = await executeToolRequests({
+    permissionTier: "tool",
+    groupPath: tmp,
+    agent: { id: "reviewer", name: "Reviewer" },
+    round: 2,
+    observationCache,
+    requests: [{ tool: "read_file", path: "README.md", reason: "Review the same file" }]
+  });
+  assert.equal(cached.results[0].cacheHit, true);
+  assert.equal(cached.results[0].result.content, "version one");
+  assert.equal(cached.results[0].sourceObservationAgentId, "designer");
+
+  const mutation = await executeToolRequests({
+    permissionTier: "full",
+    groupPath: tmp,
+    agent: { id: "builder", name: "Builder" },
+    round: 2,
+    observationCache,
+    requests: [{
+      tool: "execute_command",
+      command: process.platform === "win32"
+        ? "Set-Content -LiteralPath README.md -Value 'version two'"
+        : "printf 'version two\\n' > README.md",
+      shell: process.platform === "win32" ? "powershell" : "sh",
+      reason: "Update the file"
+    }]
+  });
+  assert.equal(mutation.results[0].status, "completed");
+
+  const refreshed = await executeToolRequests({
+    permissionTier: "tool",
+    groupPath: tmp,
+    agent: { id: "reviewer", name: "Reviewer" },
+    round: 3,
+    observationCache,
+    requests: [{ tool: "read_file", path: "README.md", reason: "Read the changed file" }]
+  });
+  assert.equal(refreshed.results[0].cacheHit, undefined);
+  assert.match(refreshed.results[0].result.content, /version two/);
+});
+
+test("workspace_edit requires full permission and writes through the real tool chain", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-workspace-edit-tool-"));
+  const request = {
+    tool: "workspace_edit",
+    action: "write",
+    path: "shared/project/src/App.java",
+    code: "public final class App {}\n",
+    reason: "Create the source file"
+  };
+
+  for (const permissionTier of ["text", "tool"]) {
+    const denied = await executeToolRequests({ permissionTier, groupPath: tmp, requests: [request] });
+    assert.equal(denied.results.length, 0);
+    assert.equal(denied.rejected[0].code, "permission_denied");
+  }
+
+  const executed = await executeToolRequests({
+    permissionTier: "full",
+    groupPath: tmp,
+    agent: { id: "builder", name: "Builder" },
+    round: 1,
+    requests: [request]
+  });
+  assert.equal(executed.results[0].status, "completed");
+  assert.equal(executed.results[0].result.workspaceChanges.totalChanges, 1);
+  assert.equal(fs.readFileSync(path.join(tmp, "shared/project/src/App.java"), "utf8"), "public final class App {}\n");
+});
+
+test("workspace_edit invalidates observations and audits bounded content metadata", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-workspace-edit-cache-"));
+  const target = path.join(tmp, "shared", "project", "notes.txt");
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.writeFileSync(target, "before", "utf8");
+  const observationCache = createObservationCache();
+
+  const firstRead = await executeToolRequests({
+    permissionTier: "tool",
+    groupPath: tmp,
+    observationCache,
+    requests: [{ tool: "read_file", path: "shared/project/notes.txt", reason: "Read current notes" }]
+  });
+  assert.equal(firstRead.results[0].result.content, "before");
+  assert.equal(observationCache.size(), 1);
+
+  const privateTail = "DO_NOT_COPY_FULL_CONTENT_".repeat(20);
+  const edited = await executeToolRequests({
+    permissionTier: "full",
+    groupPath: tmp,
+    observationCache,
+    agent: { id: "builder", name: "Builder" },
+    requests: [{
+      tool: "workspace_edit",
+      action: "write",
+      path: "shared/project/notes.txt",
+      code: `after\n${privateTail}`,
+      reason: "Replace the notes"
+    }]
+  });
+  assert.equal(edited.results[0].status, "completed");
+  assert.equal(observationCache.size(), 0);
+
+  const auditText = fs.readFileSync(path.join(tmp, "shared", "logs", "tools.jsonl"), "utf8");
+  const records = auditText.trim().split(/\r?\n/).map((line) => JSON.parse(line));
+  const editAudit = records.find((item) => item.tool === "workspace_edit" && item.status === "completed");
+  assert.equal(editAudit.resultSummary.workspaceChanges.modified, 1);
+  assert.equal(auditText.includes(privateTail), false);
+
+  const refreshed = await executeToolRequests({
+    permissionTier: "tool",
+    groupPath: tmp,
+    observationCache,
+    requests: [{ tool: "read_file", path: "shared/project/notes.txt", reason: "Read changed notes" }]
+  });
+  assert.equal(refreshed.results[0].cacheHit, undefined);
+  assert.match(refreshed.results[0].result.content, /^after/);
 });
 
 test("controlled file tools can read common build configuration files", async () => {

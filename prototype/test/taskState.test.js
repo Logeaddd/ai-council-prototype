@@ -4,7 +4,7 @@ import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { buildContextPromptSections, buildMemberContext } from "../src/contextBuilder.js";
-import { formatTaskStateForPrompt, readTaskState, updateTaskStateFromSession } from "../src/taskState.js";
+import { formatTaskStateForPrompt, readTaskState, updateExecutionCheckpoint, updateTaskStateFromSession } from "../src/taskState.js";
 
 test("task state ledger records public final state without private chat", () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-task-state-"));
@@ -60,4 +60,32 @@ test("task state ledger is injected as public member context", () => {
   assert.match(prompt, /Task state ledger/);
   assert.match(prompt, /PUBLIC_LEDGER_FACT/);
   assert.match(formatTaskStateForPrompt(context.core.taskState), /not private chat/);
+});
+
+test("task state ledger persists a resumable execution checkpoint before finalization", () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-execution-checkpoint-"));
+  updateExecutionCheckpoint(tmp, {
+    id: "session_running_1",
+    question: "Build the project",
+    executionState: {
+      active: true,
+      taskQuestion: "Build the project",
+      executorId: "builder",
+      executorName: "Builder",
+      phase: "repair",
+      nextAction: "Fix the compile error and rerun tests.",
+      checkpointVersion: 4,
+      reviewedCheckpointVersion: 2,
+      artifactStatus: "needs_revision",
+      lastAction: "verification_failed:build",
+      lastError: "cannot find symbol"
+    }
+  });
+
+  const saved = readTaskState(tmp);
+  assert.equal(saved.executionCheckpoint.sourceSessionId, "session_running_1");
+  assert.equal(saved.executionCheckpoint.executorId, "builder");
+  assert.equal(saved.executionCheckpoint.phase, "repair");
+  assert.match(saved.executionCheckpoint.lastError, /cannot find symbol/);
+  assert.match(formatTaskStateForPrompt(saved), /executionCheckpoint/);
 });

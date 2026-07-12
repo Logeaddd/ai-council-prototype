@@ -94,12 +94,9 @@ export function applyDeliverableVerification(session, report) {
 }
 
 export function enforceRequestedArtifactRequirements(options = {}) {
-  const requested = requestedArtifactExtensions(options.question);
-  if (!requested.length || !options.session?.finalDecision) return { status: "not_requested", requirements: [] };
-  const groupPath = path.resolve(options.groupPath || "");
-  const evidence = collectSessionEvidence(options.session);
-  const requirements = requested.map((extension) => verifyRequestedArtifact(extension, groupPath, evidence));
-  const failed = requirements.filter((item) => item.status !== "verified");
+  if (!options.session?.finalDecision) return { status: "not_requested", requirements: [] };
+  const report = verifyRequestedArtifactProgress(options);
+  const failed = report.requirements.filter((item) => item.status !== "verified");
   if (failed.length) {
     const issues = failed.map((item, index) => ({
       id: `requested-artifact-${index + 1}`,
@@ -117,14 +114,22 @@ export function enforceRequestedArtifactRequirements(options = {}) {
     options.session.finalDecision.blocking_issues = mergeIssues(options.session.finalDecision.blocking_issues, issues);
     options.session.finalDecision.risks = mergeText(options.session.finalDecision.risks, issues.map((item) => `BLOCKER ${item.id}: ${item.issue}`));
   }
-  const report = {
-    status: failed.length ? "needs_revision" : "verified",
+  options.session.finalDecision.requested_artifact_verification = report;
+  return report;
+}
+
+export function verifyRequestedArtifactProgress(options = {}) {
+  const requested = requestedArtifactExtensions(options.question);
+  if (!requested.length) return { status: "not_requested", source: "explicit_user_artifact_requirement", verifiedAt: nowIso(), requirements: [] };
+  const groupPath = path.resolve(options.groupPath || "");
+  const evidence = collectSessionEvidence(options.session || {});
+  const requirements = requested.map((extension) => verifyRequestedArtifact(extension, groupPath, evidence));
+  return {
+    status: requirements.every((item) => item.status === "verified") ? "verified" : "needs_revision",
     source: "explicit_user_artifact_requirement",
     verifiedAt: nowIso(),
     requirements
   };
-  options.session.finalDecision.requested_artifact_verification = report;
-  return report;
 }
 
 function requestedArtifactExtensions(question) {

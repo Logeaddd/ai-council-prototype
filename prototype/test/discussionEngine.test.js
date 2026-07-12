@@ -2371,7 +2371,7 @@ test("final_state is engine-controlled and unresolved blockers override judge pr
       ]
     });
 
-    const { session } = await runCouncil("Write executable code.", group, tmp);
+    const { session } = await runCouncil("Assess whether the proposed result is executable.", group, tmp);
 
     assert.equal(requests.length, 3);
     assert.equal(session.finalDecision.consensus_score, 1);
@@ -4053,11 +4053,190 @@ test("workspace round prompts gate file_operations by seat permission tier", asy
       ]
     });
 
-    await runCouncil("Create a file.", group, tmp, { groupPath });
+    await runCouncil("Discuss the workspace permission policy.", group, tmp, { groupPath });
 
     assert.match(requests[0].messages[0].content, /text-only file permission/);
     assert.doesNotMatch(requests[0].messages[0].content, /emit exactly one write or append file_operations item/);
     assert.match(requests[1].messages[0].content, /emit exactly one write or append file_operations item/);
+  } finally {
+    await close(server);
+  }
+});
+
+test("delivery work calls one full-permission executor instead of every ordinary member", async () => {
+  const groupPath = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-primary-executor-"));
+  fs.mkdirSync(path.join(groupPath, "sessions"), { recursive: true });
+  fs.writeFileSync(path.join(groupPath, "group.json"), JSON.stringify({
+    id: "primary-executor",
+    name: "Primary Executor",
+    permissions: { defaultTier: "text", seatTiers: { executor: "full" } },
+    seats: [
+      { seatId: "architect", displayName: "Architect", enabled: true, privateFolder: "members/Architect" },
+      { seatId: "executor", displayName: "Executor", enabled: true, privateFolder: "members/Executor" },
+      { seatId: "reviewer", displayName: "Reviewer", enabled: true, reviewer: true, privateFolder: "members/Reviewer" },
+      { seatId: "judge", displayName: "Judge", enabled: true, judge: true, privateFolder: "members/Judge" }
+    ]
+  }), "utf8");
+  const group = validateGroupConfig({
+    id: "primary-executor",
+    name: "Primary Executor",
+    settings: { maxRounds: 1, minConsensusWeight: 1, stopWhenAllSkip: true, agentTimeoutMs: 1000 },
+    agents: [
+      { id: "architect", name: "Architect", role: "Architect", provider: "mock", apiBaseUrl: "mock://local", model: "mock-architect", weight: 1, enabled: true },
+      { id: "executor", name: "Executor", role: "Executor", provider: "mock", apiBaseUrl: "mock://local", model: "mock-executor", weight: 1, enabled: true },
+      { id: "reviewer", name: "Reviewer", role: "Reviewer", provider: "mock", apiBaseUrl: "mock://local", model: "mock-reviewer", weight: 1, enabled: true, mandatoryRedTeam: true },
+      { id: "judge", name: "Judge", role: "Judge", provider: "mock", apiBaseUrl: "mock://local", model: "mock-judge", weight: 1, enabled: true, judge: true }
+    ]
+  });
+  const calls = [];
+
+  const { session } = await runCouncil("Create a real project file.", group, groupPath, {
+    groupPath,
+    onModelCall: (record) => calls.push(record)
+  });
+
+  assert.deepEqual(calls.filter((item) => item.phase === "round").map((item) => item.agentId), ["executor"]);
+  assert.equal(session.executionState.executorId, "executor");
+  assert.equal(session.messages.some((message) => message.agentId === "architect"), false);
+  assert.equal(session.messages.some((message) => message.agentId === "reviewer"), false);
+});
+
+test("primary executor completes a deterministic project through real writes tests and review", async () => {
+  const groupPath = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-project-benchmark-"));
+  fs.mkdirSync(path.join(groupPath, "sessions"), { recursive: true });
+  fs.writeFileSync(path.join(groupPath, "group.json"), JSON.stringify({
+    id: "project-benchmark",
+    name: "Project Benchmark",
+    permissions: { defaultTier: "text", seatTiers: { executor: "full", reviewer: "tool" } },
+    seats: [
+      { seatId: "executor", displayName: "Executor", enabled: true, privateFolder: "members/Executor" },
+      { seatId: "reviewer", displayName: "Reviewer", enabled: true, reviewer: true, privateFolder: "members/Reviewer" },
+      { seatId: "finalizer", displayName: "Finalizer", enabled: true, judge: true, privateFolder: "members/Finalizer" }
+    ]
+  }), "utf8");
+  const calls = [];
+  let executorStep = 0;
+  const server = http.createServer(async (req, res) => {
+    const body = JSON.parse(await readRequestBody(req));
+    const prompt = JSON.stringify(body.messages || []);
+    calls.push(prompt);
+    if (prompt.includes("FinalDecision JSON object")) {
+      writeOpenAiStream(res, JSON.stringify({
+        answer: "The project was written and its real test command passed.",
+        consensus_score: 1,
+        supporting_agents: ["Executor", "Reviewer"],
+        dissenting_agents: [],
+        minority_report: "",
+        risks: [],
+        next_actions: [],
+        selected_file_operation_ids: [],
+        memory_candidates: []
+      }));
+      return;
+    }
+    if (prompt.includes("[Checkpoint review]")) {
+      writeOpenAiStream(res, JSON.stringify({ status: "skip", reason: "Real test evidence passed.", objection_items: [], memory_candidates: [] }));
+      return;
+    }
+    if (executorStep === 0) {
+      executorStep += 1;
+      writeOpenAiStream(res, JSON.stringify({
+        status: "speak",
+        position: "executor",
+        argument: "Creating the requested project files now.",
+        objections: [],
+        objection_items: [],
+        resolved_ids: [],
+        file_operations: [],
+        tool_requests: [
+          {
+            tool: "workspace_edit",
+            action: "write",
+            path: "shared/project/package.json",
+            code: "{\n  \"name\": \"agent-benchmark\",\n  \"private\": true,\n  \"type\": \"module\",\n  \"scripts\": { \"test\": \"node --test\" }\n}\n",
+            reason: "Create the package manifest"
+          },
+          {
+            tool: "workspace_edit",
+            action: "write",
+            path: "shared/project/src/sum.js",
+            code: "export function sum(a, b) {\n  return a + b;\n}\n",
+            reason: "Create the implementation"
+          },
+          {
+            tool: "workspace_edit",
+            action: "write",
+            path: "shared/project/test/sum.test.js",
+            code: "import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { sum } from '../src/sum.js';\n\ntest('sum', () => assert.equal(sum(2, 3), 5));\n",
+            reason: "Create the test"
+          }
+        ],
+        confidence: 0.95,
+        memory_candidates: []
+      }));
+      return;
+    }
+    if (executorStep === 1) {
+      executorStep += 1;
+      writeOpenAiStream(res, JSON.stringify({
+        status: "speak",
+        position: "executor",
+        argument: "Running the real project tests now.",
+        objections: [],
+        objection_items: [],
+        resolved_ids: [],
+        file_operations: [],
+        tool_requests: [{
+          tool: "run_tests",
+          runner: "custom",
+          cwd: "shared/project",
+          command: "node --test",
+          reason: "Verify the written project"
+        }],
+        confidence: 0.95,
+        memory_candidates: []
+      }));
+      return;
+    }
+    writeOpenAiStream(res, JSON.stringify({
+      status: "speak",
+      position: "executor",
+      argument: "The real test command passed.",
+      objections: [],
+      objection_items: [],
+      resolved_ids: [],
+      file_operations: [],
+      tool_requests: [],
+      confidence: 0.98,
+      memory_candidates: []
+    }));
+  });
+  await listen(server);
+
+  try {
+    const apiBaseUrl = `http://127.0.0.1:${server.address().port}/v1`;
+    const group = validateGroupConfig({
+      id: "project-benchmark",
+      name: "Project Benchmark",
+      settings: { maxRounds: 4, minConsensusWeight: 1, stopWhenAllSkip: true, agentTimeoutMs: 3000, maxToolIterations: 4 },
+      agents: [
+        { id: "executor", name: "Executor", role: "Builder", provider: "openai-compatible", apiBaseUrl, allowUnsafePrivateNetwork: true, apiKey: "test-key", model: "test-model", weight: 1, enabled: true },
+        { id: "reviewer", name: "Reviewer", role: "Reviewer", provider: "openai-compatible", apiBaseUrl, allowUnsafePrivateNetwork: true, apiKey: "test-key", model: "test-model", weight: 1, enabled: true, mandatoryRedTeam: true },
+        { id: "finalizer", name: "Finalizer", role: "Finalizer", provider: "openai-compatible", apiBaseUrl, allowUnsafePrivateNetwork: true, apiKey: "test-key", model: "test-model", weight: 1, enabled: true, judge: true }
+      ]
+    });
+
+    const { session } = await runCouncil("Create a tested Node project in the workspace.", group, groupPath, { groupPath });
+    const sourcePath = path.join(groupPath, "shared", "project", "src", "sum.js");
+    assert.match(fs.readFileSync(sourcePath, "utf8"), /return a \+ b/);
+    const testResult = session.toolExecutionResults.find((item) => item.tool === "run_tests");
+    assert.equal(testResult.status, "completed");
+    assert.equal(testResult.result.exitCode, 0);
+    assert.equal(testResult.result.passed, true);
+    assert.equal(session.executionState.phase, "complete");
+    assert.equal(session.executionState.reviewedCheckpointVersion, session.executionState.checkpointVersion);
+    assert.equal(session.guardStopReason, "");
+    assert.ok(calls.length <= 6);
   } finally {
     await close(server);
   }
@@ -5308,7 +5487,20 @@ test("a plain continue message automatically carries the latest real group discu
     ],
     toolExecutionResults: [{ round: 2, source_agent_id: "builder", tool: "run_tests", status: "completed", result: { status: "completed", stdout: "PREVIOUS_BUILD_ACTIVITY" } }],
     fileOperationExecutionResults: [{ round: 2, source_agent_id: "builder", action: "write", path: "src/main/java/Mod.java", result: { status: "written" } }],
-    fileOperationProposals: []
+    fileOperationProposals: [],
+    executionState: {
+      active: true,
+      taskQuestion: "PREVIOUS_MOD_QUESTION build the real mod",
+      executorId: "builder",
+      executorName: "Builder",
+      phase: "repair",
+      nextAction: "Fix the failed build.",
+      checkpointVersion: 2,
+      reviewedCheckpointVersion: 1,
+      artifactStatus: "needs_revision",
+      lastAction: "verification_failed:gradle",
+      lastError: "PREVIOUS_COMPILE_ERROR"
+    }
   }, tmp);
   writeGroupSession({
     id: "session_legacy_continue_shell",
@@ -5360,6 +5552,9 @@ test("a plain continue message automatically carries the latest real group discu
     const result = await runCouncil("继续", group, tmp, { groupPath: tmp });
     const firstPrompt = requests[0].messages.at(-1).content;
     assert.equal(result.session.continuationContext.previousSessionId, "session_previous_mod_work");
+    assert.equal(result.session.executionState.executorId, "builder");
+    assert.equal(result.session.executionState.taskQuestion, "PREVIOUS_MOD_QUESTION build the real mod");
+    assert.match(firstPrompt, /PREVIOUS_COMPILE_ERROR/);
     assert.match(firstPrompt, /PREVIOUS_MOD_QUESTION/);
     assert.match(firstPrompt, /DESIGNER_PREVIOUS_STATEMENT/);
     assert.match(firstPrompt, /BUILDER_PREVIOUS_STATEMENT/);
