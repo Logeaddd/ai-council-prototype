@@ -59,13 +59,14 @@ export async function runRealProviderBenchmark(options = {}) {
 
   const session = result?.session;
   const totalCostUsd = records.reduce((sum, item) => sum + recordedCallCost(item, group), 0);
+  const taskChecks = evaluateTaskSpecificChecks(task, workspacePath, session);
   const report = {
     schema: "ai-council.real-provider-benchmark.v1",
     task,
     startedAt,
     completedAt: nowIso(),
     elapsedMs: Math.round(performance.now() - started),
-    status: capReason || (runError ? "failed" : benchmarkPassed(session) ? "passed" : "failed"),
+    status: capReason || (runError ? "failed" : benchmarkPassed(session, taskChecks) ? "passed" : "failed"),
     error: runError ? String(runError.message || runError).slice(0, 1000) : "",
     caps: { maxCostUsd, maxModelCalls },
     accounting: {
@@ -87,11 +88,31 @@ export async function runRealProviderBenchmark(options = {}) {
       workspaceMutations: countWorkspaceMutations(session),
       artifactVerification: session?.finalDecision?.requested_artifact_verification || null
     },
+    taskChecks,
     calls: records.map((record) => summarizeCall(record, group)),
     workspacePath
   };
   fs.writeFileSync(path.join(runDir, "report.json"), JSON.stringify(report, null, 2), "utf8");
   return { runDir, workspacePath, report, result };
+}
+
+export function evaluateTaskSpecificChecks(task, workspacePath, session) {
+  if (task?.id !== "forge-1.20.1-random-surface") {
+    return { type: "not_applicable", passed: true, checks: [] };
+  }
+  const source = collectJavaSource(workspacePath);
+  const toolResults = session?.toolExecutionResults || [];
+  const artifact = session?.finalDecision?.requested_artifact_verification;
+  const checks = [
+    check("java_source_present", source.files.length > 0, `${source.files.length} Java source files`),
+    check("chunk_entry_detection", /ChunkPos|EnteringChunk|PlayerTickEvent|chunk/i.test(source.text), "chunk entry or position handling"),
+    check("two_surface_layers", /(?:<\s*2|<=\s*1|y\s*-\s*1|below\s*\(|two\s+(?:layers|blocks)|2\s+(?:layers|blocks))/i.test(source.text), "two-layer surface mutation"),
+    check("random_registered_block", /(?:ForgeRegistries\.BLOCKS|BuiltInRegistries\.BLOCK|Registry<[^>]*Block)[\s\S]{0,1200}(?:Random|nextInt|random)/i.test(source.text), "random registered block selection"),
+    check("five_minute_cooldown", /(?:6000|300000|5\s*\*\s*60\s*\*\s*20|Duration\.ofMinutes\s*\(\s*5\s*\))/i.test(source.text), "five-minute cooldown constant"),
+    check("successful_gradle_build", toolResults.some((item) => item.tool === "execute_command" && item.status === "completed" && /(?:gradle|gradlew)[^\r\n]*(?:build|assemble)/i.test(String(item.command || item.result?.command || "")) && Number(item.result?.exitCode ?? 0) === 0), "successful current-run Gradle build"),
+    check("valid_jar", artifact?.status === "verified", "requested JAR verification")
+  ];
+  return { type: "forge-1.20.1-random-surface", passed: checks.every((item) => item.passed), checks, sourceFiles: source.files };
 }
 
 function normalizeTask(value = {}) {
@@ -150,12 +171,35 @@ function summarizeCall(record, group) {
   };
 }
 
-function benchmarkPassed(session) {
+function benchmarkPassed(session, taskChecks) {
   if (!session || session.guardStopReason) return false;
   if (session.executionState?.active && session.executionState.phase !== "complete") return false;
   if (session.finalDecision?.final_state === "needs_revision") return false;
   const artifact = session.finalDecision?.requested_artifact_verification;
-  return !artifact || artifact.status === "not_requested" || artifact.status === "verified";
+  return (!artifact || artifact.status === "not_requested" || artifact.status === "verified") && taskChecks?.passed !== false;
+}
+
+function collectJavaSource(root) {
+  const files = [];
+  const parts = [];
+  const stack = [path.resolve(root)];
+  while (stack.length && files.length < 300) {
+    const current = stack.pop();
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      if ([".git", "node_modules", "build", "target", "members", "sessions", "logs"].includes(entry.name)) continue;
+      const absolute = path.join(current, entry.name);
+      if (entry.isDirectory()) stack.push(absolute);
+      else if (entry.isFile() && entry.name.toLowerCase().endsWith(".java")) {
+        files.push(path.relative(root, absolute).replaceAll("\\", "/"));
+        parts.push(fs.readFileSync(absolute, "utf8").slice(0, 256 * 1024));
+      }
+    }
+  }
+  return { files, text: parts.join("\n") };
+}
+
+function check(id, passed, evidence) {
+  return { id, passed: Boolean(passed), evidence };
 }
 
 function countWorkspaceMutations(session = {}) {

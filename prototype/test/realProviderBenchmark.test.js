@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { runRealProviderBenchmark } from "../src/realProviderBenchmark.js";
+import { evaluateTaskSpecificChecks, runRealProviderBenchmark } from "../src/realProviderBenchmark.js";
 
 test("real-provider benchmark requires explicit caps, real providers, and pricing", async () => {
   const workspace = createWorkspace();
@@ -78,6 +78,34 @@ test("real-provider benchmark aborts before a request that would exceed the cost
   } finally {
     await close(server);
   }
+});
+
+test("Forge benchmark cannot pass with an unrelated JAR or missing task behavior", () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "forge-checks-"));
+  const missing = evaluateTaskSpecificChecks({ id: "forge-1.20.1-random-surface" }, workspace, {
+    toolExecutionResults: [],
+    finalDecision: { requested_artifact_verification: { status: "verified" } }
+  });
+  assert.equal(missing.passed, false);
+  assert.equal(missing.checks.find((item) => item.id === "java_source_present").passed, false);
+
+  const sourcePath = path.join(workspace, "src", "main", "java", "Mod.java");
+  fs.mkdirSync(path.dirname(sourcePath), { recursive: true });
+  fs.writeFileSync(sourcePath, `
+    class Mod {
+      void onPlayerTick(PlayerTickEvent event, ChunkPos chunk) {
+        long cooldown = 5 * 60 * 20;
+        for (int layer = 0; layer < 2; layer++) {
+          var block = ForgeRegistries.BLOCKS.getValues().stream().skip(Random.nextInt()).findFirst();
+        }
+      }
+    }
+  `, "utf8");
+  const complete = evaluateTaskSpecificChecks({ id: "forge-1.20.1-random-surface" }, workspace, {
+    toolExecutionResults: [{ tool: "execute_command", status: "completed", command: ".\\gradlew.bat build", result: { exitCode: 0 } }],
+    finalDecision: { requested_artifact_verification: { status: "verified" } }
+  });
+  assert.equal(complete.passed, true);
 });
 
 function benchmarkGroup(port) {

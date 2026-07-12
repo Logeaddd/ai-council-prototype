@@ -1,0 +1,11 @@
+{
+  "id": "forge-1.20.1-random-surface",
+  "title": "Minecraft Forge 1.20.1 random surface mod",
+  "prompt": "做一个1.20.1的我的世界mod，要可以做到：在玩家每走到一个新区块时，这个区块的最表层2层方块会变成随机一种我的世界的方块（包括物品），会有5min冷却，就是说这个现在变了，短时间再走上去不会立刻变，而是过5min后才可以变，做好了请你们构建成jar包。",
+  "requiredEvidence": [
+    "real source changes",
+    "successful Gradle build",
+    "valid JAR containing META-INF/MANIFEST.MF and class entries",
+    "task-specific source checks for chunk entry, two surface layers, random registry selection, and five-minute cooldown"
+  ]
+}
