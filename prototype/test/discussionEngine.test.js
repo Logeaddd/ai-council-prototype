@@ -4326,6 +4326,246 @@ test("provider-native tool calls execute through the council permission and veri
   }
 });
 
+test("executor repairs a real failing test and reruns verification before completion", async () => {
+  const groupPath = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-repair-benchmark-"));
+  fs.mkdirSync(path.join(groupPath, "sessions"), { recursive: true });
+  fs.writeFileSync(path.join(groupPath, "group.json"), JSON.stringify({
+    id: "repair-benchmark",
+    name: "Repair Benchmark",
+    permissions: { defaultTier: "text", seatTiers: { executor: "full", reviewer: "tool" } },
+    seats: [
+      { seatId: "executor", displayName: "Executor", enabled: true, privateFolder: "members/Executor" },
+      { seatId: "reviewer", displayName: "Reviewer", enabled: true, reviewer: true, privateFolder: "members/Reviewer" },
+      { seatId: "finalizer", displayName: "Finalizer", enabled: true, judge: true, privateFolder: "members/Finalizer" }
+    ]
+  }), "utf8");
+  let executorStep = 0;
+  const prompts = [];
+  const server = http.createServer(async (req, res) => {
+    const body = JSON.parse(await readRequestBody(req));
+    const prompt = JSON.stringify(body.messages || []);
+    prompts.push(prompt);
+    if (prompt.includes("FinalDecision JSON object")) {
+      writeOpenAiStream(res, JSON.stringify({
+        answer: "The failing test was repaired and passed.",
+        consensus_score: 1,
+        supporting_agents: ["Executor", "Reviewer"],
+        dissenting_agents: [],
+        minority_report: "",
+        risks: [],
+        next_actions: [],
+        selected_file_operation_ids: [],
+        memory_candidates: []
+      }));
+      return;
+    }
+    if (prompt.includes("[Checkpoint review]")) {
+      writeOpenAiStream(res, JSON.stringify({ status: "skip", reason: "The repaired test passed.", objection_items: [], memory_candidates: [] }));
+      return;
+    }
+    if (executorStep === 0) {
+      executorStep += 1;
+      writeOpenAiNativeToolStream(res, [
+        { tool: "workspace_edit", action: "write", path: "shared/repair/package.json", code: "{\"type\":\"module\",\"scripts\":{\"test\":\"node --test\"}}\n", reason: "Create package" },
+        { tool: "workspace_edit", action: "write", path: "shared/repair/value.js", code: "export const value = 41;\n", reason: "Create initial source" },
+        { tool: "workspace_edit", action: "write", path: "shared/repair/value.test.js", code: "import test from 'node:test'; import assert from 'node:assert/strict'; import { value } from './value.js'; test('value',()=>assert.equal(value,42));\n", reason: "Create expected behavior test" }
+      ]);
+      return;
+    }
+    if (executorStep === 1) {
+      executorStep += 1;
+      writeOpenAiNativeToolStream(res, [{ tool: "run_tests", runner: "custom", cwd: "shared/repair", command: "node --test", reason: "Expose the real failure" }]);
+      return;
+    }
+    if (executorStep === 2) {
+      executorStep += 1;
+      writeOpenAiStream(res, JSON.stringify({ status: "speak", position: "executor", argument: "The test failed and must be repaired.", objections: [], objection_items: [], resolved_ids: [], file_operations: [], tool_requests: [], memory_candidates: [] }));
+      return;
+    }
+    if (executorStep === 3) {
+      executorStep += 1;
+      writeOpenAiNativeToolStream(res, [{ tool: "workspace_edit", action: "replace", path: "shared/repair/value.js", oldText: "value = 41", newText: "value = 42", reason: "Repair the failed behavior" }]);
+      return;
+    }
+    if (executorStep === 4) {
+      executorStep += 1;
+      writeOpenAiNativeToolStream(res, [{ tool: "run_tests", runner: "custom", cwd: "shared/repair", command: "node --test", reason: "Verify the repair" }]);
+      return;
+    }
+    writeOpenAiStream(res, JSON.stringify({ status: "speak", position: "executor", argument: "The repaired test now passes.", objections: [], objection_items: [], resolved_ids: [], file_operations: [], tool_requests: [], memory_candidates: [] }));
+  });
+  await listen(server);
+
+  try {
+    const apiBaseUrl = `http://127.0.0.1:${server.address().port}/v1`;
+    const group = validateGroupConfig({
+      id: "repair-benchmark",
+      name: "Repair Benchmark",
+      settings: { maxRounds: 3, minConsensusWeight: 1, stopWhenAllSkip: true, agentTimeoutMs: 3000, maxToolIterations: 4 },
+      agents: [
+        { id: "executor", name: "Executor", role: "Builder", provider: "openai-compatible", apiBaseUrl, allowUnsafePrivateNetwork: true, apiKey: "test-key", model: "test-model", weight: 1, enabled: true },
+        { id: "reviewer", name: "Reviewer", role: "Reviewer", provider: "openai-compatible", apiBaseUrl, allowUnsafePrivateNetwork: true, apiKey: "test-key", model: "test-model", weight: 1, enabled: true, mandatoryRedTeam: true },
+        { id: "finalizer", name: "Finalizer", role: "Finalizer", provider: "openai-compatible", apiBaseUrl, allowUnsafePrivateNetwork: true, apiKey: "test-key", model: "test-model", weight: 1, enabled: true, judge: true }
+      ]
+    });
+    const { session } = await runCouncil("Create the project, run its test, and repair any failure.", group, groupPath, { groupPath });
+    const tests = session.toolExecutionResults.filter((item) => item.tool === "run_tests");
+    assert.equal(tests.length, 2, JSON.stringify({
+      executionState: session.executionState,
+      tools: session.toolExecutionResults.map((item) => ({ tool: item.tool, status: item.status, action: item.action, path: item.path, code: item.code, error: item.error, result: item.result })),
+      messages: session.messages.map((item) => ({ round: item.round, agentId: item.agentId, status: item.response.status, reason: item.response.reason, argument: item.response.argument }))
+    }));
+    assert.equal(tests[0].status, "failed");
+    assert.equal(tests[0].result.exitCode, 1);
+    assert.equal(tests[1].status, "completed");
+    assert.equal(tests[1].result.passed, true);
+    assert.equal(fs.readFileSync(path.join(groupPath, "shared", "repair", "value.js"), "utf8"), "export const value = 42;\n");
+    assert.equal(session.executionState.phase, "complete");
+    assert.ok(session.executionState.checkpointVersion >= 2);
+    assert.equal(prompts.some((prompt) => /verification_failed|Command exited|test failed/i.test(prompt)), true);
+  } finally {
+    await close(server);
+  }
+});
+
+test("packaging benchmark produces and validates a real requested JAR", { skip: process.platform !== "win32" }, async () => {
+  const groupPath = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-package-benchmark-"));
+  fs.mkdirSync(path.join(groupPath, "sessions"), { recursive: true });
+  fs.writeFileSync(path.join(groupPath, "group.json"), JSON.stringify({
+    id: "package-benchmark",
+    name: "Package Benchmark",
+    permissions: { defaultTier: "text", seatTiers: { executor: "full" } },
+    seats: [
+      { seatId: "executor", displayName: "Executor", enabled: true, privateFolder: "members/Executor" },
+      { seatId: "finalizer", displayName: "Finalizer", enabled: true, judge: true, privateFolder: "members/Finalizer" }
+    ]
+  }), "utf8");
+  let executorStep = 0;
+  const server = http.createServer(async (req, res) => {
+    const body = JSON.parse(await readRequestBody(req));
+    const prompt = JSON.stringify(body.messages || []);
+    if (prompt.includes("FinalDecision JSON object")) {
+      writeOpenAiStream(res, JSON.stringify({
+        answer: "The requested JAR was packaged and validated.",
+        consensus_score: 1,
+        supporting_agents: ["Executor"],
+        dissenting_agents: [],
+        minority_report: "",
+        risks: [],
+        next_actions: [],
+        selected_file_operation_ids: [],
+        deliverables: [{ path: "shared/package/build/libs/app.jar", claim: "built", evidence_ids: [] }],
+        memory_candidates: []
+      }));
+      return;
+    }
+    if (executorStep === 0) {
+      executorStep += 1;
+      writeOpenAiNativeToolStream(res, [
+        { tool: "workspace_edit", action: "write", path: "shared/package/META-INF/MANIFEST.MF", code: "Manifest-Version: 1.0\nMain-Class: com.example.App\n", reason: "Create JAR manifest" },
+        { tool: "workspace_edit", action: "write", path: "shared/package/com/example/App.class", code: "CLASS_BYTES", reason: "Create class entry fixture" }
+      ]);
+      return;
+    }
+    if (executorStep === 1) {
+      executorStep += 1;
+      writeOpenAiNativeToolStream(res, [{
+        tool: "execute_command",
+        shell: "powershell",
+        cwd: "shared/package",
+        command: "New-Item -ItemType Directory -Force build/libs | Out-Null; Compress-Archive -Path META-INF,com -DestinationPath build/libs/app.zip -Force; Move-Item -LiteralPath build/libs/app.zip -Destination build/libs/app.jar -Force",
+        reason: "Package the requested JAR"
+      }]);
+      return;
+    }
+    writeOpenAiStream(res, JSON.stringify({ status: "speak", position: "executor", argument: "The JAR packaging command passed.", objections: [], objection_items: [], resolved_ids: [], file_operations: [], tool_requests: [], memory_candidates: [] }));
+  });
+  await listen(server);
+
+  try {
+    const apiBaseUrl = `http://127.0.0.1:${server.address().port}/v1`;
+    const group = validateGroupConfig({
+      id: "package-benchmark",
+      name: "Package Benchmark",
+      settings: { maxRounds: 2, minConsensusWeight: 1, stopWhenAllSkip: true, agentTimeoutMs: 5000, maxToolIterations: 4 },
+      agents: [
+        { id: "executor", name: "Executor", role: "Builder", provider: "openai-compatible", apiBaseUrl, allowUnsafePrivateNetwork: true, apiKey: "test-key", model: "test-model", weight: 1, enabled: true },
+        { id: "finalizer", name: "Finalizer", role: "Finalizer", provider: "openai-compatible", apiBaseUrl, allowUnsafePrivateNetwork: true, apiKey: "test-key", model: "test-model", weight: 1, enabled: true, judge: true }
+      ]
+    });
+    const { session } = await runCouncil("Build and package the project as a JAR.", group, groupPath, { groupPath });
+    const jarPath = path.join(groupPath, "shared", "package", "build", "libs", "app.jar");
+    assert.equal(fs.existsSync(jarPath), true);
+    assert.equal(session.executionState.phase, "complete");
+    assert.equal(session.executionState.artifactStatus, "verified");
+    assert.equal(session.finalDecision.requested_artifact_verification.status, "verified");
+    assert.equal(session.finalDecision.requested_artifact_verification.requirements[0].path, "shared/package/build/libs/app.jar");
+  } finally {
+    await close(server);
+  }
+});
+
+test("multi-file CLI benchmark executes its real command contract", async () => {
+  const groupPath = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-cli-benchmark-"));
+  fs.mkdirSync(path.join(groupPath, "sessions"), { recursive: true });
+  fs.writeFileSync(path.join(groupPath, "group.json"), JSON.stringify({
+    id: "cli-benchmark",
+    name: "CLI Benchmark",
+    permissions: { defaultTier: "text", seatTiers: { executor: "full" } },
+    seats: [
+      { seatId: "executor", displayName: "Executor", enabled: true, privateFolder: "members/Executor" },
+      { seatId: "finalizer", displayName: "Finalizer", enabled: true, judge: true, privateFolder: "members/Finalizer" }
+    ]
+  }), "utf8");
+  let executorStep = 0;
+  const server = http.createServer(async (req, res) => {
+    const body = JSON.parse(await readRequestBody(req));
+    const prompt = JSON.stringify(body.messages || []);
+    if (prompt.includes("FinalDecision JSON object")) {
+      writeOpenAiStream(res, JSON.stringify({ answer: "The CLI command contract passed.", consensus_score: 1, supporting_agents: ["Executor"], dissenting_agents: [], minority_report: "", risks: [], next_actions: [], selected_file_operation_ids: [], memory_candidates: [] }));
+      return;
+    }
+    if (executorStep === 0) {
+      executorStep += 1;
+      writeOpenAiNativeToolStream(res, [
+        { tool: "workspace_edit", action: "write", path: "shared/cli/package.json", code: "{\"type\":\"module\",\"bin\":{\"calc\":\"src/cli.mjs\"}}\n", reason: "Create package metadata" },
+        { tool: "workspace_edit", action: "write", path: "shared/cli/src/cli.mjs", code: "const [command, left, right] = process.argv.slice(2);\nif (command !== 'add') { console.error('usage: add <a> <b>'); process.exit(2); }\nconst result = Number(left) + Number(right);\nif (!Number.isFinite(result)) { console.error('numbers required'); process.exit(2); }\nconsole.log(result);\n", reason: "Create CLI implementation" },
+        { tool: "workspace_edit", action: "write", path: "shared/cli/verify.mjs", code: "import { spawnSync } from 'node:child_process';\nconst ok = spawnSync(process.execPath, ['src/cli.mjs','add','2','3'], { encoding: 'utf8' });\nif (ok.status !== 0 || ok.stdout.trim() !== '5') throw new Error(`add failed: ${ok.status} ${ok.stdout} ${ok.stderr}`);\nconst bad = spawnSync(process.execPath, ['src/cli.mjs','bad'], { encoding: 'utf8' });\nif (bad.status === 0) throw new Error('invalid command unexpectedly passed');\nconsole.log('CLI_CONTRACT_OK');\n", reason: "Create CLI contract verification" }
+      ]);
+      return;
+    }
+    if (executorStep === 1) {
+      executorStep += 1;
+      writeOpenAiNativeToolStream(res, [{ tool: "run_tests", runner: "custom", cwd: "shared/cli", command: "node verify.mjs", reason: "Run the CLI contract" }]);
+      return;
+    }
+    writeOpenAiStream(res, JSON.stringify({ status: "speak", position: "executor", argument: "The CLI contract passed.", objections: [], objection_items: [], resolved_ids: [], file_operations: [], tool_requests: [], memory_candidates: [] }));
+  });
+  await listen(server);
+
+  try {
+    const apiBaseUrl = `http://127.0.0.1:${server.address().port}/v1`;
+    const group = validateGroupConfig({
+      id: "cli-benchmark",
+      name: "CLI Benchmark",
+      settings: { maxRounds: 2, minConsensusWeight: 1, stopWhenAllSkip: true, agentTimeoutMs: 3000, maxToolIterations: 4 },
+      agents: [
+        { id: "executor", name: "Executor", role: "Builder", provider: "openai-compatible", apiBaseUrl, allowUnsafePrivateNetwork: true, apiKey: "test-key", model: "test-model", weight: 1, enabled: true },
+        { id: "finalizer", name: "Finalizer", role: "Finalizer", provider: "openai-compatible", apiBaseUrl, allowUnsafePrivateNetwork: true, apiKey: "test-key", model: "test-model", weight: 1, enabled: true, judge: true }
+      ]
+    });
+    const { session } = await runCouncil("Create a multi-file calculator CLI and verify its command behavior.", group, groupPath, { groupPath });
+    const verification = session.toolExecutionResults.find((item) => item.tool === "run_tests");
+    assert.equal(verification.status, "completed");
+    assert.equal(verification.result.passed, true);
+    assert.match(verification.result.stdout, /CLI_CONTRACT_OK/);
+    assert.equal(session.executionState.phase, "complete");
+    assert.equal(fs.existsSync(path.join(groupPath, "shared", "cli", "src", "cli.mjs")), true);
+  } finally {
+    await close(server);
+  }
+});
+
 test("full permission executes approved file operation proposals during the round", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-full-round-files-"));
   const groupPath = path.join(tmp, "group");

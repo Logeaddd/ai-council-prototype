@@ -86,6 +86,7 @@ export function buildCommandEnvironment(groupPath, options = {}) {
   const root = safeRealDirectory(groupPath);
   const discovered = discoverRuntimeEnvironment(root, { ...options, refresh: true });
   const env = { ...process.env };
+  delete env.NODE_TEST_CONTEXT;
   const additions = [
     ...(discovered.managedTools || []).map((item) => path.dirname(item.path)),
     ...(discovered.configuredHomes || []).map((item) => path.join(item.path, "bin")),

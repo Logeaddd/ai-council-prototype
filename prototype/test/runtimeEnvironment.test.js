@@ -71,3 +71,16 @@ test("command environment exposes managed npm modules to later Node code", () =>
   assert.equal(result.nodeModulePaths.includes(modules), true);
   assert.equal(String(result.env.NODE_PATH || "").split(path.delimiter).includes(modules), true);
 });
+
+test("command environment does not leak the parent Node test runner into child tests", () => {
+  const group = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-test-env-"));
+  const previous = process.env.NODE_TEST_CONTEXT;
+  process.env.NODE_TEST_CONTEXT = "child-v8";
+  try {
+    const result = buildCommandEnvironment(group);
+    assert.equal(result.env.NODE_TEST_CONTEXT, undefined);
+  } finally {
+    if (previous === undefined) delete process.env.NODE_TEST_CONTEXT;
+    else process.env.NODE_TEST_CONTEXT = previous;
+  }
+});

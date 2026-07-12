@@ -70,6 +70,23 @@ test("failed build transitions to repair with exact error evidence", () => {
   assert.match(state.nextAction, /patch/);
 });
 
+test("the latest verification wins after an in-loop repair", () => {
+  const state = createExecutionState({ question: "Create and test a source project.", agents, workspaceGroup });
+  const session = {
+    toolExecutionResults: [
+      { id: "test-failed", tool: "run_tests", status: "failed", error: "first failure", result: { ok: false, exitCode: 1 } },
+      { id: "patch", tool: "workspace_edit", status: "completed", result: { workspaceChanges: { totalChanges: 1, modified: [{ path: "src/app.js" }] } } },
+      { id: "test-passed", tool: "run_tests", status: "completed", result: { ok: true, passed: true, exitCode: 0 } }
+    ],
+    fileOperationExecutionResults: [],
+    groupSnapshot: { agents: agents.filter((agent) => agent.id !== "reviewer") }
+  };
+  advanceExecutionState({ state, session, agent: agents[1], question: state.taskQuestion });
+  assert.equal(state.phase, "complete");
+  assert.equal(state.lastAction, "verification_passed:test-passed");
+  assert.equal(state.lastError, "");
+});
+
 test("successful verification enters review and a clean reviewer closes the checkpoint", () => {
   const state = createExecutionState({ question: "Create and test a source project.", agents, workspaceGroup });
   const session = {

@@ -98,8 +98,13 @@ export function advanceExecutionState({ state, session, agent, groupPath, questi
   state.processedFileResults = (session.fileOperationExecutionResults || []).length;
   const material = [...toolResults, ...fileResults].some(hasMaterialWorkspaceChange);
   const verificationResults = toolResults.filter(isVerificationResult);
-  const failedVerification = verificationResults.find((item) => item.status !== "completed" || item.result?.ok === false || Number(item.result?.exitCode ?? 0) !== 0);
-  const successfulVerification = verificationResults.find((item) => item.status === "completed" && item.result?.ok !== false && Number(item.result?.exitCode ?? 0) === 0);
+  const latestVerification = verificationResults.at(-1);
+  const failedVerification = latestVerification && (latestVerification.status !== "completed" || latestVerification.result?.ok === false || Number(latestVerification.result?.exitCode ?? 0) !== 0)
+    ? latestVerification
+    : undefined;
+  const successfulVerification = latestVerification && latestVerification.status === "completed" && latestVerification.result?.ok !== false && Number(latestVerification.result?.exitCode ?? 0) === 0
+    ? latestVerification
+    : undefined;
 
   if (failedVerification) {
     state.phase = "repair";
@@ -170,7 +175,7 @@ function permissionRank(value) {
 function isVerificationResult(item = {}) {
   if (item.tool === "run_tests") return true;
   if (item.tool !== "execute_command") return false;
-  return /\b(?:gradle|gradlew|mvn|mvnw|npm|pnpm|yarn|cargo|go|dotnet)\b[^\r\n]*(?:build|test|package|assemble|check)/i.test(String(item.command || item.result?.command || ""));
+  return /\b(?:gradle|gradlew|mvn|mvnw|npm|pnpm|yarn|cargo|go|dotnet)\b[^\r\n]*(?:build|test|package|assemble|check)|\bjar\s+(?:c|--create)|\bcompress-archive\b/i.test(String(item.command || item.result?.command || ""));
 }
 
 function verificationError(item = {}) {
