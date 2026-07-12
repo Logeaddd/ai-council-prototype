@@ -1655,6 +1655,22 @@ test("file tools can read explicitly imported project roots", () => {
   assert.equal(result.content.includes("IMPORTED_PROJECT_FACT"), true);
 });
 
+test("file tools explain that an external absolute path must be imported", () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-tools-workspace-"));
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-tools-unregistered-"));
+  const externalFile = path.join(project, "README.md");
+  fs.writeFileSync(externalFile, "EXTERNAL_PROJECT_FACT", "utf8");
+
+  const result = executeFileToolResult(
+    { tool: "read_file", path: externalFile, reason: "Read an external project path from user text" },
+    workspace
+  );
+
+  assert.equal(result.code, "imported_project_not_registered");
+  assert.match(result.error, /Import or drag the project folder/);
+  assert.match(result.error, /Full permission/);
+});
+
 function executeFileToolResult(request, groupPath) {
   try {
     return executeFileTool(request, { groupPath });

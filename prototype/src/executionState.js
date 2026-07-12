@@ -156,7 +156,12 @@ export function advanceExecutionState({ state, session, agent, groupPath, questi
 }
 
 export function isDeliveryTask(question) {
-  return /(build|create|implement|write|modify|fix|generate|package|compile|jar|mod\b|source|code|file|构建|生成|制作|开发|实现|编写|写入|修改|修复|打包|源码|代码|文件|模组)/i.test(String(question || ""));
+  const text = String(question || "");
+  const explicitDelivery = /\b(build|create|implement|write|modify|fix|generate|package|compile|assemble|install|delete|rename|move|commit|push)\b|\b(?:make|produce)\s+(?:a|an|the)?\s*(?:jar|mod|app|project|file|patch|package|build)\b|构建|生成|制作|开发|实现|编写|写入|修改|修复|打包|安装|删除|重命名|移动|提交|推送/i;
+  if (explicitDelivery.test(text)) return true;
+
+  const requestedArtifact = /\b(?:jar|exe|msi|apk|ipa|dmg|deb|rpm)\b[^\r\n]{0,40}\b(?:needed|required|deliver|output)\b|(?:需要|产出|交付|给我|做成)[^\r\n]{0,30}\.(?:jar|exe|msi|apk|ipa|dmg|deb|rpm)\b/i;
+  return requestedArtifact.test(text);
 }
 
 function chooseExecutor(agents, workspaceGroup) {

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { advanceExecutionState, createExecutionState, executionInstruction, selectExecutionAgents } from "../src/executionState.js";
+import { advanceExecutionState, createExecutionState, executionInstruction, isDeliveryTask, selectExecutionAgents } from "../src/executionState.js";
 
 const agents = [
   { id: "designer", name: "Designer", enabled: true },
@@ -155,4 +155,14 @@ test("Chinese project requests activate delivery execution", () => {
   const state = createExecutionState({ question: "做一个模组，写完代码后构建成 jar 包。", agents, workspaceGroup });
   assert.equal(state.active, true);
   assert.equal(state.executorId, "builder");
+});
+
+test("delivery classification ignores review nouns and path mentions", () => {
+  assert.equal(isDeliveryTask("Review this code and file: D:\\work\\MASTER_PLAN.md. Give suggestions only."), false);
+  assert.equal(isDeliveryTask("审查这个项目里的代码和文件，只给建议，不要改动。"), false);
+});
+
+test("delivery classification requires an explicit delivery action", () => {
+  assert.equal(isDeliveryTask("Fix the code and build the JAR."), true);
+  assert.equal(isDeliveryTask("请修改代码并构建 jar 包。"), true);
 });

@@ -137,6 +137,37 @@ test("file delivery work stops after the configured real model-call budget witho
   assert.match(session.finalDecision.requested_artifact_verification.requirements[0].reason, /No valid \.jar artifact/);
 });
 
+test("review-only work does not require a workspace mutation", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-review-only-"));
+  const group = validateGroupConfig({
+    id: "review-only",
+    name: "Review Only",
+    settings: {
+      maxRounds: 1,
+      minRounds: 1,
+      minConsensusWeight: 1,
+      stopWhenAllSkip: true,
+      agentTimeoutMs: 1000,
+      noProgressModelCalls: 4,
+      maxModelCalls: 8,
+      allowSoloCouncil: true
+    },
+    agents: [
+      { id: "one", name: "One", role: "Member", provider: "mock", apiBaseUrl: "mock://local", model: "mock-one", weight: 1, enabled: true }
+    ]
+  });
+
+  const { session } = await runCouncil(
+    "Review the code and files in D:\\external-project and give suggestions only. Do not edit anything.",
+    group,
+    tmp,
+    { groupPath: tmp }
+  );
+
+  assert.notEqual(session.guardStopReason, "no_workspace_progress_after_4_model_calls");
+  assert.notEqual(session.status, "guard_stopped");
+});
+
 test("every council has a hard provider-call budget even for non-delivery discussion", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-call-budget-"));
   const calls = [];

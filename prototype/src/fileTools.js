@@ -271,6 +271,13 @@ function resolveTarget(inputPath, roots, options = {}) {
 
   if (path.isAbsolute(raw)) {
     const resolved = fs.existsSync(raw) ? fs.realpathSync.native(raw) : path.resolve(raw);
+    const isAllowed = rootIndexes.some((index) => isInsidePath(roots[index], resolved));
+    if (!isAllowed) {
+      throw toolError(
+        "imported_project_not_registered",
+        "This path is outside the council workspace. Import or drag the project folder into this conversation before using its files. Full permission authorizes tools but does not silently grant access to arbitrary folders."
+      );
+    }
     for (const index of rootIndexes) {
       candidates.push({ index, root: roots[index], path: resolved });
     }
