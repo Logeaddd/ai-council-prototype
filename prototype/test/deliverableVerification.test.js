@@ -65,6 +65,89 @@ test("explicit JAR requests pass only for a current-run observed archive with ma
   assert.equal(session.finalDecision.final_state, "ready_to_execute");
 });
 
+test("requested artifact verification recognizes source data document and spreadsheet formats", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-required-general-"));
+  const files = {
+    "output/result.json": Buffer.from('{"ok":true}', "utf8"),
+    "output/tool.py": Buffer.from("print('ok')\n", "utf8"),
+    "output/report.pdf": Buffer.from("%PDF-1.7\nminimal", "ascii"),
+    "output/report.docx": makeStoredZip([
+      { name: "[Content_Types].xml", content: "<Types/>" },
+      { name: "word/document.xml", content: "<document/>" }
+    ]),
+    "output/data.xlsx": makeStoredZip([
+      { name: "[Content_Types].xml", content: "<Types/>" },
+      { name: "xl/workbook.xml", content: "<workbook/>" }
+    ])
+  };
+  for (const [relativePath, content] of Object.entries(files)) {
+    const absolute = path.join(root, relativePath);
+    fs.mkdirSync(path.dirname(absolute), { recursive: true });
+    fs.writeFileSync(absolute, content);
+  }
+  const session = {
+    finalDecision: { answer: "Created all requested files.", final_state: "ready_to_execute", blocking_issues: [], risks: [] },
+    toolExecutionResults: [{
+      id: "general-build",
+      tool: "execute_command",
+      status: "completed",
+      result: { ok: true, exitCode: 0, workspaceChanges: { created: Object.keys(files).map((file) => ({ path: file })) } }
+    }],
+    fileOperationExecutionResults: []
+  };
+
+  const report = enforceRequestedArtifactRequirements({
+    groupPath: root,
+    question: "请生成 result.json、Python脚本、PDF、Word文档和Excel表格。",
+    session
+  });
+
+  assert.equal(report.status, "verified");
+  assert.deepEqual(report.requirements.map((item) => item.extension).sort(), [".docx", ".json", ".pdf", ".py", ".xlsx"]);
+});
+
+test("requested artifact verification rejects malformed structured artifacts", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-required-malformed-"));
+  fs.writeFileSync(path.join(root, "result.json"), "not json", "utf8");
+  const session = {
+    finalDecision: { answer: "Created result.json.", final_state: "ready_to_execute", blocking_issues: [], risks: [] },
+    toolExecutionResults: [{
+      id: "bad-json",
+      tool: "workspace_edit",
+      status: "completed",
+      result: { ok: true, workspaceChanges: { created: [{ path: "result.json" }] } }
+    }],
+    fileOperationExecutionResults: []
+  };
+
+  const report = enforceRequestedArtifactRequirements({ groupPath: root, question: "生成 result.json", session });
+
+  assert.equal(report.status, "needs_revision");
+  assert.equal(report.requirements[0].status, "missing_or_invalid");
+});
+
+test("requested artifact verification accepts output in a retained user-authorized project root", () => {
+  const groupPath = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-required-group-"));
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-required-project-"));
+  fs.writeFileSync(path.join(project, "result.json"), '{"external":true}', "utf8");
+  const session = {
+    authorizedProjectRoots: [project],
+    finalDecision: { answer: "Created result.json.", final_state: "ready_to_execute", blocking_issues: [], risks: [] },
+    toolExecutionResults: [{
+      id: "external-json",
+      tool: "execute_command",
+      status: "completed",
+      result: { ok: true, workspaceChanges: { created: [{ path: "project:result.json" }] } }
+    }],
+    fileOperationExecutionResults: []
+  };
+
+  const report = enforceRequestedArtifactRequirements({ groupPath, question: "生成 result.json", session });
+
+  assert.equal(report.status, "verified");
+  assert.equal(report.requirements[0].path, "project:result.json");
+});
+
 test("normalizes structured deliverable claims", () => {
   assert.deepEqual(normalizeDeliverableClaims([
     { path: "dist/app.jar", claim: "built", evidence_ids: ["tool-build", "", 42] },

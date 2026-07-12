@@ -3,7 +3,6 @@ import { autoApprovePendingFileOperation, executeApprovedFileOperation } from ".
 import { appendFileOperationAuditLog, listPendingFileOperationProposals, updatePendingFileOperationProposal } from "./fileOperationQueue.js";
 import { capabilityEnabled } from "./capabilityPolicy.js";
 
-const DEFAULT_MAX_AUTO_FILES_PER_RUN = 3;
 const AUTO_FULL_OPS = new Set(["write", "append", "delete"]);
 
 export function runAutoFileOperations(options = {}) {
@@ -11,7 +10,7 @@ export function runAutoFileOperations(options = {}) {
   const session = options.session || {};
   const group = options.group || {};
   const finalState = session.finalDecision?.final_state;
-  const maxAutoFilesPerRun = Number(options.maxAutoFilesPerRun || group.settings?.maxAutoFilesPerRun || DEFAULT_MAX_AUTO_FILES_PER_RUN);
+  const maxAutoFilesPerRun = normalizeAutoLimit(options.maxAutoFilesPerRun ?? group.settings?.maxAutoFilesPerRun);
   const pending = listPendingFileOperationProposals(groupPath).filter((proposal) => proposal.status === "pending_user_approval");
   const selectedIds = normalizeSelectedIds(options.selectedFileOperationIds ?? session.finalDecision?.selected_file_operation_ids);
   const hasExplicitSelection = Array.isArray(selectedIds);
@@ -40,7 +39,7 @@ export function runAutoFileOperations(options = {}) {
   const selected = hasExplicitSelection
     ? selectExplicitPendingProposals(groupPath, pending, selectedIds, results)
     : selectLatestPendingProposals(groupPath, pending, results);
-  if (selected.length > maxAutoFilesPerRun) {
+  if (Number.isFinite(maxAutoFilesPerRun) && selected.length > maxAutoFilesPerRun) {
     for (const proposal of selected) {
       results.push(markSkipped(groupPath, proposal, "skipped_policy", `max_auto_files_exceeded:${selected.length}/${maxAutoFilesPerRun}`));
     }
@@ -88,6 +87,12 @@ export function runAutoFileOperations(options = {}) {
   }
 
   return attachResults(session, results);
+}
+
+function normalizeAutoLimit(value) {
+  if (value === undefined || value === null || value === "") return Number.POSITIVE_INFINITY;
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? Math.floor(number) : Number.POSITIVE_INFINITY;
 }
 
 function markPending(groupPath, proposal, status, reason) {

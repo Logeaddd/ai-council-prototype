@@ -122,7 +122,7 @@ export function Composer({
     setSending(true)
     try {
       setValue("")
-      const files = attachments.map(({ name, type, sizeBytes, content }) => ({ name, type, sizeBytes, content }))
+      const files = attachments.map(({ name, type, sizeBytes, content, localPath }) => ({ name, type, sizeBytes, content, localPath }))
       setAttachments([])
       setFileError("")
       await onSend(text, { attachments: files })
@@ -391,6 +391,7 @@ async function readLocalAttachments(files: File[], current: LocalAttachment[]) {
       type: file.type || "text/plain",
       sizeBytes: file.size,
       content,
+      localPath: getDesktopFilePath(file) || undefined,
     })
   }
   return nextFiles

@@ -6,7 +6,7 @@ import zlib from "node:zlib";
 import { execFileSync } from "node:child_process";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { executeFileTool, extractImportedProjectRoots } from "../src/fileTools.js";
+import { executeFileTool, extractImportedProjectRoots, extractUserReferencedRoots } from "../src/fileTools.js";
 import { executeToolRequests } from "../src/toolRequests.js";
 import { executeReadListFileOperations } from "../src/fileOperationReader.js";
 import { writeContextArchive, writeGroupSession } from "../src/storage.js";
@@ -896,6 +896,25 @@ test("execute_command explains bash shell failures on Windows", async (t) => {
   assert.match(result.results[0].result.environmentHint, /shell=cmd/);
 });
 
+test("execute_command can run directly in a user-authorized external project", async () => {
+  const groupPath = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-command-group-"));
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-command-project-"));
+  fs.writeFileSync(path.join(project, "project.txt"), "EXTERNAL_COMMAND_FACT", "utf8");
+
+  const result = await executeToolRequests({
+    permissionTier: "full",
+    groupPath,
+    importedProjectRoots: [project],
+    agent: { id: "full", name: "Full" },
+    round: 1,
+    requests: [{ tool: "execute_command", cwd: project, command: nodeCommand("const fs=require('fs'); console.log(fs.readFileSync('project.txt','utf8')); fs.writeFileSync('built.txt','BUILT')"), reason: "Run in the authorized project." }]
+  });
+
+  assert.equal(result.results[0].status, "completed");
+  assert.match(result.results[0].result.stdout, /EXTERNAL_COMMAND_FACT/);
+  assert.equal(result.results[0].result.workspaceChanges.created.some((item) => item.path === "project:built.txt"), true);
+});
+
 test("execute_command keeps cwd inside workspace and reports timeouts", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-command-guard-"));
   const escaped = await executeToolRequests({
@@ -1210,6 +1229,83 @@ test("install_package reports unsupported package managers honestly", async () =
 
   assert.equal(result.results[0].status, "failed");
   assert.equal(result.results[0].code, "unsupported_package_manager");
+});
+
+test("provision_tool autonomously installs verifies and reuses a managed CLI for full permission", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-provision-tool-"));
+  const installCommand = process.platform === "win32"
+    ? "$p='shared/tools/demo/bin'; New-Item -ItemType Directory -Force -Path $p | Out-Null; Set-Content -Path \"$p/demo.cmd\" -Value '@echo off`r`necho demo 1.0'"
+    : "mkdir -p shared/tools/demo/bin && printf '#!/bin/sh\\necho demo 1.0\\n' > shared/tools/demo/bin/demo && chmod +x shared/tools/demo/bin/demo";
+
+  const denied = await executeToolRequests({
+    permissionTier: "tool",
+    groupPath: tmp,
+    agent: { id: "tool", name: "Tool" },
+    round: 1,
+    requests: [{ tool: "provision_tool", toolName: "demo", commandName: "demo", installCommand, reason: "Install missing CLI." }]
+  });
+  const installed = await executeToolRequests({
+    permissionTier: "full",
+    groupPath: tmp,
+    agent: { id: "full", name: "Full" },
+    round: 1,
+    requests: [{ tool: "provision_tool", toolName: "demo", commandName: "demo", installCommand, shell: process.platform === "win32" ? "powershell" : "sh", reason: "Install missing CLI." }]
+  });
+  const reused = await executeToolRequests({
+    permissionTier: "full",
+    groupPath: tmp,
+    agent: { id: "full", name: "Full" },
+    round: 2,
+    requests: [{ tool: "provision_tool", toolName: "demo", commandName: "demo", reason: "Reuse installed CLI." }]
+  });
+
+  assert.equal(denied.rejected[0].code, "permission_denied");
+  assert.equal(installed.results[0].status, "completed");
+  assert.equal(installed.results[0].result.status, "installed");
+  assert.match(installed.results[0].result.verification.stdout, /demo 1\.0/);
+  assert.equal(reused.results[0].status, "completed");
+  assert.equal(reused.results[0].result.status, "already_available");
+});
+
+test("provision_tool downloads and extracts a real tool archive before verification", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-provision-download-"));
+  const executableName = process.platform === "win32" ? "downloaded.cmd" : "downloaded";
+  const executableContent = process.platform === "win32"
+    ? "@echo off\r\necho downloaded 2.0\r\n"
+    : "#!/bin/sh\necho downloaded 2.0\n";
+  const archive = makeZip([{ name: `bin/${executableName}`, content: executableContent }]);
+  const server = http.createServer((req, res) => {
+    res.writeHead(200, { "Content-Type": "application/zip", "Content-Length": archive.length });
+    res.end(archive);
+  });
+  await listen(server);
+  try {
+    const address = server.address();
+    const verifyCommand = process.platform === "win32"
+      ? "& downloaded --version"
+      : "chmod +x shared/tools/downloaded/bin/downloaded && shared/tools/downloaded/bin/downloaded --version";
+    const result = await executeToolRequests({
+      permissionTier: "full",
+      groupPath: tmp,
+      agent: { id: "full", name: "Full" },
+      round: 1,
+      requests: [{
+        tool: "provision_tool",
+        toolName: "downloaded",
+        commandName: "downloaded",
+        downloadUrl: `http://127.0.0.1:${address.port}/downloaded.zip`,
+        verifyCommand,
+        reason: "Download the missing CLI archive."
+      }]
+    });
+
+    assert.equal(result.results[0].status, "completed", JSON.stringify(result.results[0]));
+    assert.equal(result.results[0].result.strategy.type, "download");
+    assert.match(result.results[0].result.verification.stdout, /downloaded 2\.0/);
+    assert.equal(fs.existsSync(path.join(tmp, "shared", "tools", "downloaded", "bin", executableName)), true);
+  } finally {
+    await close(server);
+  }
 });
 
 test("run_tests executes real test commands for full permission only", async () => {
@@ -1669,6 +1765,22 @@ test("file tools explain that an external absolute path must be imported", () =>
   assert.equal(result.code, "imported_project_not_registered");
   assert.match(result.error, /Import or drag the project folder/);
   assert.match(result.error, /Full permission/);
+});
+
+test("user pasted and attachment paths authorize their real containing folders", () => {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-user-paths-"));
+  const nested = path.join(project, "docs");
+  fs.mkdirSync(nested);
+  const plan = path.join(nested, "MASTER PLAN.md");
+  fs.writeFileSync(plan, "PLAN_FACT", "utf8");
+
+  const roots = extractUserReferencedRoots({
+    text: `Please inspect [the plan](${plan}).`,
+    attachments: [{ name: "handoff.md", localPath: plan, content: `Project source:\n\`${project}\`` }]
+  });
+
+  assert.equal(roots.includes(fs.realpathSync.native(nested)), true);
+  assert.equal(roots.includes(fs.realpathSync.native(project)), true);
 });
 
 function executeFileToolResult(request, groupPath) {

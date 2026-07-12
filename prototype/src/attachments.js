@@ -23,6 +23,7 @@ export function normalizeFileAttachments(value, options = {}) {
     const name = cleanFileName(item.name || item.path || `attachment-${index + 1}`);
     const type = String(item.type || "text/plain").slice(0, 120);
     const content = String(item.content ?? "");
+    const localPath = String(item.localPath || item.local_path || "").trim();
     const contentBytes = byteLength(content);
     const declaredBytes = Number(item.sizeBytes || item.size || contentBytes);
     const sizeBytes = Math.max(contentBytes, Number.isFinite(declaredBytes) ? declaredBytes : 0);
@@ -45,7 +46,8 @@ export function normalizeFileAttachments(value, options = {}) {
       type,
       sizeBytes,
       content,
-      truncated: Boolean(item.truncated)
+      truncated: Boolean(item.truncated),
+      ...(localPath ? { localPath } : {})
     };
   });
 
@@ -60,8 +62,9 @@ export function formatFileAttachmentsForPrompt(files = []) {
       `File ${index + 1}: ${file.name}`,
       `Type: ${file.type || "text/plain"}`,
       `Size: ${file.sizeBytes} bytes`,
+      file.localPath ? `Local path: ${file.localPath}` : "",
       file.truncated ? "Status: truncated before sending" : "Status: complete text content"
-    ].join("\n");
+    ].filter(Boolean).join("\n");
     return `${header}\nContent:\n${file.content}`;
   }).join("\n\n---\n\n");
 }

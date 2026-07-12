@@ -14,7 +14,7 @@ import { computeFinalState } from "./finalState.js";
 import { parseFileOperationProposals } from "./fileOperations.js";
 import { executeReadListFileOperations } from "./fileOperationReader.js";
 import { executeToolRequests } from "./toolRequests.js";
-import { extractImportedProjectRoots } from "./fileTools.js";
+import { extractImportedProjectRoots, extractUserReferencedRoots } from "./fileTools.js";
 import { runAutoFileOperations } from "./fileOperationAutoRunner.js";
 import { enqueueFileOperationProposals } from "./fileOperationQueue.js";
 import { readPrivateContextMessages } from "./privateChat.js";
@@ -43,6 +43,8 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
   const enabledAgents = group.agents.filter((agent) => agent.enabled);
   const attachments = normalizeFileAttachments(options.attachments || []);
   const importedProjectRoots = extractImportedProjectRoots(attachments);
+  const userReferencedRoots = extractUserReferencedRoots({ text: question, attachments });
+  const authorizedProjectRoots = [...new Set([...importedProjectRoots, ...userReferencedRoots])];
   const sessionStartMs = Date.now();
   const sessionStartedAt = nowIso();
   const workMode = normalizeWorkMode(group.settings?.workMode);
@@ -101,6 +103,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
     startedAt: sessionStartedAt,
     continuationContext,
     groupId: group.id,
+    authorizedProjectRoots,
     groupSnapshot: redactGroupForSession(group),
     status: "running",
     activeAgentIds: firstRoundAgents.map((agent) => agent.id),
@@ -307,7 +310,9 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
           baseDir,
           timeoutMs: group.settings.toolTimeoutMs || 12000,
           groupPath: options.groupPath,
-          importedProjectRoots,
+          importedProjectRoots: fileOperationPermissionTier === "full"
+            ? authorizedProjectRoots
+            : importedProjectRoots,
           appSettings: options.appSettings,
           searchApiKey: options.searchApiKey,
           maxReadBytes: group.settings.maxToolReadBytes,
@@ -1377,6 +1382,10 @@ function buildToolFollowupInstruction(results = [], rejected = []) {
   if (failedCommands.length) {
     lines.push(`Failed command attempts this round: ${failedCommands.length}. Do not repeat an identical failed command. Read its stdout, stderr, exit code, timeout state, and environment hint before choosing a materially different next action.`);
   }
+  const missingCommands = missingCommandNames(failedCommands);
+  if (missingCommands.length) {
+    lines.push(`Missing executable detected: ${missingCommands.join(", ")}. Do not stop or return to planning. Request provision_tool now for the missing runtime or CLI, verify it, then retry the original command in this same execution task.`);
+  }
   const repeatedFamilies = repeatedFailedCommandFamilies(failedCommands);
   if (repeatedFamilies.length) {
     lines.push(`Repeated failed command strategies: ${repeatedFamilies.join(", ")}. Stop retrying that strategy for now; inspect existing files, detected runtimes, and generated artifacts before another install or download attempt.`);
@@ -1440,6 +1449,33 @@ function buildToolFollowupInstruction(results = [], rejected = []) {
     lines.push("Some tool requests were rejected. Read the rejected tool request reasons in context before choosing the next step.");
   }
   return lines.join("\n");
+}
+
+function missingCommandNames(items = []) {
+  const names = [];
+  for (const item of items) {
+    const output = [item.error, item.result?.error, item.result?.stderr, item.result?.stdout].filter(Boolean).join("\n");
+    const patterns = [
+      /['"]?([A-Za-z0-9._-]+)['"]?\s+is not recognized as an internal or external command/i,
+      /(?:command not found|not found):?\s*([A-Za-z0-9._-]+)?/i,
+      /([A-Za-z0-9._-]+):\s*(?:command not found|not found)/i,
+      /The term ['"]([^'"]+)['"] is not recognized/i
+    ];
+    let found = "";
+    for (const pattern of patterns) {
+      const match = output.match(pattern);
+      if (match?.[1]) {
+        found = match[1];
+        break;
+      }
+    }
+    if (!found) {
+      const command = String(item.command || item.result?.command || "").trim().match(/^['"]?([A-Za-z0-9._-]+)/)?.[1];
+      if (command && /not recognized|command not found|cannot find|ENOENT/i.test(output)) found = command;
+    }
+    if (found) names.push(found);
+  }
+  return [...new Set(names)].slice(0, 5);
 }
 
 function repeatedFailedCommandFamilies(items = []) {

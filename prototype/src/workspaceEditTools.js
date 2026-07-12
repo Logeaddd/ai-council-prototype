@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { validateFileOperationPath } from "./fileSandbox.js";
+import { isInsidePath } from "./pathGuards.js";
 
 const MAX_CONTENT_BYTES = 256 * 1024;
 
@@ -8,16 +9,16 @@ export function executeWorkspaceEdit(request = {}, options = {}) {
   const action = String(request.action || "").toLowerCase();
   const groupPath = options.groupPath;
   if (!groupPath) throw toolError("missing_workspace", "workspace_edit requires a group workspace.");
-  if (action === "mkdir") return makeDirectory(groupPath, request);
-  if (action === "write") return writeFile(groupPath, request, false);
-  if (action === "append") return writeFile(groupPath, request, true);
-  if (action === "replace") return replaceText(groupPath, request);
-  if (action === "move") return movePath(groupPath, request);
+  if (action === "mkdir") return makeDirectory(groupPath, request, options);
+  if (action === "write") return writeFile(groupPath, request, false, options);
+  if (action === "append") return writeFile(groupPath, request, true, options);
+  if (action === "replace") return replaceText(groupPath, request, options);
+  if (action === "move") return movePath(groupPath, request, options);
   throw toolError("unsupported_workspace_edit", "workspace_edit action must be mkdir, write, append, replace, or move.");
 }
 
-function makeDirectory(groupPath, request) {
-  const target = validateFileOperationPath(groupPath, request.path);
+function makeDirectory(groupPath, request, options) {
+  const target = resolveEditTarget(groupPath, request.path, request.root, options);
   const existed = fs.existsSync(target.path);
   fs.mkdirSync(target.path, { recursive: true });
   return editResult(actionRecord(request, target.relativePath), {
@@ -25,8 +26,8 @@ function makeDirectory(groupPath, request) {
   });
 }
 
-function writeFile(groupPath, request, append) {
-  const target = validateFileOperationPath(groupPath, request.path);
+function writeFile(groupPath, request, append, options) {
+  const target = resolveEditTarget(groupPath, request.path, request.root, options);
   const content = boundedContent(request.code, append ? "append content" : "write content");
   const existed = fs.existsSync(target.path);
   if (existed && !fs.statSync(target.path).isFile()) throw toolError("not_a_file", "workspace_edit target is not a file.");
@@ -43,8 +44,8 @@ function writeFile(groupPath, request, append) {
   });
 }
 
-function replaceText(groupPath, request) {
-  const target = validateFileOperationPath(groupPath, request.path);
+function replaceText(groupPath, request, options) {
+  const target = resolveEditTarget(groupPath, request.path, request.root, options);
   if (!fs.existsSync(target.path) || !fs.statSync(target.path).isFile()) throw toolError("file_not_found", "workspace_edit replace target was not found.");
   const oldText = boundedContent(request.oldText, "oldText");
   const newText = boundedContent(request.newText, "newText", { allowEmpty: true });
@@ -64,9 +65,9 @@ function replaceText(groupPath, request) {
   });
 }
 
-function movePath(groupPath, request) {
-  const source = validateFileOperationPath(groupPath, request.path);
-  const destination = validateFileOperationPath(groupPath, request.destination);
+function movePath(groupPath, request, options) {
+  const source = resolveEditTarget(groupPath, request.path, request.root, options);
+  const destination = resolveEditTarget(groupPath, request.destination, request.destinationRoot || request.root, options);
   if (!fs.existsSync(source.path)) throw toolError("source_not_found", "workspace_edit move source was not found.");
   if (fs.existsSync(destination.path)) throw toolError("destination_exists", "workspace_edit move destination already exists.");
   fs.mkdirSync(path.dirname(destination.path), { recursive: true });
@@ -76,6 +77,45 @@ function movePath(groupPath, request) {
     deleted: [{ path: source.relativePath, type: "moved" }],
     destination: destination.relativePath
   });
+}
+
+function resolveEditTarget(groupPath, inputPath, rootHint, options = {}) {
+  const raw = String(inputPath || "").trim();
+  if (!raw) throw toolError("missing_path", "workspace_edit requires path.");
+  const groupRoot = fs.realpathSync.native(groupPath);
+  const importedRoots = (options.importedProjectRoots || [])
+    .map((root) => safeRealDirectory(root))
+    .filter(Boolean);
+  const hint = String(rootHint || "").trim().toLowerCase();
+  const useImported = hint === "project" || hint === "imported" || path.isAbsolute(raw);
+  if (!useImported) return validateFileOperationPath(groupRoot, raw);
+
+  const roots = hint === "project" || hint === "imported"
+    ? importedRoots
+    : hint === "workspace" || hint === "group"
+      ? [groupRoot]
+      : [groupRoot, ...importedRoots];
+  const absolute = path.isAbsolute(raw) ? path.resolve(raw) : null;
+  for (let index = 0; index < roots.length; index += 1) {
+    const root = roots[index];
+    const candidate = absolute || path.resolve(root, raw);
+    if (!isInsidePath(root, candidate)) continue;
+    if (root === groupRoot) return validateFileOperationPath(groupRoot, path.relative(groupRoot, candidate));
+    return {
+      path: candidate,
+      relativePath: `project:${path.relative(root, candidate).replaceAll("\\", "/") || "."}`
+    };
+  }
+  throw toolError("path_escape_denied", "workspace_edit path must stay inside the group workspace or a user-authorized project root.");
+}
+
+function safeRealDirectory(value) {
+  try {
+    if (!value || !fs.existsSync(value) || !fs.statSync(value).isDirectory()) return "";
+    return fs.realpathSync.native(value);
+  } catch {
+    return "";
+  }
 }
 
 function actionRecord(request, relativePath) {

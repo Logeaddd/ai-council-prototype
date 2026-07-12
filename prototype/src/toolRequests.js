@@ -6,6 +6,7 @@ import { executeCommandTool } from "./commandTools.js";
 import { processControlTool } from "./processTools.js";
 import { runCodeTool } from "./codeRunTools.js";
 import { installPackageTool } from "./packageTools.js";
+import { provisionTool } from "./toolProvisioning.js";
 import { runTestsTool } from "./testRunTools.js";
 import { apiRequestTool } from "./apiTools.js";
 import { gitOperationTool } from "./gitTools.js";
@@ -56,6 +57,7 @@ const ALLOWED_TOOLS = new Set([
   "process_control",
   "run_code",
   "install_package",
+  "provision_tool",
   "run_tests",
   "api_request",
   "git_operation",
@@ -86,6 +88,7 @@ const COMMAND_TOOLS = new Set(["execute_command"]);
 const PROCESS_TOOLS = new Set(["process_control"]);
 const CODE_TOOLS = new Set(["run_code"]);
 const PACKAGE_TOOLS = new Set(["install_package"]);
+const PROVISION_TOOLS = new Set(["provision_tool"]);
 const TEST_TOOLS = new Set(["run_tests"]);
 const API_TOOLS = new Set(["api_request"]);
 const GIT_TOOLS = new Set(["git_operation"]);
@@ -93,7 +96,7 @@ const BROWSER_TOOLS = new Set(["browser_control"]);
 const DATABASE_TOOLS = new Set(["database_query"]);
 const MCP_TOOLS = new Set(["mcp_list_tools", "mcp_call", "mcp_list_resources", "mcp_read_resource", "mcp_list_prompts", "mcp_get_prompt", "mcp_search_npm", "mcp_install_npm", "mcp_uninstall"]);
 const SKILL_TOOLS = new Set(["skill_read", "skill_list", "skill_search", "skill_install", "skill_enable", "skill_disable", "skill_remove"]);
-const FULL_PERMISSION_TOOLS = new Set(["extract_archive", "workspace_edit", "execute_command", "process_control", "run_code", "install_package", "run_tests", "git_operation", "browser_control", "mcp_list_tools", "mcp_call", "mcp_list_resources", "mcp_read_resource", "mcp_list_prompts", "mcp_get_prompt", "mcp_search_npm", "mcp_install_npm", "mcp_uninstall", "skill_list", "skill_search", "skill_install", "skill_enable", "skill_disable", "skill_remove"]);
+const FULL_PERMISSION_TOOLS = new Set(["extract_archive", "workspace_edit", "execute_command", "process_control", "run_code", "install_package", "provision_tool", "run_tests", "git_operation", "browser_control", "mcp_list_tools", "mcp_call", "mcp_list_resources", "mcp_read_resource", "mcp_list_prompts", "mcp_get_prompt", "mcp_search_npm", "mcp_install_npm", "mcp_uninstall", "skill_list", "skill_search", "skill_install", "skill_enable", "skill_disable", "skill_remove"]);
 
 export function normalizeToolRequests(value) {
   if (!Array.isArray(value)) return [];
@@ -365,7 +368,7 @@ async function executeOne(request, options) {
       return resultRecord(request, { status: "completed", result });
     }
     if (WORKSPACE_EDIT_TOOLS.has(request.tool)) {
-      const result = executeWorkspaceEdit(request, { groupPath: options.groupPath });
+      const result = executeWorkspaceEdit(request, { groupPath: options.groupPath, importedProjectRoots: options.importedProjectRoots });
       return resultRecord(request, { status: "completed", result });
     }
     if (request.tool === "fetch_url") {
@@ -527,6 +530,7 @@ async function executeOne(request, options) {
         maxWorkspaceSnapshotEntries: options.maxWorkspaceSnapshotEntries,
         maxWorkspaceChanges: options.maxWorkspaceChanges,
         managedToolRoots: options.managedToolRoots,
+        importedProjectRoots: options.importedProjectRoots,
         signal: options.signal
       });
       return resultRecord(request, {
@@ -572,6 +576,24 @@ async function executeOne(request, options) {
         status: result.ok ? "completed" : "failed",
         code: result.code,
         error: result.error,
+        result
+      });
+    }
+    if (request.tool === "provision_tool") {
+      const result = await provisionTool(request, {
+        groupPath: options.groupPath,
+        timeoutMs: options.timeoutMs,
+        toolProvisionTimeoutMs: options.toolProvisionTimeoutMs,
+        maxToolProvisionOutputBytes: options.maxToolProvisionOutputBytes,
+        maxWorkspaceSnapshotEntries: options.maxWorkspaceSnapshotEntries,
+        maxWorkspaceChanges: options.maxWorkspaceChanges,
+        managedToolRoots: options.managedToolRoots,
+        signal: options.signal
+      });
+      return resultRecord(request, {
+        status: result.ok ? "completed" : "failed",
+        code: result.install?.code || result.verification?.code,
+        error: result.install?.error || result.verification?.error,
         result
       });
     }
@@ -799,6 +821,14 @@ function normalizeToolRequest(item, index) {
     language: stringField(item.language || item.lang),
     packageName: stringField(item.packageName || item.package || item.package_name || item.name),
     manager: stringField(item.manager || item.packageManager || item.package_manager || item.ecosystem),
+    toolName: stringField(item.toolName || item.tool_name || item.name || item.query),
+    commandName: stringField(item.commandName || item.command_name || item.executable),
+    packageId: stringField(item.packageId || item.package_id),
+    installCommand: stringField(item.installCommand || item.install_command),
+    downloadUrl: stringField(item.downloadUrl || item.download_url),
+    executablePath: stringField(item.executablePath || item.executable_path),
+    verifyCommand: stringField(item.verifyCommand || item.verify_command),
+    fileName: stringField(item.fileName || item.file_name),
     runner: stringField(item.runner || item.framework || item.testRunner || item.test_runner),
     cwd: stringField(item.cwd || item.workingDirectory || item.working_directory),
     shell: stringField(item.shell),
@@ -883,6 +913,14 @@ function reject(request, code, reason) {
     language: request.language,
     packageName: safePackageForStorage(request.packageName),
     manager: request.manager,
+    toolName: request.toolName,
+    commandName: request.commandName,
+    packageId: request.packageId,
+    installCommand: safeCommandForStorage(request.installCommand),
+    downloadUrl: safeUrlForEvent(request.downloadUrl),
+    executablePath: request.executablePath,
+    verifyCommand: safeCommandForStorage(request.verifyCommand),
+    fileName: request.fileName,
     runner: request.runner,
     cwd: request.cwd,
     shell: request.shell,
@@ -969,6 +1007,14 @@ function resultRecord(request, extra) {
     language: request.language,
     packageName: safePackageForStorage(request.packageName),
     manager: request.manager,
+    toolName: request.toolName,
+    commandName: request.commandName,
+    packageId: request.packageId,
+    installCommand: safeCommandForStorage(request.installCommand),
+    downloadUrl: safeUrlForEvent(request.downloadUrl),
+    executablePath: request.executablePath,
+    verifyCommand: safeCommandForStorage(request.verifyCommand),
+    fileName: request.fileName,
     runner: request.runner,
     cwd: request.cwd,
     shell: request.shell,

@@ -96,3 +96,16 @@ test("workspace_edit enforces the 256KB per-chunk limit", () => {
     (error) => error.code === "content_too_large"
   );
 });
+
+test("workspace_edit can change a user-authorized external project root", () => {
+  const groupPath = workspace();
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-external-edit-"));
+
+  const result = executeWorkspaceEdit(
+    { action: "write", root: "project", path: "src/main.js", code: "export const external = true;\n" },
+    { groupPath, importedProjectRoots: [project] }
+  );
+
+  assert.equal(fs.readFileSync(path.join(project, "src", "main.js"), "utf8"), "export const external = true;\n");
+  assert.equal(result.workspaceChanges.created[0].path, "project:src/main.js");
+});

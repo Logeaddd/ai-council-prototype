@@ -206,6 +206,25 @@ test("auto runner blocks batches above distinct path limit", () => {
   assert.equal(fs.existsSync(path.join(group.groupPath, "src", "a.js")), false);
 });
 
+test("full permission has no implicit per-run approval batch limit", () => {
+  const group = createReadyGitGroup({ defaultTier: "full" });
+  for (const name of ["a", "b", "c", "d", "e"]) {
+    queueProposal(group.groupPath, {
+      op: "write",
+      path: `src/${name}.js`,
+      content: `export const ${name} = true;\n`,
+      reason: `Create ${name}.`,
+      expected_effect: "File exists."
+    }, "executor");
+  }
+
+  const result = runAutoFileOperations({ groupPath: group.groupPath, session: baseSession(), group });
+
+  assert.equal(result.state, "executed");
+  assert.equal(result.results.filter((item) => item.status === "executed").length, 5);
+  assert.equal(fs.existsSync(path.join(group.groupPath, "src", "e.js")), true);
+});
+
 test("auto runner requires full effective seat permission", () => {
   const group = createReadyGitGroup({ defaultTier: "text", seatTiers: { executor: "full", reviewer: "tool" } });
   queueProposal(group.groupPath, {

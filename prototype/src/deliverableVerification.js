@@ -22,7 +22,13 @@ const INSPECTION_TOOL_NAMES = new Set([
 const FORBIDDEN_SEGMENTS = new Set([".git", ".hg", ".svn", ".idea", ".vscode", "node_modules"]);
 const INTERNAL_ROOT_SEGMENTS = new Set(["members", "sessions", "approvals"]);
 const FORBIDDEN_BASENAMES = new Set([".env", ".npmrc", ".pypirc", "credentials", "credentials.json"]);
-const DELIVERABLE_EXTENSIONS = new Set([".exe", ".msi", ".jar", ".zip", ".tar", ".gz", ".tgz", ".7z", ".rar", ".whl", ".deb", ".rpm", ".dmg", ".appimage", ".apk", ".aab", ".ipa", ".dll", ".so", ".dylib", ".wasm", ".pdf", ".docx", ".pptx", ".xlsx"]);
+const DELIVERABLE_EXTENSIONS = new Set([
+  ".exe", ".msi", ".jar", ".zip", ".tar", ".gz", ".tgz", ".7z", ".rar", ".whl", ".deb", ".rpm", ".dmg", ".appimage", ".apk", ".aab", ".ipa", ".dll", ".so", ".dylib", ".wasm",
+  ".pdf", ".docx", ".pptx", ".xlsx", ".odt", ".ods", ".odp",
+  ".json", ".jsonl", ".txt", ".md", ".csv", ".tsv", ".html", ".xml", ".yaml", ".yml", ".toml", ".sql",
+  ".py", ".js", ".jsx", ".ts", ".tsx", ".java", ".kt", ".c", ".cpp", ".h", ".cs", ".go", ".rs", ".rb", ".php", ".sh", ".ps1",
+  ".svg", ".png", ".jpg", ".jpeg", ".webp", ".gif", ".wav", ".mp3", ".mp4", ".webm"
+]);
 const EVIDENCE_TIME_TOLERANCE_MS = 5000;
 
 export function normalizeDeliverableClaims(value) {
@@ -41,6 +47,7 @@ export function normalizeDeliverableClaims(value) {
 export function verifyFinalDeliverables(options = {}) {
   const groupPath = path.resolve(options.groupPath || "");
   const session = options.session || {};
+  const projectRoots = authorizedProjectRoots(session);
   const structured = normalizeDeliverableClaims(session.finalDecision?.deliverables);
   const claims = mergeDeliverableClaims(structured, extractDeliverableClaims(session.finalDecision?.answer));
   if (!claims.length) {
@@ -57,6 +64,7 @@ export function verifyFinalDeliverables(options = {}) {
     claim,
     index,
     groupPath,
+    projectRoots,
     evidence
   }));
   return {
@@ -123,7 +131,7 @@ export function verifyRequestedArtifactProgress(options = {}) {
   if (!requested.length) return { status: "not_requested", source: "explicit_user_artifact_requirement", verifiedAt: nowIso(), requirements: [] };
   const groupPath = path.resolve(options.groupPath || "");
   const evidence = collectSessionEvidence(options.session || {});
-  const requirements = requested.map((extension) => verifyRequestedArtifact(extension, groupPath, evidence));
+  const requirements = requested.map((extension) => verifyRequestedArtifact(extension, groupPath, evidence, authorizedProjectRoots(options.session)));
   return {
     status: requirements.every((item) => item.status === "verified") ? "verified" : "needs_revision",
     source: "explicit_user_artifact_requirement",
@@ -134,13 +142,31 @@ export function verifyRequestedArtifactProgress(options = {}) {
 
 function requestedArtifactExtensions(question) {
   const text = String(question || "");
-  const requested = [];
-  if (/(?:\.jar\b|\bjar\b|jar\s*包)/i.test(text)) requested.push(".jar");
-  if (/(?:\.exe\b|\bexe\b|exe\s*(?:文件|版本|安装包))/i.test(text)) requested.push(".exe");
+  const requested = [...text.matchAll(/(^|[^A-Za-z0-9])((?:\.[A-Za-z0-9][A-Za-z0-9._-]{0,15}))/g)]
+    .map((match) => match[2].toLowerCase())
+    .filter((extension) => DELIVERABLE_EXTENSIONS.has(extension));
+  const formats = [
+    [".jar", /\bjar\b|模组包|模組包/i],
+    [".exe", /\bexe\b|可执行文件|可執行檔|安装程序|安裝程式/i],
+    [".pdf", /\bpdf\b/i],
+    [".docx", /\bdocx\b|\bword(?: document)?\b|Word文档|Word文件/i],
+    [".xlsx", /\bxlsx\b|\bexcel(?: workbook| spreadsheet)?\b|Excel表格|电子表格|試算表/i],
+    [".pptx", /\bpptx\b|\bpowerpoint\b|PPT文件|演示文稿|簡報/i],
+    [".json", /\bjson\b/i],
+    [".csv", /\bcsv\b/i],
+    [".txt", /\btxt\b|纯文本文件|純文字檔/i],
+    [".zip", /\bzip\b|压缩包|壓縮檔/i],
+    [".py", /\bpython (?:file|script|program)\b|Python脚本|Python程序/i],
+    [".java", /\bjava (?:file|source|program)\b|Java源码|Java程序/i],
+    [".html", /\bhtml\b|网页文件|網頁檔/i]
+  ];
+  for (const [extension, pattern] of formats) {
+    if (pattern.test(text)) requested.push(extension);
+  }
   return [...new Set(requested)];
 }
 
-function verifyRequestedArtifact(extension, groupPath, evidence) {
+function verifyRequestedArtifact(extension, groupPath, evidence, projectRoots = []) {
   const candidates = evidence
     .filter((item) => item.kind === "tool")
     .flatMap((item) => workspaceArtifactPaths(item.item).map((relativePath) => ({ relativePath, evidenceId: item.id })))
@@ -148,20 +174,12 @@ function verifyRequestedArtifact(extension, groupPath, evidence) {
   for (const candidate of candidates) {
     let absolutePath;
     try {
-      absolutePath = resolveDeliverablePath(groupPath, candidate.relativePath).absolutePath;
+      absolutePath = resolveDeliverablePath(groupPath, candidate.relativePath, projectRoots).absolutePath;
     } catch {
       continue;
     }
     if (!fs.existsSync(absolutePath) || !fs.statSync(absolutePath).isFile() || fs.statSync(absolutePath).size <= 0) continue;
-    if (extension === ".jar") {
-      try {
-        const archive = inspectZipArchive(absolutePath);
-        const names = archive.entries.map((entry) => entry.name.toLowerCase());
-        if (!names.includes("meta-inf/manifest.mf") || !names.some((name) => name.endsWith(".class"))) continue;
-      } catch {
-        continue;
-      }
-    }
+    if (!validArtifactFormat(extension, absolutePath)) continue;
     return {
       extension,
       status: "verified",
@@ -174,6 +192,45 @@ function verifyRequestedArtifact(extension, groupPath, evidence) {
     status: "missing_or_invalid",
     reason: `No valid ${extension} artifact was produced and observed by a successful command in this run.`
   };
+}
+
+function validArtifactFormat(extension, absolutePath) {
+  try {
+    if (extension === ".jar") {
+      const names = inspectZipArchive(absolutePath).entries.map((entry) => entry.name.toLowerCase());
+      return names.includes("meta-inf/manifest.mf") && names.some((name) => name.endsWith(".class"));
+    }
+    if ([".docx", ".xlsx", ".pptx"].includes(extension)) {
+      const names = inspectZipArchive(absolutePath).entries.map((entry) => entry.name.toLowerCase());
+      const required = extension === ".docx" ? "word/document.xml" : extension === ".xlsx" ? "xl/workbook.xml" : "ppt/presentation.xml";
+      return names.includes("[content_types].xml") && names.includes(required);
+    }
+    const head = readHead(absolutePath, 16);
+    if (extension === ".pdf") return head.toString("ascii", 0, 5) === "%PDF-";
+    if (extension === ".png") return head.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+    if ([".jpg", ".jpeg"].includes(extension)) return head[0] === 0xff && head[1] === 0xd8;
+    if (extension === ".gif") return ["GIF87a", "GIF89a"].includes(head.toString("ascii", 0, 6));
+    if (extension === ".webp") return head.toString("ascii", 0, 4) === "RIFF" && head.toString("ascii", 8, 12) === "WEBP";
+    if ([".json", ".jsonl"].includes(extension)) {
+      const content = fs.readFileSync(absolutePath, "utf8");
+      if (extension === ".json") JSON.parse(content);
+      else content.split(/\r?\n/).filter(Boolean).forEach((line) => JSON.parse(line));
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function readHead(filePath, bytes) {
+  const fd = fs.openSync(filePath, "r");
+  try {
+    const buffer = Buffer.alloc(bytes);
+    const read = fs.readSync(fd, buffer, 0, bytes, 0);
+    return buffer.subarray(0, read);
+  } finally {
+    fs.closeSync(fd);
+  }
 }
 
 function workspaceArtifactPaths(record = {}) {
@@ -207,7 +264,7 @@ function extractDeliverableClaims(answer) {
   return claims.slice(0, 20);
 }
 
-function verifyClaim({ claim, index, groupPath, evidence }) {
+function verifyClaim({ claim, index, groupPath, projectRoots = [], evidence }) {
   const base = {
     id: `deliverable-${index + 1}`,
     path: claim.path,
@@ -216,7 +273,7 @@ function verifyClaim({ claim, index, groupPath, evidence }) {
   };
   let resolved;
   try {
-    resolved = resolveDeliverablePath(groupPath, claim.path);
+    resolved = resolveDeliverablePath(groupPath, claim.path, projectRoots);
   } catch (error) {
     return { ...base, status: "invalid_path", reason: error.message };
   }
@@ -413,13 +470,34 @@ function modifiedDuringEvidenceWindow(stat, item) {
   return stat.mtimeMs >= start && stat.mtimeMs <= end;
 }
 
-function resolveDeliverablePath(groupPath, value) {
+function resolveDeliverablePath(groupPath, value, projectRoots = []) {
+  const raw = String(value || "").trim();
+  if (raw.toLowerCase().startsWith("project:")) {
+    const relative = raw.slice("project:".length).replace(/^[/\\]+/, "");
+    for (const root of projectRoots) {
+      try {
+        const realRoot = fs.realpathSync.native(root);
+        const candidate = path.resolve(realRoot, relative);
+        if (!isInsidePath(realRoot, candidate)) continue;
+        if (!fs.existsSync(candidate)) continue;
+        assertSafeDeliverablePath(relative.replaceAll("\\", "/"));
+        return { absolutePath: candidate, relativePath: `project:${relative.replaceAll("\\", "/")}` };
+      } catch {}
+    }
+    throw new Error("Deliverable project path is outside retained user-authorized roots or does not exist.");
+  }
   const alias = normalizeWorkspacePathAlias(value, { name: "deliverable path" });
   if (!alias.aliased && path.isAbsolute(alias.path)) throw new Error("Deliverable path must be relative to the group workspace.");
   const absolutePath = resolveInside(groupPath, alias.path, { name: "deliverable path" });
   const relativePath = path.relative(groupPath, absolutePath).replaceAll("\\", "/") || ".";
   assertSafeDeliverablePath(relativePath);
   return { absolutePath, relativePath };
+}
+
+function authorizedProjectRoots(session = {}) {
+  return [...new Set((Array.isArray(session.authorizedProjectRoots) ? session.authorizedProjectRoots : [])
+    .map((root) => String(root || "").trim())
+    .filter((root) => root && fs.existsSync(root) && fs.statSync(root).isDirectory()))];
 }
 
 function assertSafeDeliverablePath(relativePath) {

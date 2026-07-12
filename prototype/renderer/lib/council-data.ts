@@ -119,6 +119,7 @@ export interface FileAttachment {
   sizeBytes: number
   content: string
   truncated?: boolean
+  localPath?: string
 }
 
 export interface ProviderPreset {

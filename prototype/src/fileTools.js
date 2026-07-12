@@ -81,6 +81,65 @@ export function extractImportedProjectRoots(attachments = []) {
   return [...new Set(roots.map((root) => safeRealpath(root)).filter(Boolean))];
 }
 
+export function extractUserReferencedRoots({ text = "", attachments = [] } = {}) {
+  const sources = [String(text || "")];
+  for (const attachment of Array.isArray(attachments) ? attachments : []) {
+    if (attachment?.localPath) sources.push(String(attachment.localPath));
+    if (typeof attachment?.content === "string") sources.push(attachment.content);
+  }
+  const roots = [];
+  for (const source of sources) {
+    for (const candidate of extractAbsolutePathCandidates(source)) {
+      const existing = existingLocalPath(candidate);
+      if (!existing) continue;
+      try {
+        const stat = fs.statSync(existing);
+        roots.push(stat.isDirectory() ? existing : path.dirname(existing));
+      } catch {}
+    }
+  }
+  return [...new Set(roots.map((root) => safeRealpath(root)).filter(Boolean))];
+}
+
+function extractAbsolutePathCandidates(value) {
+  const text = String(value || "");
+  const candidates = [];
+  const patterns = [
+    /\]\(([A-Za-z]:[\\/][^)\r\n]+)\)/g,
+    /`([^`\r\n]*[A-Za-z]:[\\/][^`\r\n]+)`/g,
+    /["']([A-Za-z]:[\\/][^"'\r\n]+)["']/g,
+    /(?:^|\r?\n)\s*([A-Za-z]:[\\/][^\r\n]+?)\s*(?=\r?\n|$)/g,
+    /(?:^|\s)([A-Za-z]:[\\/][^\s<>{}|"'`]+)(?=\s|$)/g
+  ];
+  for (const pattern of patterns) {
+    for (const match of text.matchAll(pattern)) {
+      const candidate = cleanAbsolutePathCandidate(match[1]);
+      if (candidate) candidates.push(candidate);
+    }
+  }
+  return [...new Set(candidates)];
+}
+
+function cleanAbsolutePathCandidate(value) {
+  let candidate = String(value || "").trim();
+  try {
+    candidate = decodeURIComponent(candidate.replace(/^file:\/\//i, ""));
+  } catch {}
+  candidate = candidate.replace(/[),.;，。；：！？]+$/u, "").trim();
+  return path.isAbsolute(candidate) ? candidate : "";
+}
+
+function existingLocalPath(value) {
+  let candidate = String(value || "").trim();
+  while (candidate && path.isAbsolute(candidate)) {
+    if (fs.existsSync(candidate)) return fs.realpathSync.native(candidate);
+    const trimmed = candidate.replace(/[\s),.;，。；：！？]+$/u, "").trim();
+    if (trimmed === candidate) break;
+    candidate = trimmed;
+  }
+  return "";
+}
+
 function listDirectory(request, roots, options) {
   const target = resolveTarget(request.path || ".", roots, { rootHint: request.root });
   const stat = fs.statSync(target.path);

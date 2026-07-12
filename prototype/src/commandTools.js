@@ -14,13 +14,14 @@ const MAX_OUTPUT_BYTES = 1024 * 1024;
 
 export async function executeCommandTool(request, options = {}) {
   const groupRoot = resolveGroupRoot(options.groupPath);
-  const cwd = resolveCommandCwd(groupRoot, request.cwd || request.path || ".");
+  const cwd = resolveCommandCwd(groupRoot, request.cwd || request.path || ".", options.importedProjectRoots);
   const command = requiredText(request.command || request.query, "command");
   const shell = normalizeShell(request.shell);
   const timeoutMs = clampNumber(request.timeoutMs || options.commandTimeoutMs || options.timeoutMs, DEFAULT_TIMEOUT_MS, MIN_TIMEOUT_MS, MAX_TIMEOUT_MS);
   const maxOutputBytes = clampNumber(request.maxOutputBytes || options.maxCommandOutputBytes, DEFAULT_MAX_OUTPUT_BYTES, 1024, MAX_OUTPUT_BYTES);
   const invocation = buildShellInvocation(command, shell);
   const runtime = buildCommandEnvironment(groupRoot, { managedToolRoots: options.managedToolRoots });
+  const changeRoot = commandChangeRoot(groupRoot, cwd, options.importedProjectRoots);
   const workspaceSnapshotOptions = {
     maxEntries: options.maxWorkspaceSnapshotEntries,
     maxChanges: options.maxWorkspaceChanges
@@ -42,12 +43,13 @@ export async function executeCommandTool(request, options = {}) {
     });
   }
 
-  const workspaceSnapshotBefore = captureWorkspaceSnapshot(groupRoot, workspaceSnapshotOptions);
+  const workspaceSnapshotBefore = captureWorkspaceSnapshot(changeRoot.path, workspaceSnapshotOptions);
 
   return runForegroundCommand({
     invocation,
     cwd,
     groupRoot,
+    changeRoot,
     command,
     shell,
     timeoutMs,
@@ -97,7 +99,7 @@ function runForegroundCommand(options) {
       try {
         workspaceChanges = diffWorkspaceSnapshots(
           options.workspaceSnapshotBefore,
-          captureWorkspaceSnapshot(options.groupRoot, options.workspaceSnapshotOptions),
+          captureWorkspaceSnapshot(options.changeRoot.path, options.workspaceSnapshotOptions),
           options.workspaceSnapshotOptions
         );
       } catch (error) {
@@ -114,7 +116,7 @@ function runForegroundCommand(options) {
           reason: error.message || "Workspace change scan failed."
         };
       }
-      resolve(commandResult(options, { ...payload, finishedAtMs, workspaceChanges }));
+      resolve(commandResult(options, { ...payload, finishedAtMs, workspaceChanges: labelWorkspaceChanges(workspaceChanges, options.changeRoot.label) }));
     };
 
     child.stdout.on("data", (chunk) => stdout.add(chunk));
@@ -300,19 +302,53 @@ function resolveGroupRoot(groupPath) {
   return real;
 }
 
-function resolveCommandCwd(groupRoot, input) {
+function resolveCommandCwd(groupRoot, input, importedProjectRoots = []) {
   const literal = resolveExistingRelativeLiteral(groupRoot, input || ".");
   if (literal) return literal;
   const alias = normalizeWorkspacePathAlias(input || ".");
   const raw = alias.path || ".";
   const candidate = !alias.aliased && path.isAbsolute(raw) ? path.resolve(raw) : path.resolve(groupRoot, raw);
   const real = fs.existsSync(candidate) ? fs.realpathSync.native(candidate) : candidate;
-  if (!isInsidePath(groupRoot, real)) {
-    throw toolError("path_escape_denied", "Command cwd must stay inside the group workspace.");
+  const allowedRoots = [groupRoot, ...importedProjectRoots.map(safeRealDirectory).filter(Boolean)];
+  if (!allowedRoots.some((root) => isInsidePath(root, real))) {
+    throw toolError("path_escape_denied", "Command cwd must stay inside the group workspace or a user-authorized project root.");
   }
   if (!fs.existsSync(real)) throw toolError("cwd_not_found", "Command cwd does not exist.");
   if (!fs.statSync(real).isDirectory()) throw toolError("cwd_not_directory", "Command cwd is not a directory.");
   return real;
+}
+
+function commandChangeRoot(groupRoot, cwd, importedProjectRoots = []) {
+  const roots = [
+    { path: groupRoot, label: "" },
+    ...importedProjectRoots.map(safeRealDirectory).filter(Boolean).map((root) => ({ path: root, label: "project" }))
+  ];
+  return roots.find((root) => isInsidePath(root.path, cwd)) || roots[0];
+}
+
+function labelWorkspaceChanges(changes = {}, label = "") {
+  if (!label) return changes;
+  const prefix = (items) => (Array.isArray(items) ? items : []).map((item) => {
+    if (typeof item === "string") return `${label}:${item}`;
+    return { ...item, path: `${label}:${item.path}` };
+  });
+  return {
+    ...changes,
+    root: label,
+    created: prefix(changes.created),
+    modified: prefix(changes.modified),
+    deleted: prefix(changes.deleted),
+    observedArtifacts: prefix(changes.observedArtifacts)
+  };
+}
+
+function safeRealDirectory(value) {
+  try {
+    if (!value || !fs.existsSync(value) || !fs.statSync(value).isDirectory()) return "";
+    return fs.realpathSync.native(value);
+  } catch {
+    return "";
+  }
 }
 
 function resolveExistingRelativeLiteral(groupRoot, input) {
