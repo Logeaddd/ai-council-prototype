@@ -4212,8 +4212,8 @@ test("workspace round prompts gate file_operations by seat permission tier", asy
     await runCouncil("Discuss the workspace permission policy.", group, tmp, { groupPath });
 
     assert.match(requests[0].messages[0].content, /text-only file permission/);
-    assert.doesNotMatch(requests[0].messages[0].content, /emit exactly one write or append file_operations item/);
-    assert.match(requests[1].messages[0].content, /emit exactly one write or append file_operations item/);
+    assert.doesNotMatch(requests[0].messages[0].content, /use native workspace_edit tool calls/);
+    assert.match(requests[1].messages[0].content, /use native workspace_edit tool calls/);
   } finally {
     await close(server);
   }
@@ -4477,6 +4477,231 @@ test("provider-native tool calls execute through the council permission and veri
     assert.equal(requestBodies[0].tools[0].function.name, "ai_council_tool");
     assert.equal(requestBodies[0].tools[0].function.parameters.properties.tool.enum.includes("workspace_edit"), true);
     assert.equal(session.toolRequests.filter((item) => item.tool === "workspace_edit").length, 3);
+  } finally {
+    await close(server);
+  }
+});
+
+test("truncated structured output recovers through a required native write and real verification", async () => {
+  const groupPath = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-structured-recovery-"));
+  fs.mkdirSync(path.join(groupPath, "sessions"), { recursive: true });
+  fs.writeFileSync(path.join(groupPath, "group.json"), JSON.stringify({
+    id: "structured-recovery",
+    name: "Structured Recovery",
+    permissions: { defaultTier: "text", seatTiers: { executor: "full" } },
+    seats: [
+      { seatId: "executor", displayName: "Executor", enabled: true, privateFolder: "members/Executor" },
+      { seatId: "finalizer", displayName: "Finalizer", enabled: true, judge: true, privateFolder: "members/Finalizer" }
+    ]
+  }), "utf8");
+  let executorStep = 0;
+  const requestBodies = [];
+  const server = http.createServer(async (req, res) => {
+    const body = JSON.parse(await readRequestBody(req));
+    requestBodies.push(body);
+    const prompt = JSON.stringify(body.messages || []);
+    if (prompt.includes("FinalDecision JSON object")) {
+      writeOpenAiStream(res, JSON.stringify({
+        answer: "The recovered source file was written and verified.",
+        consensus_score: 1,
+        supporting_agents: ["Executor"],
+        dissenting_agents: [],
+        minority_report: "",
+        risks: [],
+        next_actions: [],
+        memory_candidates: []
+      }));
+      return;
+    }
+    if (executorStep === 0) {
+      executorStep += 1;
+      writeOpenAiStream(res, '{"status":"speak","argument":"writing","tool_requests":[{"tool":"workspace_edit","action":"write","path":"shared/recovery/app.js","code":"');
+      return;
+    }
+    if (executorStep === 1) {
+      executorStep += 1;
+      writeOpenAiNativeToolStream(res, [
+        {
+          tool: "workspace_edit",
+          action: "write",
+          path: "shared/recovery/app.js",
+          code: "export const recovered = 'RECOVERED_NON_EMPTY';\n",
+          reason: "Recover the truncated source write."
+        },
+        {
+          tool: "workspace_edit",
+          action: "write",
+          path: "shared/recovery/verify.mjs",
+          code: "import fs from 'node:fs'; const source = fs.readFileSync('app.js', 'utf8'); if (!source.includes('RECOVERED_NON_EMPTY')) throw new Error('source missing'); console.log('RECOVERY_VERIFIED');\n",
+          reason: "Create a real verification script."
+        }
+      ]);
+      return;
+    }
+    if (executorStep === 2) {
+      executorStep += 1;
+      writeOpenAiNativeToolStream(res, [{
+        tool: "run_tests",
+        runner: "custom",
+        cwd: "shared/recovery",
+        command: "node verify.mjs",
+        reason: "Verify the recovered source bytes."
+      }]);
+      return;
+    }
+    writeOpenAiStream(res, JSON.stringify({
+      status: "speak",
+      position: "executor",
+      argument: "The recovered source is non-empty and the verification command passed.",
+      objections: [],
+      objection_items: [],
+      resolved_ids: [],
+      file_operations: [],
+      tool_requests: [],
+      memory_candidates: []
+    }));
+  });
+  await listen(server);
+
+  try {
+    const apiBaseUrl = `http://127.0.0.1:${server.address().port}/v1`;
+    const group = validateGroupConfig({
+      id: "structured-recovery",
+      name: "Structured Recovery",
+      settings: { maxRounds: 2, minConsensusWeight: 1, stopWhenAllSkip: true, agentTimeoutMs: 3000 },
+      agents: [
+        { id: "executor", name: "Executor", role: "Builder", provider: "openai-compatible", apiBaseUrl, allowUnsafePrivateNetwork: true, apiKey: "test-key", model: "test-model", weight: 1, enabled: true },
+        { id: "finalizer", name: "Finalizer", role: "Finalizer", provider: "openai-compatible", apiBaseUrl, allowUnsafePrivateNetwork: true, apiKey: "test-key", model: "test-model", weight: 1, enabled: true, judge: true }
+      ]
+    });
+    const { session } = await runCouncil("Create and verify shared/recovery/app.js.", group, groupPath, { groupPath });
+    const source = fs.readFileSync(path.join(groupPath, "shared", "recovery", "app.js"), "utf8");
+    const verification = session.toolExecutionResults.find((item) => item.tool === "run_tests");
+
+    assert.match(source, /RECOVERED_NON_EMPTY/);
+    assert.ok(Buffer.byteLength(source, "utf8") > 0);
+    assert.equal(requestBodies[1].tool_choice, "required");
+    assert.match(JSON.stringify(requestBodies[1].messages), /Recover by calling a real native tool now/);
+    assert.equal(verification.status, "completed");
+    assert.equal(verification.result.exitCode, 0);
+    assert.equal(session.executionState.phase, "complete");
+    assert.equal(session.messages.some((item) => item.response.status === "unavailable"), false);
+  } finally {
+    await close(server);
+  }
+});
+
+test("empty file proposal is rejected and repaired by the same executor before the round ends", async () => {
+  const groupPath = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-empty-write-recovery-"));
+  fs.mkdirSync(path.join(groupPath, "sessions"), { recursive: true });
+  fs.writeFileSync(path.join(groupPath, "group.json"), JSON.stringify({
+    id: "empty-write-recovery",
+    name: "Empty Write Recovery",
+    permissions: { defaultTier: "text", seatTiers: { executor: "full" } },
+    seats: [
+      { seatId: "executor", displayName: "Executor", enabled: true, privateFolder: "members/Executor" },
+      { seatId: "finalizer", displayName: "Finalizer", enabled: true, judge: true, privateFolder: "members/Finalizer" }
+    ]
+  }), "utf8");
+  let executorStep = 0;
+  const requestBodies = [];
+  const server = http.createServer(async (req, res) => {
+    const body = JSON.parse(await readRequestBody(req));
+    requestBodies.push(body);
+    const prompt = JSON.stringify(body.messages || []);
+    if (prompt.includes("FinalDecision JSON object")) {
+      writeOpenAiStream(res, JSON.stringify({
+        answer: "The empty proposal was repaired and verified.",
+        consensus_score: 1,
+        supporting_agents: ["Executor"],
+        dissenting_agents: [],
+        minority_report: "",
+        risks: [],
+        next_actions: [],
+        memory_candidates: []
+      }));
+      return;
+    }
+    if (executorStep === 0) {
+      executorStep += 1;
+      writeOpenAiStream(res, JSON.stringify({
+        status: "speak",
+        argument: "Create the implementation.",
+        file_operations: [{
+          op: "write",
+          path: "shared/empty-recovery/app.js",
+          content: "",
+          reason: "Create source.",
+          expected_effect: "Source exists."
+        }],
+        tool_requests: [],
+        objections: [],
+        memory_candidates: []
+      }));
+      return;
+    }
+    if (executorStep === 1) {
+      executorStep += 1;
+      writeOpenAiNativeToolStream(res, [
+        {
+          tool: "workspace_edit",
+          action: "write",
+          path: "shared/empty-recovery/app.js",
+          code: "export const repaired = true;\n",
+          reason: "Replace the rejected empty proposal with real source bytes."
+        },
+        {
+          tool: "workspace_edit",
+          action: "write",
+          path: "shared/empty-recovery/verify.mjs",
+          code: "import fs from 'node:fs'; const source = fs.readFileSync('app.js', 'utf8'); if (!source.trim()) throw new Error('empty source'); console.log('NON_EMPTY_OK');\n",
+          reason: "Create non-empty verification."
+        }
+      ]);
+      return;
+    }
+    if (executorStep === 2) {
+      executorStep += 1;
+      writeOpenAiNativeToolStream(res, [{
+        tool: "run_tests",
+        runner: "custom",
+        cwd: "shared/empty-recovery",
+        command: "node verify.mjs",
+        reason: "Verify the repaired file is non-empty."
+      }]);
+      return;
+    }
+    writeOpenAiStream(res, JSON.stringify({
+      status: "speak",
+      argument: "The non-empty repair passed verification.",
+      objections: [],
+      file_operations: [],
+      tool_requests: [],
+      memory_candidates: []
+    }));
+  });
+  await listen(server);
+
+  try {
+    const apiBaseUrl = `http://127.0.0.1:${server.address().port}/v1`;
+    const group = validateGroupConfig({
+      id: "empty-write-recovery",
+      name: "Empty Write Recovery",
+      settings: { maxRounds: 2, minConsensusWeight: 1, stopWhenAllSkip: true, agentTimeoutMs: 3000 },
+      agents: [
+        { id: "executor", name: "Executor", role: "Builder", provider: "openai-compatible", apiBaseUrl, allowUnsafePrivateNetwork: true, apiKey: "test-key", model: "test-model", weight: 1, enabled: true },
+        { id: "finalizer", name: "Finalizer", role: "Finalizer", provider: "openai-compatible", apiBaseUrl, allowUnsafePrivateNetwork: true, apiKey: "test-key", model: "test-model", weight: 1, enabled: true, judge: true }
+      ]
+    });
+    const { session } = await runCouncil("Create and verify shared/empty-recovery/app.js.", group, groupPath, { groupPath });
+    const sourcePath = path.join(groupPath, "shared", "empty-recovery", "app.js");
+
+    assert.equal(fs.readFileSync(sourcePath, "utf8"), "export const repaired = true;\n");
+    assert.equal(requestBodies[1].tool_choice, "required");
+    assert.match(JSON.stringify(requestBodies[1].messages), /empty_content/);
+    assert.equal(session.rejectedFileOperationProposals.some((item) => item.code === "empty_content"), true);
+    assert.equal(session.toolExecutionResults.find((item) => item.tool === "run_tests")?.status, "completed");
+    assert.equal(session.executionState.phase, "complete");
   } finally {
     await close(server);
   }
@@ -4996,7 +5221,7 @@ test("ready final state auto-executes safe file proposals for full tier", async 
     const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
     requests.push(body);
     callCount += 1;
-    const roundPromptRequiresFileOperations = body.messages?.[0]?.content?.includes("emit exactly one write or append file_operations item");
+    const roundPromptRequiresFileOperations = body.messages?.[0]?.content?.includes("use native workspace_edit tool calls");
     const payload = callCount === 1
       ? roundPromptRequiresFileOperations
         ? {
@@ -5069,7 +5294,7 @@ test("ready final state auto-executes safe file proposals for full tier", async 
     const targetPath = path.join(groupPath, "src", "auto-created.js");
 
     assert.equal(requests.length, 2);
-    assert.match(requests[0].messages[0].content, /emit exactly one write or append file_operations item/);
+    assert.match(requests[0].messages[0].content, /use native workspace_edit tool calls/);
     assert.equal(session.fileOperationProposals.length, 1);
     assert.equal(session.pendingFileOperationProposals.length, 1);
     assert.equal(fs.readFileSync(targetPath, "utf8"), "export const autoCreated = true;\n");
@@ -5131,7 +5356,7 @@ test("full permission executes approved round proposals before final selection",
     requests.push(body);
     callCount += 1;
     if (callCount === 1) {
-      const roundPromptRequiresFileOperations = body.messages?.[0]?.content?.includes("emit exactly one write or append file_operations item");
+      const roundPromptRequiresFileOperations = body.messages?.[0]?.content?.includes("use native workspace_edit tool calls");
       writeOpenAiStream(res, JSON.stringify(roundPromptRequiresFileOperations ? {
         status: "speak",
         argument: "I propose one rejected and one selected file operation.",
@@ -5213,7 +5438,7 @@ test("full permission executes approved round proposals before final selection",
     const { session } = await runCouncil("Create only the selected module.", group, tmp, { groupPath });
 
     assert.equal(requests.length, 2);
-    assert.match(requests[0].messages[0].content, /emit exactly one write or append file_operations item/);
+    assert.match(requests[0].messages[0].content, /use native workspace_edit tool calls/);
     assert.equal(session.fileOperationProposals.length, 2);
     assert.equal(session.pendingFileOperationProposals.length, 2);
     assert.equal(fs.existsSync(path.join(groupPath, "src", "selected.js")), true);

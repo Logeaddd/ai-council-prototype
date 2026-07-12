@@ -55,6 +55,9 @@ function normalizeFileOperation({ groupRoot, operation, index, proposedBy }) {
   if (WRITE_LIKE_OPS.has(op) && content === undefined) {
     return reject(index, "missing_content", "File operation content is required for write and append.");
   }
+  if (WRITE_LIKE_OPS.has(op) && Buffer.byteLength(content, "utf8") === 0) {
+    return reject(index, "empty_content", "File operation write and append content must change real bytes; use a real non-empty write or another appropriate tool.");
+  }
 
   let sandbox;
   try {

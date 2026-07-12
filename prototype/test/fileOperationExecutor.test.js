@@ -9,6 +9,7 @@ import { approvePendingFileOperation, autoApprovePendingFileOperation, executeAp
 import { createDeletionBackup, readDeletionBackup, recoverySummary } from "../src/fileRecovery.js";
 import { parseFileOperationProposals } from "../src/fileOperations.js";
 import { enqueueFileOperationProposals, listPendingFileOperationProposals, readFileOperationAuditLog, updatePendingFileOperationProposal } from "../src/fileOperationQueue.js";
+import { hasMaterialWorkspaceChange } from "../src/observationCache.js";
 import { initGroupWorkspace } from "../src/workspaceManager.js";
 
 test("approved write proposal executes and creates a git commit", () => {
@@ -33,6 +34,30 @@ test("approved write proposal executes and creates a git commit", () => {
   assert.match(show, /shared\/file-ops\/pending/);
   assert.match(show, /shared\/logs\/file-ops\.jsonl/);
   assert.equal(readFileOperationAuditLog(group.groupPath).some((item) => item.action === "executed"), true);
+});
+
+test("approved identical rewrite is verified but does not count as material project progress", () => {
+  const group = createReadyGitGroup();
+  const target = path.join(group.groupPath, "src", "same.js");
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.writeFileSync(target, "export const same = true;\n", "utf8");
+  git(group.groupPath, ["add", "--", "src/same.js"]);
+  git(group.groupPath, ["commit", "-m", "test: add same source"]);
+  const pending = createPendingProposal(group.groupPath, {
+    op: "write",
+    path: "src/same.js",
+    content: "export const same = true;\n",
+    reason: "Rewrite existing bytes.",
+    expected_effect: "No project byte change."
+  });
+  approvePendingFileOperation({ groupPath: group.groupPath, proposalId: pending.id, approvedBy: "user", dangerousConfirmed: true });
+
+  const executed = executeApprovedFileOperation({ groupPath: group.groupPath, proposalId: pending.id, dangerousConfirmed: true });
+
+  assert.equal(executed.verification.ok, true);
+  assert.equal(executed.verification.changed, false);
+  assert.equal(hasMaterialWorkspaceChange(executed), false);
+  assert.equal(fs.readFileSync(target, "utf8"), "export const same = true;\n");
 });
 
 test("execution refuses pending proposals that are not explicitly approved", () => {

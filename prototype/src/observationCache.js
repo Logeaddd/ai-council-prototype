@@ -63,14 +63,20 @@ export function isObservationRequest(request = {}) {
 }
 
 export function hasMaterialWorkspaceChange(record = {}) {
+  const changes = record.result?.workspaceChanges || record.workspaceChanges;
+  if (changes && typeof changes === "object") {
+    if (Number(changes.totalChanges || 0) > 0) return true;
+    return [changes.created, changes.modified, changes.deleted]
+      .some((items) => Array.isArray(items) && items.length > 0);
+  }
+  if (record.verification && Object.hasOwn(record.verification, "changed")) {
+    return record.verification.changed === true;
+  }
   if (["write", "append", "delete", "restore", "move", "patch"].includes(String(record.op || record.action || ""))
     && ["executed", "committed", "restored", "completed"].includes(String(record.status || ""))) {
     return true;
   }
-  const changes = record.result?.workspaceChanges || record.workspaceChanges || {};
-  if (Number(changes.totalChanges || 0) > 0) return true;
-  return [changes.created, changes.modified, changes.deleted]
-    .some((items) => Array.isArray(items) && items.length > 0);
+  return false;
 }
 
 export function observationValueForConsumer(request = {}, value = {}) {

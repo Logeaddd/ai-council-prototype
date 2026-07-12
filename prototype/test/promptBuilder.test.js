@@ -277,7 +277,7 @@ test("round prompt advertises artifacts in speak schema", () => {
   assert.match(messages[0].content, /Do not use proposed_files/);
   assert.match(messages[0].content, /Durable file contents must be in file_operations\.content/);
   assert.match(messages[0].content, /Write each complete file in a single operation/);
-  assert.match(messages[0].content, /include several file_operations or tool_requests in one response/);
+  assert.match(messages[0].content, /Only split into append chunks when a real provider or tool constraint requires it/);
   assert.match(messages[0].content, /There is no per-turn limit on how many tools you may call or how much you may write/);
   assert.match(messages[0].content, /no file writes will run/);
   assert.match(messages[0].content, /Do not put full source code/);
@@ -303,7 +303,7 @@ test("round prompt advertises artifacts in speak schema", () => {
   assert.match(messages[0].content, /write\/append also require content/);
 });
 
-test("workspace round prompt requires file_operations for file-writing tasks", () => {
+test("full-permission workspace prompt requires real complete tool writes", () => {
   const messages = buildRoundPrompt({
     id: "executor",
     name: "Executor",
@@ -313,12 +313,12 @@ test("workspace round prompt requires file_operations for file-writing tasks", (
     fileOperationPermissionTier: "full"
   });
 
-  assert.match(messages[0].content, /emit exactly one write or append file_operations item/);
-  assert.match(messages[0].content, /accepted write\/append requests execute immediately/);
-  assert.match(messages[0].content, /Do not put durable file contents only in argument/);
-  assert.match(messages[0].content, /Split a longer file into a write followed by append/);
-  assert.match(messages[0].content, /file_operations\.content/);
-  assert.match(messages[0].content, /under 1400 characters/);
+  assert.match(messages[0].content, /use native workspace_edit tool calls/);
+  assert.match(messages[0].content, /write complete durable files/);
+  assert.match(messages[0].content, /perform multiple writes and commands in one response/);
+  assert.match(messages[0].content, /continue with append calls until the file is complete/);
+  assert.doesNotMatch(messages[0].content, /exactly one write or append/);
+  assert.doesNotMatch(messages[0].content, /under 1400 characters/);
 });
 
 test("final prompt requires evidence ids for workspace deliverable claims", () => {

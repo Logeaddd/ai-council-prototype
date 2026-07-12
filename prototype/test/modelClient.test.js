@@ -382,6 +382,25 @@ test("provider payloads include native tool definitions only when requested", ()
   assert.equal(openai.tools[0].function.parameters.properties.tool.enum.includes("workspace_edit"), true);
 });
 
+test("structured recovery can require a real native tool call", () => {
+  const nativeTools = nativeToolDefinitions("full");
+  const openai = buildOpenAiCompatiblePayload({}, {
+    model: "runtime-model",
+    messages: [{ role: "user", content: "Recover with a tool." }],
+    nativeTools,
+    nativeToolChoice: "required"
+  });
+  const anthropic = buildAnthropicMessagesPayload({}, {
+    model: "claude-test-model",
+    messages: [{ role: "user", content: "Recover with a tool." }],
+    nativeTools,
+    nativeToolChoice: "required"
+  });
+
+  assert.equal(openai.tool_choice, "required");
+  assert.deepEqual(anthropic.tool_choice, { type: "any" });
+});
+
 test("OpenAI-compatible client reconstructs fragmented native tool calls", async () => {
   const server = http.createServer(async (req, res) => {
     for await (const _ of req) {}

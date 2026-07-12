@@ -301,6 +301,32 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
 
       processResponseFileOperations(response);
 
+      if (response.status === "speak" && !response.tool_requests?.length && accumulatedRejectedFileOperationProposals.length) {
+        const rejectionDetails = accumulatedRejectedFileOperationProposals
+          .map((item) => `${item.code || item.status || "rejected"}: ${item.reason || item.autoExecutionReason || "file operation rejected"}`)
+          .join("; ")
+          .slice(0, 1600);
+        callOutcome = yield* callRoundModel({
+          options,
+          session,
+          phase: "file_operation_recovery",
+          round,
+          agent,
+          messages: [...messages, {
+            role: "user",
+            content: `Your file operation did not execute: ${rejectionDetails}. Correct it now with a real non-empty workspace_edit native tool call (or tool_requests fallback), then continue to build or verify. Do not return another plan or placeholder.`
+          }],
+          timeoutMs: group.settings.agentTimeoutMs,
+          toolIteration: 0,
+          nativeToolPermissionTier: fileOperationPermissionTier,
+          nativeToolChoice: fileOperationPermissionTier === "full" ? "required" : "auto"
+        });
+        response = applyRoundResponseRules(callOutcome.response, agent, round);
+        rawTextForMessage = callOutcome.rawTextForMessage;
+        errorForMessage = callOutcome.errorForMessage;
+        processResponseFileOperations(response);
+      }
+
       while (response.status === "speak" && response.tool_requests?.length && toolIterations < maxToolIterations) {
         toolIterations += 1;
         const toolResult = await executeToolRequests({
@@ -685,7 +711,7 @@ function persistSummarizerPublicMemory(groupPath, candidates, options = {}) {
   }
 }
 
-async function* callRoundModel({ options, session, phase, round, agent, messages, timeoutMs, toolIteration, formatRecovery = true, nativeToolPermissionTier = "text" }) {
+async function* callRoundModel({ options, session, phase, round, agent, messages, timeoutMs, toolIteration, formatRecovery = true, nativeToolPermissionTier = "text", nativeToolChoice = "auto" }) {
   if (!reserveModelCall(session)) {
     session.guardStopReason = "model_call_budget_exhausted";
     return {
@@ -706,7 +732,7 @@ async function* callRoundModel({ options, session, phase, round, agent, messages
     inputMessages: messages
   });
   throwIfAborted(options.signal);
-  const streamingCall = startAgentCallWithDeltaQueue(agent, messages, timeoutMs, options.signal, nativeToolDefinitions(nativeToolPermissionTier));
+  const streamingCall = startAgentCallWithDeltaQueue(agent, messages, timeoutMs, options.signal, nativeToolDefinitions(nativeToolPermissionTier), nativeToolChoice);
   while (!streamingCall.done() || streamingCall.hasDeltas()) {
     const delta = await streamingCall.nextDelta();
     if (!delta) continue;
@@ -735,9 +761,12 @@ async function* callRoundModel({ options, session, phase, round, agent, messages
       toolIteration,
       formatRecovery: false,
       nativeToolPermissionTier,
+      nativeToolChoice: nativeToolPermissionTier === "full" ? "required" : "auto",
       messages: [...messages, {
         role: "user",
-        content: "Your previous response was not valid JSON, so no work was accepted. Retry once now. Return one compact JSON object only. Do not repeat analysis or a plan. If this task needs a file change, include exactly one file_operations write or append item with content under 1200 characters; otherwise use status=skip with a reason."
+        content: nativeToolPermissionTier === "full"
+          ? "Your previous response was truncated or invalid, so no work was accepted. Recover by calling a real native tool now. For file work, call workspace_edit with a complete non-empty write/append/replace; for execution, call the required command or test tool. Do not return analysis, a plan, a promise, or a file_operations placeholder. If native tools are unavailable and the provider falls back to text, return one valid compact JSON object with tool_requests that performs the same real action."
+          : "Your previous response was truncated or invalid, so no work was accepted. Retry now with one complete valid JSON object. Do not repeat analysis or a plan; return an allowed action or status with all required fields."
       }]
     });
   }
@@ -1087,12 +1116,12 @@ function normalizeTextList(value) {
   }).filter(Boolean);
 }
 
-function startAgentCallWithDeltaQueue(agent, messages, timeoutMs, signal, nativeTools) {
+function startAgentCallWithDeltaQueue(agent, messages, timeoutMs, signal, nativeTools, nativeToolChoice = "auto") {
   const queue = createAsyncQueue();
   let result;
   let thrown;
   let done = false;
-  const callPromise = safeCall(agent, messages, timeoutMs, signal, (delta) => queue.push(delta), nativeTools)
+  const callPromise = safeCall(agent, messages, timeoutMs, signal, (delta) => queue.push(delta), nativeTools, nativeToolChoice)
     .then((value) => {
       result = value;
     })
@@ -1115,9 +1144,9 @@ function startAgentCallWithDeltaQueue(agent, messages, timeoutMs, signal, native
   };
 }
 
-async function safeCall(agent, messages, timeoutMs, signal, onDelta, nativeTools) {
+async function safeCall(agent, messages, timeoutMs, signal, onDelta, nativeTools, nativeToolChoice = "auto") {
   try {
-    return await callAgentResult(agent, messages, { timeoutMs, signal, onDelta, nativeTools: nativeTools || [] });
+    return await callAgentResult(agent, messages, { timeoutMs, signal, onDelta, nativeTools: nativeTools || [], nativeToolChoice });
   } catch (error) {
     if (error.name === "AbortError") throw error;
     return { error: `agent_call_failed:${agent.id}:${error.message}` };

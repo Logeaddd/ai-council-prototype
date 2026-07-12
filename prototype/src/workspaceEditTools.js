@@ -31,6 +31,13 @@ function writeFile(groupPath, request, append, options) {
   const content = boundedContent(request.code, append ? "append content" : "write content");
   const existed = fs.existsSync(target.path);
   if (existed && !fs.statSync(target.path).isFile()) throw toolError("not_a_file", "workspace_edit target is not a file.");
+  const previous = existed ? fs.readFileSync(target.path, "utf8") : undefined;
+  if (!append && previous === content) {
+    return editResult(actionRecord(request, target.relativePath), {
+      unchanged: true,
+      bytesWritten: 0
+    });
+  }
   fs.mkdirSync(path.dirname(target.path), { recursive: true });
   if (append) {
     fs.appendFileSync(target.path, content, "utf8");
@@ -57,6 +64,13 @@ function replaceText(groupPath, request, options) {
     throw toolError("replace_text_ambiguous", "oldText occurs more than once; provide a larger exact block or set replaceAll.");
   }
   const next = request.replaceAll ? current.split(oldText).join(newText) : `${current.slice(0, first)}${newText}${current.slice(first + oldText.length)}`;
+  if (next === current) {
+    return editResult(actionRecord(request, target.relativePath), {
+      unchanged: true,
+      replacements: 0,
+      bytesWritten: 0
+    });
+  }
   atomicWrite(target.path, next);
   return editResult(actionRecord(request, target.relativePath), {
     modified: [{ path: target.relativePath, type: "file" }],

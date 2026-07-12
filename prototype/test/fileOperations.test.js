@@ -83,6 +83,25 @@ test("file operation parser rejects required missing fields and invalid ops", ()
   assert.equal(result.accepted.length, 0);
 });
 
+test("file operation parser rejects empty writes instead of creating zero-byte progress", () => {
+  const groupRoot = makeGroupRoot();
+  const result = parseFileOperationProposals({
+    groupRoot,
+    source: {
+      file_operations: [{
+        op: "write",
+        path: "src/empty.js",
+        content: "",
+        reason: "Create implementation.",
+        expected_effect: "Implementation exists."
+      }]
+    }
+  });
+
+  assert.equal(result.accepted.length, 0);
+  assert.equal(result.rejected[0].code, "empty_content");
+});
+
 test("file operation parser fills missing expected effect from reason", () => {
   const groupRoot = makeGroupRoot();
   const result = parseFileOperationProposals({

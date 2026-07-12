@@ -95,6 +95,7 @@ export function executeApprovedFileOperation(options = {}) {
   assertDangerousOperationConfirmed(proposal, target.path, options);
 
   const beforeExists = fs.existsSync(target.path);
+  const beforeContent = beforeExists && WRITE_OPS.has(proposal.op) ? fs.readFileSync(target.path) : undefined;
   let recovery;
   if (proposal.op === "delete") {
     let backup;
@@ -132,7 +133,17 @@ export function executeApprovedFileOperation(options = {}) {
     }
   }
   applyProposal(target.path, proposal);
-  const verification = verifyApplied(target.path, proposal, beforeExists);
+  const verification = verifyApplied(target.path, proposal, { beforeExists, beforeContent });
+  if (!verification.ok) {
+    restoreBeforeFailedWrite(target.path, proposal, { beforeExists, beforeContent });
+    appendFileOperationAuditLog(groupPath, "execution_verification_failed", {
+      ...proposal,
+      code: "file_write_verification_failed",
+      reason: "The file operation did not produce the requested non-empty byte change.",
+      verification
+    });
+    throw new Error("file_write_verification_failed");
+  }
   if (proposal.op === "delete") {
     const deletedBackup = updateDeletionBackup(groupPath, proposal.id, {
       status: "deleted",
@@ -237,13 +248,17 @@ function autoApprovalPolicy(proposal, targetPath, options = {}) {
 function applyProposal(filePath, proposal) {
   if (proposal.op === "read" || proposal.op === "list") return;
   if (proposal.op === "write") {
+    const content = String(proposal.content ?? "");
+    if (Buffer.byteLength(content, "utf8") === 0) throw new Error("empty_content");
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    fs.writeFileSync(filePath, String(proposal.content ?? ""), "utf8");
+    fs.writeFileSync(filePath, content, "utf8");
     return;
   }
   if (proposal.op === "append") {
+    const content = String(proposal.content ?? "");
+    if (Buffer.byteLength(content, "utf8") === 0) throw new Error("empty_content");
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    fs.appendFileSync(filePath, String(proposal.content ?? ""), "utf8");
+    fs.appendFileSync(filePath, content, "utf8");
     return;
   }
   if (proposal.op === "delete") {
@@ -253,7 +268,17 @@ function applyProposal(filePath, proposal) {
   throw new Error(`Unsupported executable file operation: ${proposal.op}`);
 }
 
-function verifyApplied(filePath, proposal, beforeExists) {
+function restoreBeforeFailedWrite(filePath, proposal, before = {}) {
+  if (!WRITE_OPS.has(proposal.op)) return;
+  if (before.beforeExists && Buffer.isBuffer(before.beforeContent)) {
+    fs.writeFileSync(filePath, before.beforeContent);
+    return;
+  }
+  fs.rmSync(filePath, { force: true });
+}
+
+function verifyApplied(filePath, proposal, before = {}) {
+  const beforeExists = Boolean(before.beforeExists);
   if (proposal.op === "read" || proposal.op === "list") {
     return { ok: true, note: "No write operation executed." };
   }
@@ -261,8 +286,21 @@ function verifyApplied(filePath, proposal, beforeExists) {
     return { ok: !fs.existsSync(filePath), beforeExists };
   }
   const exists = fs.existsSync(filePath);
-  const size = exists ? fs.statSync(filePath).size : 0;
-  return { ok: exists, beforeExists, size };
+  const content = exists ? fs.readFileSync(filePath) : Buffer.alloc(0);
+  const expectedContent = Buffer.from(String(proposal.content ?? ""), "utf8");
+  const expected = proposal.op === "append"
+    ? Buffer.concat([before.beforeContent || Buffer.alloc(0), expectedContent])
+    : expectedContent;
+  const changed = !beforeExists || !Buffer.isBuffer(before.beforeContent) || !before.beforeContent.equals(content);
+  return {
+    ok: exists && expectedContent.length > 0 && content.equals(expected),
+    changed,
+    beforeExists,
+    beforeSize: before.beforeContent?.length || 0,
+    size: content.length,
+    sha256: sha256(content),
+    expectedSha256: sha256(expected)
+  };
 }
 
 function assertDangerousOperationConfirmed(proposal, targetPath, options) {

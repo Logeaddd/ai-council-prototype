@@ -4,6 +4,7 @@ import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { executeWorkspaceEdit } from "../src/workspaceEditTools.js";
+import { hasMaterialWorkspaceChange } from "../src/observationCache.js";
 
 function workspace() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-workspace-edit-"));
@@ -32,6 +33,21 @@ test("workspace_edit overwrites an existing file on Windows-compatible paths", (
   assert.equal(fs.readFileSync(target, "utf8"), "new");
   assert.equal(result.workspaceChanges.modified[0].path, "shared/project/README.md");
   assert.equal(fs.readdirSync(path.dirname(target)).some((name) => name.includes(".ai-council-") && name.endsWith(".tmp")), false);
+});
+
+test("workspace_edit identical rewrites are successful no-ops and not material progress", () => {
+  const groupPath = workspace();
+  const target = path.join(groupPath, "shared", "project", "same.txt");
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.writeFileSync(target, "same bytes\n", "utf8");
+
+  const result = executeWorkspaceEdit({ action: "write", path: "shared/project/same.txt", code: "same bytes\n" }, { groupPath });
+  const record = { tool: "workspace_edit", action: "write", status: "completed", result };
+
+  assert.equal(result.unchanged, true);
+  assert.equal(result.workspaceChanges.totalChanges, 0);
+  assert.equal(hasMaterialWorkspaceChange(record), false);
+  assert.equal(fs.readFileSync(target, "utf8"), "same bytes\n");
 });
 
 test("workspace_edit performs exact replace and rejects ambiguous replacements", () => {

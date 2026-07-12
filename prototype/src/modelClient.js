@@ -91,7 +91,8 @@ async function callAnthropicMessagesOnce({ agent, apiBaseUrl, apiKey, model, mes
   const payload = buildAnthropicMessagesPayload(agent, {
     model,
     messages,
-    nativeTools: options.nativeTools
+    nativeTools: options.nativeTools,
+    nativeToolChoice: options.nativeToolChoice
   });
   try {
     const response = await fetch(`${apiBaseUrl.replace(/\/$/, "")}/messages`, {
@@ -124,7 +125,8 @@ async function callOpenAiCompatibleOnce({ agent, apiBaseUrl, apiKey, model, mess
   const payload = buildOpenAiCompatiblePayload(agent, {
     model,
     messages,
-    nativeTools: options.nativeTools
+    nativeTools: options.nativeTools,
+    nativeToolChoice: options.nativeToolChoice
   });
   try {
     const response = await fetch(`${apiBaseUrl.replace(/\/$/, "")}/chat/completions`, {
@@ -144,7 +146,7 @@ async function callOpenAiCompatibleOnce({ agent, apiBaseUrl, apiKey, model, mess
   }
 }
 
-export function buildOpenAiCompatiblePayload(agent, { model, messages, nativeTools }) {
+export function buildOpenAiCompatiblePayload(agent, { model, messages, nativeTools, nativeToolChoice }) {
   const maxTokens = requestedMaxTokens(agent);
   return {
     model,
@@ -152,12 +154,12 @@ export function buildOpenAiCompatiblePayload(agent, { model, messages, nativeToo
     ...(maxTokens ? { max_tokens: maxTokens } : {}),
     temperature: 0.2,
     stream: true,
-    ...(nativeTools?.length ? { tools: openAiToolDefinitions(nativeTools), tool_choice: "auto" } : {}),
+    ...(nativeTools?.length ? { tools: openAiToolDefinitions(nativeTools), tool_choice: nativeToolChoice === "required" ? "required" : "auto" } : {}),
     ...openAiReasoningPayload(agent, model)
   };
 }
 
-export function buildAnthropicMessagesPayload(agent, { model, messages, nativeTools }) {
+export function buildAnthropicMessagesPayload(agent, { model, messages, nativeTools, nativeToolChoice }) {
   const system = messages
     .filter((message) => message.role === "system")
     .map((message) => stringifyMessageContent(message.content))
@@ -181,7 +183,10 @@ export function buildAnthropicMessagesPayload(agent, { model, messages, nativeTo
     messages: anthropicMessages.length ? anthropicMessages : [{ role: "user", content: "" }],
     max_tokens: maxTokens,
     temperature: 0.2,
-    ...(nativeTools?.length ? { tools: anthropicToolDefinitions(nativeTools) } : {}),
+    ...(nativeTools?.length ? {
+      tools: anthropicToolDefinitions(nativeTools),
+      ...(nativeToolChoice === "required" ? { tool_choice: { type: "any" } } : {})
+    } : {}),
     ...anthropicThinkingPayload(agent, model, maxTokens)
   };
 }

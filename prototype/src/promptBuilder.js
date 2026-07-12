@@ -29,12 +29,12 @@ export function buildRoundPrompt(agent, question, session, round, options = {}) 
         fileOperationProtocolLine(options),
         toolRequestProtocolLine(options),
         "If speaking, use keys: status, position, argument, objections, objection_items, resolved_ids, suggested_revision, artifacts, file_operations, tool_requests, confidence, memory_candidates.",
-        "Do not use proposed_files, source_files, patches, or markdown code blocks for durable file contents. Durable file contents must be in file_operations.content for write/append, or created by a real execute_command/tool request.",
-        "Write each complete file in a single operation. Prefer workspace_edit (action write) which accepts the full file content up to 256KB, so you can emit an entire source file, build script, or manifest in one request instead of dribbling it out in fragments. Only split into append chunks when a single file genuinely exceeds 256KB. You may include several file_operations or tool_requests in one response to deliver multiple complete files at once.",
+        durableFileContentLine(options),
+        completeFileWriteLine(options),
         "Keep going until the deliverable is actually produced and verified. Do not stop after writing a partial file. There is no per-turn limit on how many tools you may call or how much you may write.",
         "If your JSON is truncated or invalid, no file writes will run; make sure each JSON response is complete and valid.",
         "Keep argument short. Do not put full source code, build scripts, manifests, generated files, or long patches in argument, reason, suggested_revision, or artifacts.",
-        "Use file_operations only to request file work. The app validates every path; read/list can be executed by the app and returned in later context. Full-permission writes can execute immediately; tool-permission writes remain pending for user approval. You do not have direct filesystem access.",
+        fileOperationUsageLine(options),
         "Each file_operations item must include op, path, reason, expected_effect; write/append also require content. Allowed op values: read, list, write, append, delete.",
         "Use tool_requests only when you need the app to fetch a web page, search the web, call an HTTP API, list/read workspace files, search file names, grep file content, search saved public group history, load a saved public archive round, read an enabled skill pack, manage installed skill packs, extract a zip archive, run a shell command, manage a background process, run a code snippet, install a language package, provision a missing runtime or CLI, run tests, perform Git work, control a real browser, query a SQLite database, search for installable MCP tools, install or remove a configured MCP server, list or call configured MCP tools, read configured MCP resources, or get configured MCP prompts before you can answer. Do not invent tool results; wait for the app to return them in later context.",
         "Use fetch_url only for text/html/json pages. Do not use fetch_url to download zip, jar, exe, images, or other binary files; for binary downloads use execute_command with curl/PowerShell inside the workspace, then use extract_archive for zip files if needed.",
@@ -142,6 +142,30 @@ function independentAnswerModeLine(options = {}) {
   return "Independent answer mode: answer the boss question independently. Other ordinary members' answers are intentionally hidden from you.";
 }
 
+function durableFileContentLine(options = {}) {
+  const tier = options.fileOperationPermissionTier || "text";
+  if (tier === "full") {
+    return "Do not use proposed_files, source_files, patches, markdown code blocks, or file_operations placeholders for durable file contents. Put complete contents in real workspace_edit native/tool requests or create them through a real command.";
+  }
+  return "Do not use proposed_files, source_files, patches, or markdown code blocks for durable file contents. Durable file contents must be in file_operations.content for write/append, or created by a real execute_command/tool request.";
+}
+
+function completeFileWriteLine(options = {}) {
+  const tier = options.fileOperationPermissionTier || "text";
+  if (tier === "full") {
+    return "Write each complete file in a single workspace_edit operation when the provider can return it. workspace_edit accepts up to 256KB per content chunk. Only split into append chunks when a provider or real tool constraint requires it, and keep calling tools until the file is complete. You may include any number of tool requests needed for the task.";
+  }
+  return "Write each complete file in a single operation. Only split into append chunks when a real provider or tool constraint requires it.";
+}
+
+function fileOperationUsageLine(options = {}) {
+  const tier = options.fileOperationPermissionTier || "text";
+  if (tier === "full") {
+    return "Use workspace_edit through native tools or tool_requests for file mutations so execution results return to you immediately. file_operations is a compatibility fallback and must not be used as a placeholder. You do not have direct filesystem access outside real tools.";
+  }
+  return "Use file_operations only to request file work. The app validates every path; read/list can be executed by the app and returned in later context. Tool-permission writes remain pending for user approval. You do not have direct filesystem access.";
+}
+
 
 function fileOperationProtocolLine(options = {}) {
   if (!options.fileOperationContext) return "";
@@ -151,7 +175,7 @@ function fileOperationProtocolLine(options = {}) {
   const tier = options.fileOperationPermissionTier || "text";
   if (tier === "text") return "You have text-only file permission for this workspace. If the task requires creating or modifying files, do not propose file_operations yourself; discuss requirements and leave file proposals to a member with tool or full file permission.";
   if (tier === "full") {
-    return "You have full permission: accepted write/append requests execute immediately in the group workspace and are audited. For a task that needs code or configuration, do real work now: after at most two targeted reads, emit exactly one write or append file_operations item with durable content under 1400 characters. Do not answer with a plan, promise, or repeated directory listing while a required file is still missing. Split a longer file into a write followed by append requests in later responses. Do not put durable file contents only in argument, suggested_revision, or artifacts.";
+    return "You have full permission: real workspace tools execute immediately and are audited. For code or configuration work, use native workspace_edit tool calls (or tool_requests fallback) to write complete durable files, then run the real build or tests. You may perform multiple writes and commands in one response. Do not answer with a plan, promise, repeated directory listing, or file_operations placeholder while a required file is still missing. Split content only when the provider cannot return one complete tool call; continue with append calls until the file is complete, then verify it.";
   }
   return "If this task requires inspecting workspace files, request read/list in file_operations. If it requires creating or modifying workspace files, you MUST propose the change in file_operations with the full file content for write/append. Do not put complete file content only in argument, suggested_revision, or artifacts; those fields may summarize it. Never paste large source files, scripts, Gradle files, manifests, or other durable file contents into argument; put durable file contents only in file_operations.content so the app can write them.";
 }
