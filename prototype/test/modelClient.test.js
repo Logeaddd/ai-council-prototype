@@ -1,7 +1,8 @@
 import http from "node:http";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildAnthropicMessagesPayload, buildOpenAiCompatiblePayload, callAgent } from "../src/modelClient.js";
+import { buildAnthropicMessagesPayload, buildOpenAiCompatiblePayload, callAgent, callAgentResult } from "../src/modelClient.js";
+import { nativeToolDefinitions } from "../src/nativeToolProtocol.js";
 
 test("OpenAI-compatible client retries retryable rate-limit responses", async () => {
   let requestCount = 0;
@@ -347,6 +348,126 @@ test("Anthropic payload sends thinking only for supported official Claude models
 
   assert.deepEqual(supported.thinking, { type: "enabled", budget_tokens: 4096 });
   assert.equal(unsupported.thinking, undefined);
+});
+
+test("provider payloads include native tool definitions only when requested", () => {
+  const nativeTools = nativeToolDefinitions("full");
+  const openai = buildOpenAiCompatiblePayload({}, {
+    model: "runtime-model",
+    messages: [{ role: "user", content: "Question" }],
+    nativeTools
+  });
+  const anthropic = buildAnthropicMessagesPayload({}, {
+    model: "claude-test-model",
+    messages: [{ role: "user", content: "Question" }],
+    nativeTools
+  });
+  assert.equal(openai.tools[0].function.name, "ai_council_tool");
+  assert.equal(openai.tool_choice, "auto");
+  assert.equal(anthropic.tools[0].name, "ai_council_tool");
+  assert.equal(openai.tools[0].function.parameters.properties.tool.enum.includes("workspace_edit"), true);
+});
+
+test("OpenAI-compatible client reconstructs fragmented native tool calls", async () => {
+  const server = http.createServer(async (req, res) => {
+    for await (const _ of req) {}
+    res.writeHead(200, { "Content-Type": "text/event-stream; charset=utf-8" });
+    res.write(`data: ${JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: "call_native", function: { name: "ai_council_tool", arguments: '{"tool":"workspace_' } }] } }] })}\n\n`);
+    res.write(`data: ${JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: 'edit","action":"mkdir","path":"shared/project","reason":"Create folder"}' } }] } }] })}\n\n`);
+    res.write("data: [DONE]\n\n");
+    res.end();
+  });
+  await listen(server);
+  try {
+    const result = await callAgentResult({
+      id: "native-openai",
+      provider: "openai-compatible",
+      apiBaseUrl: `http://127.0.0.1:${server.address().port}/v1`,
+      apiKey: "test-key",
+      model: "test-model"
+    }, [{ role: "user", content: "Create it" }], {
+      timeoutMs: 1000,
+      allowUnsafePrivateNetwork: true,
+      nativeTools: nativeToolDefinitions("full")
+    });
+    assert.equal(result.text, "");
+    assert.equal(result.nativeToolCalls[0].id, "call_native");
+    assert.equal(result.nativeToolCalls[0].name, "ai_council_tool");
+    assert.match(result.nativeToolCalls[0].arguments, /workspace_edit/);
+  } finally {
+    await close(server);
+  }
+});
+
+test("OpenAI-compatible client falls back to JSON protocol when tools are rejected", async () => {
+  let calls = 0;
+  const bodies = [];
+  const server = http.createServer(async (req, res) => {
+    calls += 1;
+    bodies.push(JSON.parse(await readRequestBody(req)));
+    if (calls === 1) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: { message: "tools are not supported" } }));
+      return;
+    }
+    writeOpenAiStream(res, JSON.stringify({ status: "skip", reason: "JSON fallback" }));
+  });
+  await listen(server);
+  try {
+    const result = await callAgentResult({
+      id: "native-fallback",
+      provider: "openai-compatible",
+      apiBaseUrl: `http://127.0.0.1:${server.address().port}/v1`,
+      apiKey: "test-key",
+      model: "test-model",
+      retry: { maxRetries: 0 }
+    }, [{ role: "user", content: "Question" }], {
+      timeoutMs: 1000,
+      allowUnsafePrivateNetwork: true,
+      nativeTools: nativeToolDefinitions("full")
+    });
+    assert.equal(calls, 2);
+    assert.ok(bodies[0].tools);
+    assert.equal(bodies[1].tools, undefined);
+    assert.match(result.text, /JSON fallback/);
+  } finally {
+    await close(server);
+  }
+});
+
+test("Anthropic client returns native tool_use blocks", async () => {
+  const server = http.createServer(async (req, res) => {
+    for await (const _ of req) {}
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ content: [{
+      type: "tool_use",
+      id: "toolu_1",
+      name: "ai_council_tool",
+      input: { tool: "read_file", path: "README.md", reason: "Inspect project" }
+    }] }));
+  });
+  await listen(server);
+  try {
+    const result = await callAgentResult({
+      id: "native-anthropic",
+      provider: "anthropic-messages",
+      apiBaseUrl: `http://127.0.0.1:${server.address().port}/v1`,
+      apiKey: "test-key",
+      model: "claude-test"
+    }, [{ role: "user", content: "Inspect it" }], {
+      timeoutMs: 1000,
+      allowUnsafePrivateNetwork: true,
+      nativeTools: nativeToolDefinitions("tool")
+    });
+    assert.equal(result.text, "");
+    assert.deepEqual(result.nativeToolCalls[0], {
+      id: "toolu_1",
+      name: "ai_council_tool",
+      input: { tool: "read_file", path: "README.md", reason: "Inspect project" }
+    });
+  } finally {
+    await close(server);
+  }
 });
 
 function writeOpenAiStream(res, text) {

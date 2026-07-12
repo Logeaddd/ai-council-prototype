@@ -1,7 +1,7 @@
-import { callAgent } from "./modelClient.js";
+import { callAgent, callAgentResult } from "./modelClient.js";
 import { buildFinalPrompt, buildRoundPrompt } from "./promptBuilder.js";
 import { buildContextPromptSections, buildMemberContext } from "./contextBuilder.js";
-import { parseFinalDecision, parseRoundResponse } from "./responseParser.js";
+import { parseFinalDecision, parseRoundModelResult } from "./responseParser.js";
 import { makeId, nowIso } from "./types.js";
 import { isConsensusParticipant, scoreConsensus, shouldStop, updateUnresolvedObjections } from "./consensusEngine.js";
 import { appendMemoryCandidates, listSessionHistoryCatalogue, readRecentGroupSessions, searchSessionContextArchive, writeContextArchive, writeGroupSession, writeSession } from "./storage.js";
@@ -28,6 +28,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createObservationCache, hasMaterialWorkspaceChange } from "./observationCache.js";
 import { advanceExecutionState, createExecutionState, executionInstruction, isDeliveryTask, selectExecutionAgents } from "./executionState.js";
+import { nativeToolDefinitions } from "./nativeToolProtocol.js";
 
 export async function runCouncil(question, group, baseDir, options = {}) {
   let finalResult;
@@ -240,7 +241,8 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
         round,
         agent,
         messages,
-        timeoutMs: group.settings.agentTimeoutMs
+        timeoutMs: group.settings.agentTimeoutMs,
+        nativeToolPermissionTier: fileOperationPermissionTier
       });
       let response = applyRoundResponseRules(callOutcome.response, agent, round);
       let rawTextForMessage = callOutcome.rawTextForMessage;
@@ -358,7 +360,8 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
           agent,
           messages: followupMessages,
           timeoutMs: group.settings.agentTimeoutMs,
-          toolIteration: toolIterations
+          toolIteration: toolIterations,
+          nativeToolPermissionTier: fileOperationPermissionTier
         });
         response = applyRoundResponseRules(callOutcome.response, agent, round);
         rawTextForMessage = callOutcome.rawTextForMessage;
@@ -645,7 +648,7 @@ function persistSummarizerPublicMemory(groupPath, candidates, options = {}) {
   }
 }
 
-async function* callRoundModel({ options, session, phase, round, agent, messages, timeoutMs, toolIteration, formatRecovery = true }) {
+async function* callRoundModel({ options, session, phase, round, agent, messages, timeoutMs, toolIteration, formatRecovery = true, nativeToolPermissionTier = "text" }) {
   if (!reserveModelCall(session)) {
     session.guardStopReason = "model_call_budget_exhausted";
     return {
@@ -665,7 +668,7 @@ async function* callRoundModel({ options, session, phase, round, agent, messages
     provider: agent.provider || "",
     inputMessages: messages
   });
-  const streamingCall = startAgentCallWithDeltaQueue(agent, messages, timeoutMs, options.signal);
+  const streamingCall = startAgentCallWithDeltaQueue(agent, messages, timeoutMs, options.signal, nativeToolDefinitions(nativeToolPermissionTier));
   while (!streamingCall.done() || streamingCall.hasDeltas()) {
     const delta = await streamingCall.nextDelta();
     if (!delta) continue;
@@ -682,7 +685,7 @@ async function* callRoundModel({ options, session, phase, round, agent, messages
   completeModelCall(modelCallRecord, raw);
   const parsedResponse = raw.error
     ? { status: "unavailable", reason: raw.error, retryable: true }
-    : parseRoundResponse(raw.text);
+    : parseRoundModelResult(raw.text, raw.nativeToolCalls);
   if (formatRecovery && isInvalidStructuredResponse(parsedResponse)) {
     return yield* callRoundModel({
       options,
@@ -693,6 +696,7 @@ async function* callRoundModel({ options, session, phase, round, agent, messages
       timeoutMs,
       toolIteration,
       formatRecovery: false,
+      nativeToolPermissionTier,
       messages: [...messages, {
         role: "user",
         content: "Your previous response was not valid JSON, so no work was accepted. Retry once now. Return one compact JSON object only. Do not repeat analysis or a plan. If this task needs a file change, include exactly one file_operations write or append item with content under 1200 characters; otherwise use status=skip with a reason."
@@ -1042,12 +1046,12 @@ function normalizeTextList(value) {
   }).filter(Boolean);
 }
 
-function startAgentCallWithDeltaQueue(agent, messages, timeoutMs, signal) {
+function startAgentCallWithDeltaQueue(agent, messages, timeoutMs, signal, nativeTools) {
   const queue = createAsyncQueue();
   let result;
   let thrown;
   let done = false;
-  const callPromise = safeCall(agent, messages, timeoutMs, signal, (delta) => queue.push(delta))
+  const callPromise = safeCall(agent, messages, timeoutMs, signal, (delta) => queue.push(delta), nativeTools)
     .then((value) => {
       result = value;
     })
@@ -1070,10 +1074,13 @@ function startAgentCallWithDeltaQueue(agent, messages, timeoutMs, signal) {
   };
 }
 
-async function safeCall(agent, messages, timeoutMs, signal, onDelta) {
+async function safeCall(agent, messages, timeoutMs, signal, onDelta, nativeTools) {
   try {
+    if (nativeTools?.length) {
+      return await callAgentResult(agent, messages, { timeoutMs, signal, onDelta, nativeTools });
+    }
     const text = await callAgent(agent, messages, { timeoutMs, signal, onDelta });
-    return { text };
+    return { text, nativeToolCalls: [] };
   } catch (error) {
     if (error.name === "AbortError") throw error;
     return { error: `agent_call_failed:${agent.id}:${error.message}` };

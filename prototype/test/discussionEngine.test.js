@@ -4242,6 +4242,90 @@ test("primary executor completes a deterministic project through real writes tes
   }
 });
 
+test("provider-native tool calls execute through the council permission and verification loop", async () => {
+  const groupPath = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-native-tools-"));
+  fs.mkdirSync(path.join(groupPath, "sessions"), { recursive: true });
+  fs.writeFileSync(path.join(groupPath, "group.json"), JSON.stringify({
+    id: "native-tools",
+    name: "Native Tools",
+    permissions: { defaultTier: "text", seatTiers: { executor: "full" } },
+    seats: [
+      { seatId: "executor", displayName: "Executor", enabled: true, privateFolder: "members/Executor" },
+      { seatId: "finalizer", displayName: "Finalizer", enabled: true, judge: true, privateFolder: "members/Finalizer" }
+    ]
+  }), "utf8");
+  let executorStep = 0;
+  const requestBodies = [];
+  const server = http.createServer(async (req, res) => {
+    const body = JSON.parse(await readRequestBody(req));
+    requestBodies.push(body);
+    const prompt = JSON.stringify(body.messages || []);
+    if (prompt.includes("FinalDecision JSON object")) {
+      writeOpenAiStream(res, JSON.stringify({
+        answer: "Native tools wrote and tested the project.",
+        consensus_score: 1,
+        supporting_agents: ["Executor"],
+        dissenting_agents: [],
+        minority_report: "",
+        risks: [],
+        next_actions: [],
+        selected_file_operation_ids: [],
+        memory_candidates: []
+      }));
+      return;
+    }
+    if (executorStep === 0) {
+      executorStep += 1;
+      writeOpenAiNativeToolStream(res, [
+        { tool: "workspace_edit", action: "write", path: "shared/native/package.json", code: "{\"type\":\"module\",\"scripts\":{\"test\":\"node --test\"}}\n", reason: "Create package" },
+        { tool: "workspace_edit", action: "write", path: "shared/native/app.js", code: "export const value = 42;\n", reason: "Create source" },
+        { tool: "workspace_edit", action: "write", path: "shared/native/app.test.js", code: "import test from 'node:test'; import assert from 'node:assert/strict'; import { value } from './app.js'; test('value',()=>assert.equal(value,42));\n", reason: "Create test" }
+      ]);
+      return;
+    }
+    if (executorStep === 1) {
+      executorStep += 1;
+      writeOpenAiNativeToolStream(res, [{ tool: "run_tests", runner: "custom", cwd: "shared/native", command: "node --test", reason: "Verify project" }]);
+      return;
+    }
+    writeOpenAiStream(res, JSON.stringify({
+      status: "speak",
+      position: "executor",
+      argument: "The native tool test passed.",
+      objections: [],
+      objection_items: [],
+      resolved_ids: [],
+      file_operations: [],
+      tool_requests: [],
+      memory_candidates: []
+    }));
+  });
+  await listen(server);
+
+  try {
+    const apiBaseUrl = `http://127.0.0.1:${server.address().port}/v1`;
+    const group = validateGroupConfig({
+      id: "native-tools",
+      name: "Native Tools",
+      settings: { maxRounds: 2, minConsensusWeight: 1, stopWhenAllSkip: true, agentTimeoutMs: 3000, maxToolIterations: 4 },
+      agents: [
+        { id: "executor", name: "Executor", role: "Builder", provider: "openai-compatible", apiBaseUrl, allowUnsafePrivateNetwork: true, apiKey: "test-key", model: "test-model", weight: 1, enabled: true },
+        { id: "finalizer", name: "Finalizer", role: "Finalizer", provider: "openai-compatible", apiBaseUrl, allowUnsafePrivateNetwork: true, apiKey: "test-key", model: "test-model", weight: 1, enabled: true, judge: true }
+      ]
+    });
+    const { session } = await runCouncil("Create and test a small project.", group, groupPath, { groupPath });
+    assert.equal(fs.readFileSync(path.join(groupPath, "shared", "native", "app.js"), "utf8"), "export const value = 42;\n");
+    const testResult = session.toolExecutionResults.find((item) => item.tool === "run_tests");
+    assert.equal(testResult.result.passed, true);
+    assert.equal(session.executionState.phase, "complete");
+    assert.equal(requestBodies[0].tools[0].function.name, "ai_council_tool");
+    assert.equal(requestBodies[0].tools[0].function.parameters.properties.tool.enum.includes("workspace_edit"), true);
+    assert.equal(session.toolRequests.filter((item) => item.tool === "workspace_edit").length, 3);
+  } finally {
+    await close(server);
+  }
+});
+
 test("full permission executes approved file operation proposals during the round", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-full-round-files-"));
   const groupPath = path.join(tmp, "group");
@@ -6154,6 +6238,18 @@ function listen(server) {
 
 function close(server) {
   return new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+}
+
+function writeOpenAiNativeToolStream(res, requests) {
+  res.writeHead(200, { "Content-Type": "text/event-stream; charset=utf-8" });
+  const toolCalls = requests.map((request, index) => ({
+    index,
+    id: `native_${index + 1}`,
+    function: { name: "ai_council_tool", arguments: JSON.stringify(request) }
+  }));
+  res.write(`data: ${JSON.stringify({ choices: [{ delta: { tool_calls: toolCalls } }] })}\n\n`);
+  res.write("data: [DONE]\n\n");
+  res.end();
 }
 
 async function readRequestBody(req) {

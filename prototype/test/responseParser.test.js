@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parseFinalDecision, parseRoundResponse } from "../src/responseParser.js";
+import { parseFinalDecision, parseRoundModelResult, parseRoundResponse } from "../src/responseParser.js";
 
 test("round response parser preserves structured artifacts", () => {
   const parsed = parseRoundResponse(JSON.stringify({
@@ -75,6 +75,17 @@ test("round response parser preserves unavailable status", () => {
     reason: "rate_limited",
     retryable: true
   });
+});
+
+test("native tool calls remain actionable even when the provider returns no JSON text", () => {
+  const parsed = parseRoundModelResult("", [{
+    id: "call_1",
+    name: "ai_council_tool",
+    arguments: JSON.stringify({ tool: "read_file", path: "README.md", reason: "Inspect" })
+  }]);
+  assert.equal(parsed.status, "speak");
+  assert.equal(parsed.tool_requests[0].tool, "read_file");
+  assert.equal(parsed.tool_requests[0].path, "README.md");
 });
 
 test("round response parser does not treat non-json provider output as a normal speech", () => {

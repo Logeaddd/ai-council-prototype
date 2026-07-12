@@ -1,8 +1,14 @@
 import { scheduleProviderCall } from "./rateLimiter.js";
 import { assertSafeApiBaseUrl } from "./apiBaseUrlGuard.js";
+import { anthropicToolDefinitions, openAiToolDefinitions } from "./nativeToolProtocol.js";
 
 export async function callAgent(agent, messages, options = {}) {
-  if (agent.provider === "mock") return callMockAgent(agent, messages, options);
+  const result = await callAgentResult(agent, messages, options);
+  return result.text;
+}
+
+export async function callAgentResult(agent, messages, options = {}) {
+  if (agent.provider === "mock") return { text: await callMockAgent(agent, messages, options), nativeToolCalls: [] };
   if (agent.provider === "openai-compatible") return callOpenAiCompatible(agent, messages, options);
   if (agent.provider === "anthropic-messages") return callAnthropicMessages(agent, messages, options);
   throw new Error(`Unsupported provider: ${agent.provider}`);
@@ -30,6 +36,9 @@ async function callOpenAiCompatible(agent, messages, options) {
           options
         });
       } catch (error) {
+        if (options.nativeTools?.length && isNativeToolUnsupported(error)) {
+          return await callOpenAiCompatibleOnce({ agent, apiBaseUrl, apiKey, model, messages, options: { ...options, nativeTools: [] } });
+        }
         if (error.name === "AbortError" || attempt >= maxRetries || !isRetryableError(error)) {
           throw error;
         }
@@ -62,6 +71,9 @@ async function callAnthropicMessages(agent, messages, options) {
           options
         });
       } catch (error) {
+        if (options.nativeTools?.length && isNativeToolUnsupported(error)) {
+          return await callAnthropicMessagesOnce({ agent, apiBaseUrl, apiKey, model, messages, options: { ...options, nativeTools: [] } });
+        }
         if (error.name === "AbortError" || attempt >= maxRetries || !isRetryableError(error)) {
           throw error;
         }
@@ -78,7 +90,8 @@ async function callAnthropicMessagesOnce({ agent, apiBaseUrl, apiKey, model, mes
   const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? 60000);
   const payload = buildAnthropicMessagesPayload(agent, {
     model,
-    messages
+    messages,
+    nativeTools: options.nativeTools
   });
   try {
     const response = await fetch(`${apiBaseUrl.replace(/\/$/, "")}/messages`, {
@@ -94,8 +107,9 @@ async function callAnthropicMessagesOnce({ agent, apiBaseUrl, apiKey, model, mes
     if (!response.ok) throw await httpError(response);
     const parsed = await response.json();
     const text = readAnthropicText(parsed);
+    const nativeToolCalls = readAnthropicToolCalls(parsed);
     if (text) options.onDelta?.(text);
-    return text;
+    return { text, nativeToolCalls };
   } finally {
     options.signal?.removeEventListener("abort", abortFromParent);
     clearTimeout(timeout);
@@ -109,7 +123,8 @@ async function callOpenAiCompatibleOnce({ agent, apiBaseUrl, apiKey, model, mess
   const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? 60000);
   const payload = buildOpenAiCompatiblePayload(agent, {
     model,
-    messages
+    messages,
+    nativeTools: options.nativeTools
   });
   try {
     const response = await fetch(`${apiBaseUrl.replace(/\/$/, "")}/chat/completions`, {
@@ -129,18 +144,19 @@ async function callOpenAiCompatibleOnce({ agent, apiBaseUrl, apiKey, model, mess
   }
 }
 
-export function buildOpenAiCompatiblePayload(agent, { model, messages }) {
+export function buildOpenAiCompatiblePayload(agent, { model, messages, nativeTools }) {
   return {
     model,
     messages: applyProviderPromptCache(agent, messages),
     max_tokens: normalizeMaxTokens(agent.maxTokens ?? agent.max_tokens ?? 4096),
     temperature: 0.2,
     stream: true,
+    ...(nativeTools?.length ? { tools: openAiToolDefinitions(nativeTools), tool_choice: "auto" } : {}),
     ...openAiReasoningPayload(agent, model)
   };
 }
 
-export function buildAnthropicMessagesPayload(agent, { model, messages }) {
+export function buildAnthropicMessagesPayload(agent, { model, messages, nativeTools }) {
   const system = messages
     .filter((message) => message.role === "system")
     .map((message) => stringifyMessageContent(message.content))
@@ -161,6 +177,7 @@ export function buildAnthropicMessagesPayload(agent, { model, messages }) {
     messages: anthropicMessages.length ? anthropicMessages : [{ role: "user", content: "" }],
     max_tokens: maxTokens,
     temperature: 0.2,
+    ...(nativeTools?.length ? { tools: anthropicToolDefinitions(nativeTools) } : {}),
     ...anthropicThinkingPayload(agent, model, maxTokens)
   };
 }
@@ -218,6 +235,13 @@ function readAnthropicText(payload) {
   return payload.content
     .map((block) => block?.type === "text" ? block.text || "" : "")
     .join("");
+}
+
+function readAnthropicToolCalls(payload) {
+  if (!Array.isArray(payload?.content)) return [];
+  return payload.content
+    .filter((block) => block?.type === "tool_use" && block.name)
+    .map((block) => ({ id: String(block.id || ""), name: String(block.name), input: block.input || {} }));
 }
 
 function stringifyMessageContent(content) {
@@ -283,11 +307,12 @@ async function httpError(response) {
 }
 
 async function readOpenAiStream(response, onDelta) {
-  if (!response.body) return "";
+  if (!response.body) return { text: "", nativeToolCalls: [] };
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
   let content = "";
+  const toolCalls = new Map();
 
   while (true) {
     const { value, done } = await reader.read();
@@ -298,20 +323,26 @@ async function readOpenAiStream(response, onDelta) {
     for (const frame of frames) {
       const delta = parseOpenAiStreamFrame(frame);
       if (!delta) continue;
-      content += delta;
-      onDelta?.(delta);
+      if (delta.text) {
+        content += delta.text;
+        onDelta?.(delta.text);
+      }
+      mergeOpenAiToolCallDeltas(toolCalls, delta.toolCalls);
     }
   }
 
   if (buffer.trim()) {
     const delta = parseOpenAiStreamFrame(buffer);
     if (delta) {
-      content += delta;
-      onDelta?.(delta);
+      if (delta.text) {
+        content += delta.text;
+        onDelta?.(delta.text);
+      }
+      mergeOpenAiToolCallDeltas(toolCalls, delta.toolCalls);
     }
   }
 
-  return content;
+  return { text: content, nativeToolCalls: [...toolCalls.values()] };
 }
 
 function parseOpenAiStreamFrame(frame) {
@@ -321,16 +352,37 @@ function parseOpenAiStreamFrame(frame) {
     .filter((line) => line.startsWith("data:"))
     .map((line) => line.slice(5).trim());
   let text = "";
+  const toolCalls = [];
   for (const data of dataLines) {
     if (!data || data === "[DONE]") continue;
     try {
       const parsed = JSON.parse(data);
-      text += parsed?.choices?.[0]?.delta?.content || "";
+      const delta = parsed?.choices?.[0]?.delta || {};
+      text += delta.content || "";
+      for (const call of Array.isArray(delta.tool_calls) ? delta.tool_calls : []) {
+        toolCalls.push({
+          index: Number(call.index) || 0,
+          id: String(call.id || ""),
+          name: String(call.function?.name || ""),
+          arguments: String(call.function?.arguments || "")
+        });
+      }
     } catch {
       // Ignore malformed stream frames; final parsing will handle incomplete JSON.
     }
   }
-  return text;
+  return { text, toolCalls };
+}
+
+function mergeOpenAiToolCallDeltas(target, deltas = []) {
+  for (const delta of deltas || []) {
+    const key = Number(delta.index) || 0;
+    const current = target.get(key) || { id: "", name: "", arguments: "" };
+    current.id ||= delta.id;
+    current.name ||= delta.name;
+    current.arguments += delta.arguments || "";
+    target.set(key, current);
+  }
 }
 
 function resolveMaybeEnv(value) {
@@ -345,6 +397,10 @@ function resolveMaybeEnv(value) {
 
 function isRetryableError(error) {
   return [429, 500, 502, 503, 504].includes(Number(error.status));
+}
+
+function isNativeToolUnsupported(error) {
+  return [400, 404, 422].includes(Number(error?.status)) && /tool|function/i.test(String(error?.message || ""));
 }
 
 function normalizeRetryCount(value) {

@@ -2,6 +2,30 @@ import { ROUND_STATUSES } from "./types.js";
 import { normalizeObjectionItems, normalizeResolvedIds } from "./objectionLedger.js";
 import { normalizeToolRequests } from "./toolRequests.js";
 import { normalizeDeliverableClaims } from "./deliverableVerification.js";
+import { normalizeNativeToolCalls } from "./nativeToolProtocol.js";
+
+export function parseRoundModelResult(rawText, nativeToolCalls = []) {
+  const nativeRequests = normalizeNativeToolCalls(nativeToolCalls);
+  const parsed = parseRoundResponse(rawText);
+  if (!nativeRequests.length) return parsed;
+  if (parsed.status === "speak") {
+    return { ...parsed, tool_requests: [...parsed.tool_requests, ...nativeRequests].slice(0, 8) };
+  }
+  return {
+    status: "speak",
+    position: "execution",
+    argument: String(rawText || "").trim() || "Using a real tool now.",
+    objections: [],
+    objection_items: [],
+    resolved_ids: [],
+    suggested_revision: undefined,
+    artifacts: [],
+    file_operations: [],
+    tool_requests: nativeRequests,
+    confidence: undefined,
+    memory_candidates: []
+  };
+}
 
 export function parseRoundResponse(rawText) {
   const parsed = parseJsonLike(rawText);
