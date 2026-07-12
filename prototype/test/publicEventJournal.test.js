@@ -3,8 +3,9 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import { executeToolRequests } from "../src/toolRequests.js";
-import { loadPublicEvent, queryPublicEvents, readPublicEventHotCache, rebuildPublicEventIndex } from "../src/publicEventJournal.js";
+import { loadPublicEvent, queryPublicEvents, readPublicEventCompression, readPublicEventHotCache, rebuildPublicEventIndex } from "../src/publicEventJournal.js";
 import { writeGroupSession } from "../src/storage.js";
 
 test("public event journal appends typed session events without duplicating repeated saves", () => {
@@ -116,6 +117,26 @@ test("text-only members can search and load exact retained public events", async
   assert.match(loaded.results[0].result.content.payload.response.argument, /implementation/);
 });
 
+test("derived compression keeps complete provenance and never rewrites the raw journal", () => {
+  const groupPath = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-event-compression-"));
+  writeGroupSession(sampleSession(), groupPath);
+  const journalPath = path.join(groupPath, "shared", "memory", "events", "public-events.jsonl");
+  const before = sha256(journalPath);
+  const compression = readPublicEventCompression(groupPath);
+  const window = compression.windows.find((item) => item.sessionId === "session_events_1");
+  assert.ok(window);
+  assert.equal(window.sourceEventIds.length, window.eventCount);
+  assert.match(window.summary, /implementation is ready/);
+  for (const eventId of window.sourceEventIds) {
+    assert.equal(loadPublicEvent(groupPath, eventId).eventId, eventId);
+  }
+  assert.equal(sha256(journalPath), before);
+
+  const compressedPath = path.join(groupPath, "shared", "memory", "events", "public-events.compressed.json");
+  fs.writeFileSync(compressedPath, "stale", "utf8");
+  assert.equal(readPublicEventCompression(groupPath).windows[0].sourceEventIds.length, window.sourceEventIds.length);
+});
+
 function sampleSession() {
   return {
     id: "session_events_1",
@@ -149,4 +170,8 @@ function sampleSession() {
     fileOperationExecutionResults: [],
     rejectedToolRequests: []
   };
+}
+
+function sha256(filePath) {
+  return crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
 }

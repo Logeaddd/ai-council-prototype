@@ -4,6 +4,7 @@ import path from "node:path";
 const JOURNAL_SCHEMA = "ai-council.public-event.v1";
 const INDEX_SCHEMA = "ai-council.public-event-index.v1";
 const HOT_CACHE_SCHEMA = "ai-council.public-event-hot-cache.v1";
+const COMPRESSION_SCHEMA = "ai-council.public-event-compression.v1";
 const MAX_INDEX_TEXT = 2400;
 const DEFAULT_HOT_EVENTS = 40;
 const MAX_HOT_EVENTS = 120;
@@ -50,6 +51,20 @@ export function readPublicEventHotCache(groupPath, options = {}) {
     const cache = writeHotCache(paths, index);
     const filtered = filteredHotCache(cache, options);
     return { ...filtered, events: filtered.events.slice(-limit) };
+  }
+}
+
+export function readPublicEventCompression(groupPath) {
+  const paths = journalPaths(groupPath);
+  const journalBytes = fs.existsSync(paths.journal) ? fs.statSync(paths.journal).size : 0;
+  try {
+    const compression = JSON.parse(fs.readFileSync(paths.compression, "utf8"));
+    if (compression?.schema !== COMPRESSION_SCHEMA || !Array.isArray(compression.windows) || Number(compression.sourceJournalBytes || 0) !== journalBytes) {
+      throw new Error("stale compression");
+    }
+    return compression;
+  } catch {
+    return writeCompression(paths, readOrRebuildIndex(groupPath));
   }
 }
 
@@ -137,6 +152,7 @@ export function rebuildPublicEventIndex(groupPath) {
   }
   writeIndex(paths.index, index);
   writeHotCache(paths, index);
+  writeCompression(paths, index);
   return index;
 }
 
@@ -364,6 +380,67 @@ function filteredHotCache(cache, options) {
   };
 }
 
+function writeCompression(paths, index) {
+  const bySession = new Map();
+  for (const event of index.events) {
+    if (!bySession.has(event.sessionId)) bySession.set(event.sessionId, []);
+    bySession.get(event.sessionId).push(event);
+  }
+  const windows = [...bySession.entries()].map(([sessionId, events]) => compressedWindow(sessionId, events));
+  const compression = {
+    schema: COMPRESSION_SCHEMA,
+    source: "deterministic_derivation_from_public_event_journal",
+    sourceJournalPath: index.journalPath,
+    sourceJournalBytes: fs.existsSync(paths.journal) ? fs.statSync(paths.journal).size : 0,
+    rebuiltAt: new Date().toISOString(),
+    windows
+  };
+  const temporary = `${paths.compression}.tmp`;
+  fs.writeFileSync(temporary, JSON.stringify(compression, null, 2), "utf8");
+  fs.renameSync(temporary, paths.compression);
+  return compression;
+}
+
+function compressedWindow(sessionId, events) {
+  const sorted = [...events].sort((a, b) => a.sequence - b.sequence);
+  const user = sorted.find((item) => item.type === "user_message");
+  const final = [...sorted].reverse().find((item) => item.type === "final_decision");
+  const failures = sorted.filter((item) => ["failed", "unavailable", "rejected", "needs_revision", "guard_stopped"].includes(normalize(item.status)));
+  const latestMembers = sorted.filter((item) => item.type === "member_message").slice(-3);
+  return {
+    id: `session-window:${sessionId}`,
+    sessionId,
+    sourceEventIds: sorted.map((item) => item.id),
+    sourceSequenceStart: sorted[0]?.sequence || 0,
+    sourceSequenceEnd: sorted.at(-1)?.sequence || 0,
+    eventCount: sorted.length,
+    occurredAtStart: sorted[0]?.occurredAt || "",
+    occurredAtEnd: sorted.at(-1)?.occurredAt || "",
+    typeCounts: countValues(sorted.map((item) => item.type)),
+    actors: unique(sorted.map((item) => item.actorName || item.actorId)),
+    statuses: unique(sorted.map((item) => item.status)),
+    tools: unique(sorted.map((item) => item.tool)),
+    filePaths: unique(sorted.flatMap((item) => item.filePaths || [])).slice(0, 200),
+    commitHashes: unique(sorted.flatMap((item) => item.commitHashes || [])).slice(0, 50),
+    summary: [
+      user?.preview ? `User: ${user.preview}` : "",
+      ...latestMembers.map((item) => `${item.actorName || item.actorId || "Member"} [${item.status || "unknown"}]: ${item.preview || ""}`),
+      ...failures.slice(-3).map((item) => `Failure ${item.type} [${item.status}]: ${item.preview || ""}`),
+      final?.preview ? `Final [${final.status || "unknown"}]: ${final.preview}` : ""
+    ].filter(Boolean).join("\n")
+  };
+}
+
+function countValues(values) {
+  const counts = {};
+  for (const value of values.filter(Boolean)) counts[value] = Number(counts[value] || 0) + 1;
+  return counts;
+}
+
+function unique(values) {
+  return [...new Set(values.map((item) => String(item || "").trim()).filter(Boolean))];
+}
+
 function emptyIndex(journalPath) {
   return { schema: INDEX_SCHEMA, journalPath, journalBytes: 0, lastSequence: 0, invalidLines: 0, updatedAt: "", events: [] };
 }
@@ -376,6 +453,7 @@ function journalPaths(groupPath) {
     journal: path.join(dir, "public-events.jsonl"),
     index: path.join(dir, "public-events.index.json"),
     hotCache: path.join(dir, "public-events.hot.json"),
+    compression: path.join(dir, "public-events.compressed.json"),
     relativeJournal: "shared/memory/events/public-events.jsonl"
   };
 }
