@@ -162,6 +162,19 @@ test("delivery classification ignores review nouns and path mentions", () => {
   assert.equal(isDeliveryTask("审查这个项目里的代码和文件，只给建议，不要改动。"), false);
 });
 
+test("review directive is not overridden by delivery words inside the supplied project description", () => {
+  const question = [
+    "帮我看看这个项目怎么样：# AI Alex 项目完整介绍",
+    "",
+    "The roadmap repeatedly says build, create, implement, fix, package and install.",
+    "项目内部计划包含构建、生成、制作、开发、实现、编写、修改、修复、打包和安装。",
+    "",
+    "对应 Git 版本是 4b813f3。"
+  ].join("\n");
+
+  assert.equal(isDeliveryTask(question), false);
+});
+
 test("delivery classification requires an explicit delivery action", () => {
   assert.equal(isDeliveryTask("Fix the code and build the JAR."), true);
   assert.equal(isDeliveryTask("请修改代码并构建 jar 包。"), true);

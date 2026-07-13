@@ -168,6 +168,39 @@ test("review-only work does not require a workspace mutation", async () => {
   assert.notEqual(session.status, "guard_stopped");
 });
 
+test("review request with embedded build language calls every eligible council member", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-review-collab-"));
+  const group = validateGroupConfig({
+    id: "review-collab",
+    name: "Review Collaboration",
+    settings: {
+      maxRounds: 1,
+      minRounds: 1,
+      minConsensusWeight: 1,
+      stopWhenAllSkip: false,
+      agentTimeoutMs: 1000
+    },
+    agents: [
+      { id: "design", name: "Design", role: "Member", provider: "mock", apiBaseUrl: "mock://local", model: "mock-design", weight: 1, enabled: true },
+      { id: "maker", name: "Maker", role: "Member", provider: "mock", apiBaseUrl: "mock://local", model: "mock-maker", weight: 1, enabled: true },
+      { id: "reviewer", name: "Reviewer", role: "Reviewer", provider: "mock", apiBaseUrl: "mock://local", model: "mock-reviewer", weight: 1, enabled: true, mandatoryRedTeam: true },
+      { id: "finalizer", name: "Finalizer", role: "Finalizer", provider: "mock", apiBaseUrl: "mock://local", model: "mock-finalizer", weight: 1, enabled: true, judge: true }
+    ]
+  });
+  const question = [
+    "帮我看看这个项目怎么样：# AI Alex 项目完整介绍",
+    "",
+    "The internal roadmap says build, create, implement, fix, package and install many times.",
+    "项目文档也反复讨论构建、生成、制作、实现、修改、修复和打包。"
+  ].join("\n");
+
+  const { session } = await runCouncil(question, group, tmp, { groupPath: tmp });
+  const roundSpeakers = session.messages.filter((message) => message.round === 1).map((message) => message.agentId).sort();
+
+  assert.equal(session.executionState.active, false);
+  assert.deepEqual(roundSpeakers, ["design", "maker", "reviewer"]);
+});
+
 test("every council has a hard provider-call budget even for non-delivery discussion", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-call-budget-"));
   const calls = [];
@@ -4477,6 +4510,8 @@ test("provider-native tool calls execute through the council permission and veri
     assert.equal(requestBodies[0].tools[0].function.name, "ai_council_tool");
     assert.equal(requestBodies[0].tools[0].function.parameters.properties.tool.enum.includes("workspace_edit"), true);
     assert.equal(session.toolRequests.filter((item) => item.tool === "workspace_edit").length, 3);
+    assert.equal(session.interimMessages.length, 2);
+    assert.equal(session.interimMessages.every((item) => item.interim === true), true);
   } finally {
     await close(server);
   }
@@ -4586,6 +4621,8 @@ test("truncated structured output recovers through a required native write and r
     assert.equal(verification.result.exitCode, 0);
     assert.equal(session.executionState.phase, "complete");
     assert.equal(session.messages.some((item) => item.response.status === "unavailable"), false);
+    assert.equal(session.interimMessages.some((item) => item.phase === "round" && item.rawText.includes('"tool_requests"')), true);
+    assert.equal(session.interimMessages.some((item) => item.displayText.includes('"path":"shared/recovery/app.js"')), true);
   } finally {
     await close(server);
   }
@@ -4702,6 +4739,7 @@ test("empty file proposal is rejected and repaired by the same executor before t
     assert.equal(session.rejectedFileOperationProposals.some((item) => item.code === "empty_content"), true);
     assert.equal(session.toolExecutionResults.find((item) => item.tool === "run_tests")?.status, "completed");
     assert.equal(session.executionState.phase, "complete");
+    assert.equal(session.interimMessages.some((item) => item.phase === "file_operation_rejected" && item.displayText === "Create the implementation."), true);
   } finally {
     await close(server);
   }

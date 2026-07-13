@@ -123,6 +123,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
     guardStopReason: "",
     finalizationStatus: { status: "pending", reason: "" },
     messages: [],
+    interimMessages: [],
     executionState: createExecutionState({
       question: executionQuestion,
       agents: enabledAgents,
@@ -302,6 +303,24 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
       processResponseFileOperations(response);
 
       if (response.status === "speak" && !response.tool_requests?.length && accumulatedRejectedFileOperationProposals.length) {
+        const rejectedAttempt = buildInterimModelMessage({
+          session,
+          phase: "file_operation_rejected",
+          round,
+          agent,
+          toolIteration: 0,
+          rawText: rawTextForMessage,
+          response
+        });
+        session.interimMessages.push(rejectedAttempt);
+        yield {
+          type: "agent_interim",
+          round,
+          agentId: agent.id,
+          agentName: agent.name,
+          message: rejectedAttempt,
+          createdAt: rejectedAttempt.createdAt
+        };
         const rejectionDetails = accumulatedRejectedFileOperationProposals
           .map((item) => `${item.code || item.status || "rejected"}: ${item.reason || item.autoExecutionReason || "file operation rejected"}`)
           .join("; ")
@@ -750,6 +769,26 @@ async function* callRoundModel({ options, session, phase, round, agent, messages
   const parsedResponse = raw.error
     ? { status: "unavailable", reason: raw.error, retryable: true }
     : parseRoundModelResult(raw.text, raw.nativeToolCalls);
+  if (!raw.error && shouldKeepInterimModelMessage(parsedResponse, formatRecovery)) {
+    const interim = buildInterimModelMessage({
+      session,
+      phase,
+      round,
+      agent,
+      toolIteration,
+      rawText: raw.text,
+      response: parsedResponse
+    });
+    session.interimMessages.push(interim);
+    yield {
+      type: "agent_interim",
+      round,
+      agentId: agent.id,
+      agentName: agent.name,
+      message: interim,
+      createdAt: interim.createdAt
+    };
+  }
   if (formatRecovery && isInvalidStructuredResponse(parsedResponse)) {
     return yield* callRoundModel({
       options,
@@ -779,6 +818,32 @@ async function* callRoundModel({ options, session, phase, round, agent, messages
 
 function isInvalidStructuredResponse(response = {}) {
   return response.status === "unavailable" && String(response.reason || "").startsWith("invalid_json_response");
+}
+
+function shouldKeepInterimModelMessage(response = {}, willRecoverFormat = false) {
+  if (response.status === "speak" && Array.isArray(response.tool_requests) && response.tool_requests.length) return true;
+  return willRecoverFormat && isInvalidStructuredResponse(response);
+}
+
+function buildInterimModelMessage({ session, phase, round, agent, toolIteration, rawText, response }) {
+  const invalid = isInvalidStructuredResponse(response);
+  const displayText = invalid
+    ? String(rawText || response.reason || "").trim()
+    : String(response.argument || response.reason || rawText || "").trim();
+  return {
+    id: makeId("attempt"),
+    round,
+    agentId: agent.id,
+    agentName: agent.name,
+    phase,
+    toolIteration: Number(toolIteration || 0),
+    modelCallIndex: Number(session.modelCallCount || 0),
+    response,
+    displayText,
+    rawText: String(rawText || ""),
+    interim: true,
+    createdAt: nowIso()
+  };
 }
 
 function applyRoundResponseRules(response, agent, round) {
@@ -1013,7 +1078,7 @@ function isContinuationRequest(question) {
 function buildAutomaticContinuationContext(previousSession) {
   if (!previousSession?.id) return null;
   const inherited = normalizeContinuationContext(previousSession.continuationContext);
-  const messages = Array.isArray(previousSession.messages) ? previousSession.messages : [];
+  const messages = allSessionMessages(previousSession);
   const latestByAgent = new Map();
   for (const message of messages) {
     const key = String(message.agentId || message.agentName || "").trim();
@@ -1046,6 +1111,17 @@ function buildAutomaticContinuationContext(previousSession) {
     participantMessages,
     recentMessages,
     recentActivity: recentActivity.length ? recentActivity : inherited?.recentActivity
+  });
+}
+
+function allSessionMessages(session = {}) {
+  return [
+    ...(Array.isArray(session.interimMessages) ? session.interimMessages : []),
+    ...(Array.isArray(session.messages) ? session.messages : [])
+  ].sort((a, b) => {
+    const time = new Date(a?.createdAt || 0).getTime() - new Date(b?.createdAt || 0).getTime();
+    if (time) return time;
+    return Number(a?.modelCallIndex || 0) - Number(b?.modelCallIndex || 0);
   });
 }
 

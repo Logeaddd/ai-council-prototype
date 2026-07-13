@@ -241,17 +241,22 @@ function buildSessionEvents(session) {
     pointer: "/question"
   })];
 
-  for (const [index, message] of array(session.messages).entries()) {
+  const transcriptMessages = [
+    ...array(session.interimMessages).map((message, index) => ({ message, field: "interimMessages", index })),
+    ...array(session.messages).map((message, index) => ({ message, field: "messages", index }))
+  ].sort((a, b) => new Date(a.message?.createdAt || 0).getTime() - new Date(b.message?.createdAt || 0).getTime());
+  for (const item of transcriptMessages) {
+    const { message, field, index } = item;
     events.push(makeEvent(base, {
-      id: `${sessionId}:message:${index}`,
-      type: "member_message",
+      id: field === "interimMessages" ? `${sessionId}:interim:${index}` : `${sessionId}:message:${index}`,
+      type: message.interim ? "member_interim" : "member_message",
       occurredAt: message.createdAt || message.startedAt,
       actor: actor(message),
       round: message.round,
       status: message.response?.status || "unknown",
       text: message.response?.argument || message.response?.reason || message.displayText || "",
       payload: publicMessage(message),
-      pointer: `/messages/${index}`
+      pointer: `/${field}/${index}`
     }));
   }
   addCollectionEvents(events, base, session.toolExecutionResults, "tool_result", "toolExecutionResults");
@@ -333,6 +338,10 @@ function publicMessage(message = {}) {
     response: message.response || null,
     artifacts: array(message.artifacts),
     displayText: message.displayText || "",
+    rawText: message.rawText || "",
+    interim: Boolean(message.interim),
+    phase: message.phase || "",
+    modelCallIndex: Number(message.modelCallIndex || 0),
     error: message.error || "",
     startedAt: message.startedAt || "",
     createdAt: message.createdAt || "",

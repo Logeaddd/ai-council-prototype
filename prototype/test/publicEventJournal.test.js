@@ -75,6 +75,33 @@ test("public event index queries actor type task file commit tool status and exa
   assert.match(loaded.sourcePath, /public-events\.jsonl#event=/);
 });
 
+test("public event journal keeps interim member attempts as searchable retained events", () => {
+  const groupPath = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-interim-events-"));
+  const session = sampleSession();
+  session.interimMessages = [{
+    id: "attempt-1",
+    round: 1,
+    agentId: "builder",
+    agentName: "Builder",
+    response: { status: "speak", argument: "I found a build risk before using the tool." },
+    displayText: "I found a build risk before using the tool.",
+    rawText: '{"status":"speak","argument":"I found a build risk before using the tool.","tool_requests":[{"tool":"read_file"}]}',
+    interim: true,
+    phase: "round",
+    modelCallIndex: 1,
+    createdAt: "2026-07-12T10:00:30.000Z"
+  }];
+
+  writeGroupSession(session, groupPath);
+  writeGroupSession(session, groupPath);
+
+  const attempts = queryPublicEvents(groupPath, { type: "member_interim", actorId: "builder", query: "build risk" });
+  assert.equal(attempts.length, 1);
+  const loaded = loadPublicEvent(groupPath, attempts[0].id);
+  assert.equal(loaded.content.payload.interim, true);
+  assert.match(loaded.content.payload.rawText, /tool_requests/);
+});
+
 test("public event index rebuilds from the append-only journal", () => {
   const groupPath = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-event-rebuild-"));
   writeGroupSession(sampleSession(), groupPath);

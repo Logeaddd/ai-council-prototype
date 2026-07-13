@@ -61,6 +61,44 @@ test("group session history preserves a running session status", () => {
   assert.equal(history[0].status, "running");
 });
 
+test("session history and round archives count interim attempts without dropping final messages", () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-interim-history-"));
+  const session = {
+    id: "session_interim_history",
+    question: "Inspect the project.",
+    status: "completed",
+    createdAt: "2026-07-08T10:00:00.000Z",
+    completedAt: "2026-07-08T10:01:00.000Z",
+    interimMessages: [{
+      id: "attempt-1",
+      round: 1,
+      agentId: "a",
+      agentName: "Member A",
+      response: { status: "speak", argument: "Interim analysis before a tool call." },
+      displayText: "Interim analysis before a tool call.",
+      interim: true,
+      modelCallIndex: 1,
+      createdAt: "2026-07-08T10:00:10.000Z"
+    }],
+    messages: [{
+      round: 1,
+      agentId: "a",
+      agentName: "Member A",
+      response: { status: "speak", argument: "Final member response." },
+      createdAt: "2026-07-08T10:00:30.000Z"
+    }]
+  };
+
+  writeGroupSession(session, tmp);
+  writeContextArchive(session, tmp);
+
+  assert.equal(listGroupSessions(tmp)[0].messageCount, 2);
+  const archivedRound = loadSessionContextArchiveItem(tmp, { sessionId: session.id, round: 1 });
+  assert.equal(archivedRound.content.messages.length, 2);
+  assert.equal(archivedRound.content.messages[0].interim, true);
+  assert.equal(archivedRound.content.messages[1].response.argument, "Final member response.");
+});
+
 test("raw interrupted sessions remain searchable and loadable without a completed archive", () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-interrupted-context-"));
   writeGroupSession({

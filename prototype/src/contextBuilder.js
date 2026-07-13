@@ -17,7 +17,10 @@ export function buildMemberContext(agent, session, options = {}) {
   const latestBossInstruction = options.latestBossInstruction || "";
   const continuationContext = normalizeContinuationContext(options.continuationContext);
   const transcriptVisibility = normalizeTranscriptVisibility(options.transcriptVisibility);
-  const visibleMessages = selectVisibleMessages(session.messages || [], agent, transcriptVisibility);
+  const visibleMessages = selectVisibleMessages([
+    ...(Array.isArray(session.interimMessages) ? session.interimMessages : []),
+    ...(Array.isArray(session.messages) ? session.messages : [])
+  ].sort((a, b) => new Date(a?.createdAt || 0).getTime() - new Date(b?.createdAt || 0).getTime()), agent, transcriptVisibility);
   const latestArtifacts = selectLatestArtifacts(selectVisibleArtifacts(session.artifacts || [], agent, transcriptVisibility));
   const unresolvedObjections = selectVisibleObjections(session.unresolvedObjections || {}, agent, transcriptVisibility);
   const visibleFileOperationExecutionResults = selectVisibleFileOperationResults(session.fileOperationExecutionResults || [], agent, transcriptVisibility);

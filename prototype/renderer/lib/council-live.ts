@@ -102,6 +102,7 @@ export interface CouncilEvent {
 }
 
 export interface CouncilMessage {
+  id?: string
   round?: number
   agentId: string
   agentName: string
@@ -119,6 +120,10 @@ export interface CouncilMessage {
   createdAt?: string
   durationMs?: number
   partial?: boolean
+  interim?: boolean
+  phase?: string
+  modelCallIndex?: number
+  rawText?: string
 }
 
 export interface CouncilFinalDecision {
@@ -138,6 +143,7 @@ export interface CouncilSession {
   id?: string
   question?: string
   messages?: CouncilMessage[]
+  interimMessages?: CouncilMessage[]
   finalDecision?: CouncilFinalDecision
   createdAt?: string
   completedAt?: string
@@ -328,7 +334,7 @@ export function workspaceGroupToRuntimeGroup(
 export function messageToTranscriptItem(message: CouncilMessage): TranscriptItem {
   return {
     kind: "message",
-    id: `${message.agentId}-${message.round || 0}-${message.createdAt || Date.now()}`,
+    id: message.id || `${message.agentId}-${message.round || 0}-${message.createdAt || Date.now()}`,
     agentId: message.agentId,
     visibility: message.response?.unresolved_objections?.length ? "review" : "public",
     time: formatTime(message.createdAt),

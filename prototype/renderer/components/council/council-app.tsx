@@ -720,6 +720,16 @@ export function CouncilApp() {
       upsertPartialMessage(event, nextText)
       return
     }
+    if (event.type === "agent_interim" && event.message) {
+      partials.current[event.message.agentId] = ""
+      const item = messageToTranscriptItem(event.message)
+      setAgentStates((current) => ({ ...current, [event.message?.agentId || ""]: "speaking" }))
+      setItems((current) => [
+        ...current.filter((entry) => entry.id !== `partial-${event.message?.agentId}`),
+        item,
+      ])
+      return
+    }
     if (event.type === "agent_message" && event.message) {
       partials.current[event.message.agentId] = ""
       const item = messageToTranscriptItem(event.message)

@@ -549,6 +549,18 @@ test("renderer does not show failed or incomplete final decisions as completed",
   assert.match(live, /finalState === "ready_to_execute" \|\| finalState === "usable_with_risks" \? "completed" : "unavailable"/);
 });
 
+test("renderer preserves interim streamed member attempts in live and saved history", () => {
+  const app = fs.readFileSync(path.join(root, "renderer", "components", "council", "council-app.tsx"), "utf8");
+  const history = fs.readFileSync(path.join(root, "renderer", "components", "council", "chat-history-sheet.tsx"), "utf8");
+  const live = fs.readFileSync(path.join(root, "renderer", "lib", "council-live.ts"), "utf8");
+
+  assert.match(app, /event\.type === "agent_interim"/);
+  assert.match(app, /partials\.current\[event\.message\.agentId\] = ""/);
+  assert.match(history, /sessionTranscriptMessages\(session\)/);
+  assert.match(history, /session\.interimMessages/);
+  assert.match(live, /interimMessages\?: CouncilMessage\[\]/);
+});
+
 test("renderer displays real duration fields and configurable agent timeout", () => {
   const data = read("renderer/lib/council-data.ts");
   const live = read("renderer/lib/council-live.ts");

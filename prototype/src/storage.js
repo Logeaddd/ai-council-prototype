@@ -306,7 +306,7 @@ export function loadLiveSessionContext(session, request = {}, options = {}) {
 }
 
 function writeRoundArchives(archiveDir, session) {
-  const messages = Array.isArray(session?.messages) ? session.messages : [];
+  const messages = sessionTranscriptMessages(session);
   const roundNumbers = [...new Set(messages.map((message) => Number(message.round || 0)).filter((round) => round > 0))]
     .sort((a, b) => a - b);
   const rounds = [];
@@ -376,7 +376,7 @@ function writeArchivedAttachments(archiveDir, attachments) {
 }
 
 function buildSessionIndexRecord(session, pointers) {
-  const messages = Array.isArray(session?.messages) ? session.messages : [];
+  const messages = sessionTranscriptMessages(session);
   const createdAt = session.createdAt || session.startedAt || messages[0]?.createdAt || nowIso();
   const completedAt = session.completedAt || messages.at(-1)?.createdAt || createdAt;
   return {
@@ -648,7 +648,7 @@ function visibleLiveSession(session, agent = {}, visibility = "full") {
   const ownOnly = visibility === "own";
   const owns = (item = {}) => String(item.agentId || item.source_agent_id || item.sourceAgentId || item.proposedBy?.seatId || item.proposedBy?.id || "") === String(agent.id || "");
   return {
-    messages: (Array.isArray(session.messages) ? session.messages : []).filter((item) => !ownOnly || owns(item)),
+    messages: sessionTranscriptMessages(session).filter((item) => !ownOnly || owns(item)),
     toolExecutionResults: (Array.isArray(session.toolExecutionResults) ? session.toolExecutionResults : []).filter((item) => !ownOnly || owns(item)),
     fileOperationExecutionResults: (Array.isArray(session.fileOperationExecutionResults) ? session.fileOperationExecutionResults : []).filter((item) => !ownOnly || owns(item)),
     fileOperationProposals: (Array.isArray(session.fileOperationProposals) ? session.fileOperationProposals : []).filter((item) => !ownOnly || owns(item))
@@ -827,7 +827,7 @@ function truncate(value, max) {
 }
 
 function summarizeSession(session, fallbackTime) {
-  const messages = Array.isArray(session.messages) ? session.messages : [];
+  const messages = sessionTranscriptMessages(session);
   const createdAt = session.createdAt || session.startedAt || messages[0]?.createdAt || fallbackTime;
   const completedAt = session.completedAt || messages.at(-1)?.createdAt || createdAt;
   const rounds = Math.max(0, ...messages.map((message) => Number(message.round || 0)));
@@ -843,6 +843,17 @@ function summarizeSession(session, fallbackTime) {
     finalState: session.finalDecision?.final_state || "",
     answerPreview: String(session.finalDecision?.answer || "").slice(0, 240)
   };
+}
+
+function sessionTranscriptMessages(session = {}) {
+  return [
+    ...(Array.isArray(session.interimMessages) ? session.interimMessages : []),
+    ...(Array.isArray(session.messages) ? session.messages : [])
+  ].sort((a, b) => {
+    const time = new Date(a?.createdAt || 0).getTime() - new Date(b?.createdAt || 0).getTime();
+    if (time) return time;
+    return Number(a?.modelCallIndex || 0) - Number(b?.modelCallIndex || 0);
+  });
 }
 
 function durationBetween(start, end) {

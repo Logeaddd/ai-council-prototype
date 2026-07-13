@@ -154,7 +154,7 @@ function SessionDetail({ session }: { session: CouncilSession }) {
       </header>
 
       <div className="space-y-2">
-        {(session.messages || []).map((message, index) => (
+        {sessionTranscriptMessages(session).map((message, index) => (
           <div key={`${message.agentId}-${message.createdAt}-${index}`} className="rounded-md border border-border bg-card px-3 py-2.5">
             <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
               <span className="font-medium text-foreground">{message.agentName || message.agentId}</span>
@@ -178,6 +178,17 @@ function SessionDetail({ session }: { session: CouncilSession }) {
       ) : null}
     </div>
   )
+}
+
+function sessionTranscriptMessages(session: CouncilSession) {
+  return [
+    ...(session.interimMessages || []),
+    ...(session.messages || []),
+  ].sort((a, b) => {
+    const time = new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime()
+    if (time) return time
+    return Number(a.modelCallIndex || 0) - Number(b.modelCallIndex || 0)
+  })
 }
 
 function EmptyText({ children }: { children: React.ReactNode }) {
