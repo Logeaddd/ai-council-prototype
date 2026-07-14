@@ -10,6 +10,7 @@ import { addReview, createRecorderDraft, finalizeDraft, listDrafts } from "./wri
 import { readAppSettings } from "./appSettings.js";
 import { runRealProviderBenchmark } from "./realProviderBenchmark.js";
 import { runProductHarnessCheck } from "./productHarness.js";
+import { runSeededRealUserBaseline } from "./realUserHarness.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const baseDir = path.resolve(__dirname, "..");
@@ -67,6 +68,11 @@ async function main() {
     return;
   }
 
+  if (command === "real-user-baseline") {
+    await runRealUserBaselineCommand(args);
+    return;
+  }
+
   if (command === "harness-check") {
     const result = runProductHarnessCheck({
       root: baseDir,
@@ -110,6 +116,26 @@ async function runRealBenchmarkCommand(args) {
     costUsd: run.report.accounting.costUsd,
     finalState: run.report.execution.finalState,
     artifactVerification: run.report.execution.artifactVerification?.status || "not_requested"
+  }, null, 2));
+}
+
+async function runRealUserBaselineCommand(args) {
+  const groupPath = getArg(args, "--group");
+  if (!groupPath) throw new Error("real-user-baseline requires --group with a real provider configuration.");
+  const group = validateGroupConfig(loadJson(groupPath));
+  validateRuntimeEnv(group);
+  const run = await runSeededRealUserBaseline({
+    group,
+    seed: getArg(args, "--seed"),
+    outputDir: getArg(args, "--output", path.join(baseDir, "eval", "real-user"))
+  });
+  console.log(JSON.stringify({
+    runDir: run.runDir,
+    workspacePath: run.groupPath,
+    status: run.report.status,
+    seed: run.report.seed,
+    autonomousExecution: run.report.autonomousExecution.passed,
+    minimumUsableDelivery: run.report.minimumUsableDelivery.passed
   }, null, 2));
 }
 
@@ -298,6 +324,7 @@ function printHelp() {
   node src/cli.js eval-compare --baseline ./eval/reports/baseline --candidate ./eval/reports/candidate
   node src/cli.js eval-compare --baseline ./eval/reports/baseline --candidate ./eval/reports/candidate --mode council-current
   node src/cli.js benchmark-real --group ./config/group.real.json --task ./eval/real-task.json --workspace ./workspace-template --output ./eval/real-provider --max-cost-usd 1.00 --max-model-calls 24
+  node src/cli.js real-user-baseline --group ./config/group.real.json --output ./eval/real-user --seed 20260714
   node src/cli.js harness-check --report ./harness/reports/latest.json
   node src/cli.js workspace init-group --root "D:\\AI小组工作区" --group-folder "产品决策组" --members "gpt-5,claude"
   node src/cli.js workspace replace-member --group-path "D:\\AI小组工作区\\产品决策组" --seat-id seat_01 --next-name gpt-6
