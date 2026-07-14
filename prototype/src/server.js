@@ -696,6 +696,7 @@ async function handleApi(req, res, url) {
       groupPath: workspaceGroupPath,
       globalRequirement: body.globalRequirement || group.settings?.globalRequirement || "",
       continuationContext: body.continuationContext,
+      contextInvalidations: body.contextInvalidations,
       appSettings: readCurrentAppSettings(),
       attachments: normalizeFileAttachments(body.attachments || [])
     });
@@ -765,6 +766,7 @@ async function handleApi(req, res, url) {
       startAtAgentId: body.startAtAgentId || "",
       resumeInstruction: body.resumeInstruction || "",
       continuationContext: body.continuationContext,
+      contextInvalidations: body.contextInvalidations,
       appSettings: readCurrentAppSettings(),
       attachments: normalizeFileAttachments(body.attachments || [])
     });

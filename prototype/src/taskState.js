@@ -36,6 +36,7 @@ export function updateTaskStateFromSession(groupPath, session) {
     risks: normalizeTextList(finalDecision.risks || finalDecision.unresolved_risks),
     nextActions: normalizeTextList(finalDecision.next_actions),
     pendingFiles: buildPendingFiles(session),
+    invalidations: mergeInvalidations(previous.invalidations, session.contextInvalidations),
     resolved: buildResolvedItems(previous.resolved, session),
     executionCheckpoint: normalizeExecutionCheckpoint(session.executionState, session)
   };
@@ -77,6 +78,7 @@ export function formatTaskStateForPrompt(state) {
     risks: normalized.risks,
     nextActions: normalized.nextActions,
     pendingFiles: normalized.pendingFiles,
+    invalidations: normalized.invalidations,
     resolved: normalized.resolved.slice(-8),
     executionCheckpoint: normalized.executionCheckpoint
   }, null, 2);
@@ -157,6 +159,7 @@ function normalizeTaskState(value = {}) {
     risks: normalizeTextList(value.risks),
     nextActions: normalizeTextList(value.nextActions),
     pendingFiles: normalizeObjects(value.pendingFiles),
+    invalidations: normalizeInvalidations(value.invalidations),
     resolved: normalizeObjects(value.resolved),
     executionCheckpoint: normalizeExecutionCheckpoint(value.executionCheckpoint)
   };
@@ -189,6 +192,7 @@ function defaultTaskState(extra = {}) {
     risks: [],
     nextActions: [],
     pendingFiles: [],
+    invalidations: [],
     resolved: [],
     ...extra
   });
@@ -200,6 +204,26 @@ function taskStatePath(groupPath) {
 
 function normalizeObjects(value) {
   return Array.isArray(value) ? value.filter((item) => item && typeof item === "object") : [];
+}
+
+function mergeInvalidations(previous, next) {
+  const byKey = new Map();
+  for (const item of [...normalizeInvalidations(previous), ...normalizeInvalidations(next)]) {
+    byKey.set(`${item.source.type}\u001f${item.source.id}`, item);
+  }
+  return [...byKey.values()];
+}
+
+function normalizeInvalidations(value) {
+  return (Array.isArray(value) ? value : []).map((item) => {
+    const source = item?.source || item;
+    const supersededBy = item?.supersededBy || item?.superseded_by;
+    return {
+      source: { type: String(source?.type || "").trim(), id: String(source?.id || "").trim() },
+      supersededBy: { type: String(supersededBy?.type || "").trim(), id: String(supersededBy?.id || "").trim() },
+      reason: String(item?.reason || "explicit_source_invalidation").trim()
+    };
+  }).filter((item) => item.source.type && item.source.id && item.supersededBy.type && item.supersededBy.id);
 }
 
 function normalizeTextList(value) {

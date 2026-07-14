@@ -15,6 +15,11 @@ test("task state ledger records public final state without private chat", () => 
     pendingFileOperationProposals: [
       { id: "fop_1", op: "write", path: "plan.md", status: "pending_user_approval", source_agent_name: "Builder" }
     ],
+    contextInvalidations: [{
+      source: { type: "member_message", id: "old_requirement" },
+      supersededBy: { type: "session_question", id: "session_task_1" },
+      reason: "user_replaced_requirement"
+    }],
     finalDecision: {
       final_state: "usable_with_risks",
       answer: "Use option A.",
@@ -36,6 +41,9 @@ test("task state ledger records public final state without private chat", () => 
   assert.equal(saved.blockers[0].issue, "Missing test evidence");
   assert.equal(saved.pendingFiles[0].selected, true);
   assert.equal(saved.resolved[0].finalState, "usable_with_risks");
+  assert.equal(saved.invalidations[0].source.id, "old_requirement");
+  assert.equal(saved.invalidations[0].supersededBy.id, "session_task_1");
+  assert.match(formatTaskStateForPrompt(saved), /invalidations/);
   assert.doesNotMatch(raw, /private/i);
 });
 

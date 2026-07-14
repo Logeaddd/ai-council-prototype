@@ -26,8 +26,8 @@ test("context pressure baseline uses retained sessions, a rebuilt public index, 
 
     const repeated = run.report.scenarios.find((scenario) => scenario.id === "repeated_execution_evidence");
     assert.equal(repeated.metrics.deduplicated, 95);
-    assert.equal(repeated.metrics.injected, 0, "baseline must expose that current section ordering can omit the latest evidence");
-    assert.equal(repeated.metrics.latestEvidenceVisible, false);
+    assert.equal(repeated.metrics.injected, 1);
+    assert.equal(repeated.metrics.latestEvidenceVisible, true);
     assert.equal(fs.existsSync(path.join(run.runDir, "report.json")), true);
   } finally {
     fs.rmSync(outputDir, { recursive: true, force: true });

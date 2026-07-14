@@ -778,3 +778,37 @@ test("context receipts retain source pointers and explain transcript, evidence, 
   assert.equal(receipt.privacy.privateBossMessages, "injected_source_redacted");
   assert.doesNotMatch(JSON.stringify(receipt), /PRIVATE_RECEIPT_SECRET/);
 });
+
+test("explicit context invalidation preserves raw history while excluding superseded sources from the active prompt", () => {
+  const session = {
+    id: "session_invalidation_1",
+    question: "Apply the current requirement.",
+    unresolvedObjections: {},
+    artifacts: [],
+    messages: [
+      { id: "old_rule", round: 1, agentId: "writer", agentName: "Writer", response: { status: "speak", argument: "Use the OLD_RENDER_RULE." } },
+      { id: "neutral", round: 2, agentId: "writer", agentName: "Writer", response: { status: "speak", argument: "Waiting for the current requirement." } }
+    ]
+  };
+  const context = buildMemberContext(agent, session, {
+    latestBossInstruction: "Use the CURRENT_RENDER_RULE instead.",
+    contextInvalidations: [{
+      source: { type: "member_message", id: "old_rule" },
+      supersededBy: { type: "latest_boss_instruction", id: "session_invalidation_1:latest" },
+      reason: "user_replaced_render_requirement"
+    }]
+  });
+  const prompt = buildContextPromptSections(context).map((section) => section.content).join("\n");
+  const invalidated = context.contextReceipt.policy.invalidatedSources[0];
+
+  assert.match(prompt, /CURRENT_RENDER_RULE/);
+  assert.doesNotMatch(prompt, /OLD_RENDER_RULE/);
+  assert.equal(session.messages[0].response.argument, "Use the OLD_RENDER_RULE.");
+  assert.deepEqual(invalidated, {
+    source: { type: "member_message", id: "old_rule", sessionId: "session_invalidation_1", agentId: "writer", round: 1 },
+    supersededBy: { type: "latest_boss_instruction", id: "session_invalidation_1:latest" },
+    reason: "user_replaced_render_requirement",
+    status: "invalidated"
+  });
+  assert.equal(context.contextReceipt.policy.priorityDecisions.some((item) => item.rule === "current_instruction_outranks_retained_history"), true);
+});

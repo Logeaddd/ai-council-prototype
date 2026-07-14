@@ -17,23 +17,32 @@ export function buildMemberContext(agent, session, options = {}) {
   const latestBossInstruction = options.latestBossInstruction || "";
   const continuationContext = normalizeContinuationContext(options.continuationContext);
   const transcriptVisibility = normalizeTranscriptVisibility(options.transcriptVisibility);
-  const visibleMessages = selectVisibleMessages([
+  const priorityPolicy = buildContextPriorityPolicy(options);
+  const candidateMessages = selectVisibleMessages([
     ...(Array.isArray(session.interimMessages) ? session.interimMessages : []),
     ...(Array.isArray(session.messages) ? session.messages : [])
   ].sort((a, b) => new Date(a?.createdAt || 0).getTime() - new Date(b?.createdAt || 0).getTime()), agent, transcriptVisibility);
+  const transcriptSelection = excludeInvalidatedContextItems(candidateMessages, (message, index) => transcriptSource(message, String(session?.id || "active-session"), index), priorityPolicy);
+  const visibleMessages = transcriptSelection.items;
   const latestArtifacts = selectLatestArtifacts(selectVisibleArtifacts(session.artifacts || [], agent, transcriptVisibility));
   const unresolvedObjections = selectVisibleObjections(session.unresolvedObjections || {}, agent, transcriptVisibility);
   const visibleFileOperationExecutionResults = selectVisibleFileOperationResults(session.fileOperationExecutionResults || [], agent, transcriptVisibility);
   const visibleToolExecutionResults = selectVisibleToolResults(session.toolExecutionResults || [], agent, transcriptVisibility);
   const visibleRejectedToolRequests = selectVisibleToolResults(session.rejectedToolRequests || [], agent, transcriptVisibility);
   const attachedFiles = normalizeFileAttachments(options.attachments || []);
+  const retrievedSelection = excludeInvalidatedContextItems(options.retrievedContext || [], retrievedContextSource, priorityPolicy);
+  const hotCacheSelection = excludeInvalidatedContextItems(options.publicEventHotCache?.events || [], (item) => contextSource("public_event", item?.eventId || item?.sequence, {
+    eventId: item?.eventId,
+    sourcePath: item?.sourcePath
+  }), priorityPolicy);
   const stable = {
     roleIdentity: roleIdentity(agent),
     roleAssignment: roleAssignmentLine(agent),
     memberName: agent.name,
     roleInstructions: agent.instructions || agent.roleDescription || "",
     globalRequirement: options.globalRequirement || "",
-    harnessSummary: options.harnessSummary || ""
+    harnessSummary: options.harnessSummary || "",
+    contextPriorityPolicy: formatContextPriorityPolicy(priorityPolicy)
   };
   const coreBase = {
     originalQuestion,
@@ -52,12 +61,12 @@ export function buildMemberContext(agent, session, options = {}) {
     memberShortSummary: options.memberShortSummary || "",
     groupSharedSummary: options.groupSharedSummary || "",
     continuationContext,
-    retrievedContext: buildRetrievedContextPack(options.retrievedContext, {
+    retrievedContext: buildRetrievedContextPack(retrievedSelection.items, {
       maxItems: options.retrievedContextLimit || options.groupSettings?.contextArchiveInjectionLimit || options.groupSettings?.contextSearchLimit,
       maxTokens: options.retrievedContextMaxTokens || options.groupSettings?.contextArchiveInjectionTokens
     }),
     historyCatalogue: normalizeHistoryCatalogue(options.historyCatalogue),
-    publicEventHotCache: normalizePublicEventHotCache(options.publicEventHotCache),
+    publicEventHotCache: normalizePublicEventHotCache({ ...(options.publicEventHotCache || {}), events: hotCacheSelection.items }, options.groupSettings?.publicEventHotCacheLimit),
     privateBossMessages: Array.isArray(options.privateBossMessages) ? options.privateBossMessages : [],
     enabledSkills: String(options.enabledSkills || "").trim()
   };
@@ -127,6 +136,7 @@ export function buildMemberContext(agent, session, options = {}) {
       total: tokenEstimate.stable + tokenEstimate.core + tokenEstimate.summaries + tokenEstimate.recentTranscript
     },
     coreOverflow: hasCoreOverflow(nonCompressibleCoreTokens, limits),
+    priorityPolicy,
     providerCacheBreakpoint: "after_original_question"
   };
   context.contextReceipt = buildContextReceiptDraft({
@@ -137,7 +147,8 @@ export function buildMemberContext(agent, session, options = {}) {
     visibleMessages,
     requestedRecentTranscript,
     recentTranscript,
-    executionEvidence
+    executionEvidence,
+    invalidatedSources: [...transcriptSelection.invalidated, ...retrievedSelection.invalidated, ...hotCacheSelection.invalidated]
   });
   return context;
 }
@@ -163,7 +174,7 @@ export function materializeContextReceipt(context, details = {}) {
   };
 }
 
-function buildContextReceiptDraft({ agent, session, options, context, visibleMessages, requestedRecentTranscript, recentTranscript, executionEvidence }) {
+function buildContextReceiptDraft({ agent, session, options, context, visibleMessages, requestedRecentTranscript, recentTranscript, executionEvidence, invalidatedSources = [] }) {
   const sections = buildContextPromptSections(context);
   const sourcesBySection = contextSourcesBySection({ agent, session, options, context, recentTranscript, executionEvidence });
   const totalTokens = sections.reduce((total, section) => total + estimateTokens(section.content), 0);
@@ -211,12 +222,15 @@ function buildContextReceiptDraft({ agent, session, options, context, visibleMes
       exactSourceLoading: "use retained session/event/archive pointers; receipt stores no prompt or private-message content"
     },
     policy: {
-      conflicts: [],
-      invalidatedSources: [],
-      priorityDecisions: [{
-        rule: "existing_context_builder_section_order",
-        selectedSections: sectionReceipts.map((section) => section.id)
-      }]
+      conflicts: context.priorityPolicy.conflicts,
+      invalidatedSources,
+      priorityDecisions: [
+        ...context.priorityPolicy.priorityDecisions,
+        {
+          rule: "existing_context_builder_section_order",
+          selectedSections: sectionReceipts.map((section) => section.id)
+        }
+      ]
     },
     privacy: {
       privateBossMessages: context.summaries.privateBossMessages.length ? "injected_source_redacted" : "none",
@@ -235,6 +249,81 @@ function mergeReceiptDecisions(base, specific) {
 function receiptDecisionKey(decision = {}) {
   const source = decision.source || {};
   return [decision.section || "", source.type || "", source.id || ""].join("\u001f");
+}
+
+function buildContextPriorityPolicy(options = {}) {
+  const invalidations = normalizeContextInvalidations(options.contextInvalidations || options.contextPolicy?.invalidations);
+  return {
+    tiers: [
+      "current_user_instruction",
+      "active_user_confirmed_requirement",
+      "current_file_test_git_tool_evidence",
+      "current_task_execution_state",
+      "non_invalidated_retained_user_statement",
+      "member_message",
+      "attributed_summary",
+      "inference"
+    ],
+    invalidations,
+    conflicts: invalidations.map((item) => ({
+      source: item.source,
+      supersededBy: item.supersededBy,
+      reason: item.reason
+    })),
+    priorityDecisions: [{
+      rule: "current_instruction_outranks_retained_history",
+      selectedSourceTypes: ["session_question", "latest_boss_instruction"],
+      lowerPrioritySourceTypes: ["member_message", "retrieved_context", "public_event", "member_summary", "group_summary"]
+    }]
+  };
+}
+
+function normalizeContextInvalidations(value) {
+  const entries = Array.isArray(value) ? value : value ? [value] : [];
+  return entries.map((entry) => {
+    const source = normalizeContextSourceReference(entry?.source || entry);
+    const supersededBy = normalizeContextSourceReference(entry?.supersededBy || entry?.superseded_by);
+    return {
+      source,
+      supersededBy,
+      reason: String(entry?.reason || "explicit_source_invalidation").trim()
+    };
+  }).filter((item) => item.source.type && item.source.id && item.supersededBy.type && item.supersededBy.id);
+}
+
+function normalizeContextSourceReference(value = {}) {
+  return {
+    type: String(value?.type || value?.sourceType || "").trim(),
+    id: String(value?.id || value?.eventId || value?.sourceId || "").trim()
+  };
+}
+
+function excludeInvalidatedContextItems(items, sourceFor, policy) {
+  const kept = [];
+  const invalidated = [];
+  for (const [index, item] of (Array.isArray(items) ? items : []).entries()) {
+    const source = sourceFor(item, index);
+    const invalidation = policy.invalidations.find((candidate) => (
+      candidate.source.type === source.type && candidate.source.id === source.id
+    ));
+    if (!invalidation) {
+      kept.push(item);
+      continue;
+    }
+    invalidated.push({
+      source,
+      supersededBy: invalidation.supersededBy,
+      reason: invalidation.reason,
+      status: "invalidated"
+    });
+  }
+  return { items: kept, invalidated };
+}
+
+function formatContextPriorityPolicy(policy = {}) {
+  const tiers = Array.isArray(policy.tiers) ? policy.tiers : [];
+  if (!tiers.length) return "";
+  return `Context priority is strict: ${tiers.join(" > ")}. Current user instructions override conflicting retained history. Invalidated sources are excluded from this prompt but remain loadable from retained history by their exact source pointer.`;
 }
 
 function contextSourcesBySection({ agent, session, options, context, recentTranscript, executionEvidence }) {
@@ -340,7 +429,8 @@ export function buildContextPromptSections(context) {
       `Member: ${context.stable.memberName}`,
       context.stable.roleInstructions ? `Role instructions: ${context.stable.roleInstructions}` : "",
       context.stable.harnessSummary ? `Harness summary: ${context.stable.harnessSummary}` : "",
-      context.stable.globalRequirement ? `Boss global requirement: ${context.stable.globalRequirement}` : ""
+      context.stable.globalRequirement ? `Boss global requirement: ${context.stable.globalRequirement}` : "",
+      context.stable.contextPriorityPolicy ? `Context priority: ${context.stable.contextPriorityPolicy}` : ""
     ]],
     ["Non-compressible core", [
       `Original question: ${context.core.originalQuestion}`,
@@ -535,7 +625,11 @@ function deduplicatedEvidenceReceiptDecisions(kind, items, signatureFor) {
 
 function executionEvidenceSource(kind, item = {}, index = 0) {
   const id = item.id || item.proposalId || `${item.source_agent_id || item.sourceAgentId || item.agentId || "unknown"}:${item.tool || item.op || kind}:${index}`;
-  return contextSource(kind, id, {
+  const sourceType = kind === "file" ? "file_operation_result"
+    : kind === "tool" ? "tool_result"
+      : kind === "rejected" ? "rejected_tool_request"
+        : kind;
+  return contextSource(sourceType, id, {
     agentId: item.source_agent_id || item.sourceAgentId || item.agentId,
     sourcePath: item.sourcePath,
     path: item.path || item.targetPath,
@@ -844,7 +938,8 @@ function contextMessagesFromStable(stable) {
     { role: "system", content: stable.memberName },
     { role: "system", content: stable.roleInstructions },
     { role: "system", content: stable.globalRequirement },
-    { role: "system", content: stable.harnessSummary }
+    { role: "system", content: stable.harnessSummary },
+    { role: "system", content: stable.contextPriorityPolicy }
   ].filter((message) => message.content);
 }
 
@@ -922,11 +1017,12 @@ function formatHistoryCatalogue(items) {
   ];
 }
 
-function normalizePublicEventHotCache(value) {
+function normalizePublicEventHotCache(value, configuredLimit) {
   const events = Array.isArray(value?.events) ? value.events : [];
+  const maxEvents = clampInteger(configuredLimit ?? 12, 1, 40);
   return {
     sourceJournalPath: String(value?.sourceJournalPath || ""),
-    events: events.slice(-40).map((item) => ({
+    events: events.slice(-maxEvents).map((item) => ({
       eventId: String(item?.eventId || ""),
       sequence: Number(item?.sequence || 0),
       type: String(item?.type || ""),

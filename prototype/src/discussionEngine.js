@@ -71,6 +71,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
     ? recentGroupSessions.filter(isLegacyContinuationShell).map((session) => session.id)
     : [];
   const taskState = options.groupPath && memoryEnabled ? readTaskState(options.groupPath) : undefined;
+  const contextInvalidations = mergeContextInvalidations(taskState?.invalidations, options.contextInvalidations);
   const runtimeDiscoveryOptions = { managedToolRoots: [path.join(baseDir, "tools")] };
   const runtimeEnvironment = formatRuntimeEnvironment(discoverRuntimeEnvironment(options.groupPath || baseDir, runtimeDiscoveryOptions));
   const retrievedContext = options.groupPath && memoryEnabled
@@ -117,6 +118,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
     rejectedToolRequests: [],
     contextRetrievalResults: retrievedContext,
     contextReceipts: [],
+    contextInvalidations,
     rejectedFileOperationProposals: [],
     pendingFileOperationProposals: [],
     modelCallCount: 0,
@@ -177,7 +179,8 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
         publicEventHotCache,
         enabledSkills: loadEnabledSkills(baseDir, options.groupPath, options.appSettings),
         ...loadSummaryContext(options.groupPath, agent, options.appSettings),
-        privateBossMessages: loadPrivateBossMessages(options.groupPath, agent, options.appSettings)
+        privateBossMessages: loadPrivateBossMessages(options.groupPath, agent, options.appSettings),
+        contextInvalidations
       });
       const contextStatus = summarizeContextStatus(memberContext, {
         groupPath: options.groupPath,
@@ -404,7 +407,8 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
           publicEventHotCache,
           enabledSkills: loadEnabledSkills(baseDir, options.groupPath, options.appSettings),
           ...loadSummaryContext(options.groupPath, agent, options.appSettings),
-          privateBossMessages: loadPrivateBossMessages(options.groupPath, agent, options.appSettings)
+          privateBossMessages: loadPrivateBossMessages(options.groupPath, agent, options.appSettings),
+          contextInvalidations
         });
         const followupMessages = buildRoundPrompt(agent, question, session, round, {
           ...promptOptions,
@@ -535,7 +539,8 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
     publicEventHotCache,
     enabledSkills: loadEnabledSkills(baseDir, options.groupPath, options.appSettings),
     ...loadSummaryContext(options.groupPath, judge, options.appSettings),
-    privateBossMessages: loadPrivateBossMessages(options.groupPath, judge, options.appSettings)
+    privateBossMessages: loadPrivateBossMessages(options.groupPath, judge, options.appSettings),
+    contextInvalidations
   });
   const finalContextStatus = summarizeContextStatus(finalContext, {
     groupPath: options.groupPath,
@@ -1060,6 +1065,27 @@ function independentFirstRoundPhase(agent) {
 
 function normalizeWorkMode(value) {
   return value === "independent" ? "independent" : "collab";
+}
+
+function mergeContextInvalidations(...values) {
+  const byKey = new Map();
+  for (const value of values) {
+    for (const item of Array.isArray(value) ? value : []) {
+      const source = item?.source || item;
+      const supersededBy = item?.supersededBy || item?.superseded_by;
+      const type = String(source?.type || source?.sourceType || "").trim();
+      const id = String(source?.id || source?.eventId || source?.sourceId || "").trim();
+      const nextType = String(supersededBy?.type || supersededBy?.sourceType || "").trim();
+      const nextId = String(supersededBy?.id || supersededBy?.eventId || supersededBy?.sourceId || "").trim();
+      if (!type || !id || !nextType || !nextId) continue;
+      byKey.set(`${type}\u001f${id}`, {
+        source: { type, id },
+        supersededBy: { type: nextType, id: nextId },
+        reason: String(item?.reason || "explicit_source_invalidation").trim()
+      });
+    }
+  }
+  return [...byKey.values()];
 }
 
 function contextVisibilityForAgent(agent, workMode) {
