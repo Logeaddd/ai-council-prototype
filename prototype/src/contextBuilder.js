@@ -102,7 +102,7 @@ export function buildMemberContext(agent, session, options = {}) {
   };
   const nonCompressibleCoreTokens = tokenEstimate.stable + tokenEstimate.core;
 
-  return {
+  const context = {
     agentId: agent.id,
     agentName: agent.name,
     mandatoryRedTeam: Boolean(agent.mandatoryRedTeam),
@@ -129,6 +129,206 @@ export function buildMemberContext(agent, session, options = {}) {
     coreOverflow: hasCoreOverflow(nonCompressibleCoreTokens, limits),
     providerCacheBreakpoint: "after_original_question"
   };
+  context.contextReceipt = buildContextReceiptDraft({
+    agent,
+    session,
+    options,
+    context,
+    visibleMessages,
+    requestedRecentTranscript,
+    recentTranscript,
+    executionEvidence
+  });
+  return context;
+}
+
+export function materializeContextReceipt(context, details = {}) {
+  const draft = context?.contextReceipt || {};
+  const inputMessages = Array.isArray(details.inputMessages) ? details.inputMessages : [];
+  const inputChars = inputMessages.reduce((total, message) => total + contextMessageChars(message), 0);
+  return {
+    ...structuredClone(draft),
+    id: `${String(details.sessionId || "session")}::context::${Number(details.modelCallIndex || 0)}`,
+    call: {
+      sessionId: String(details.sessionId || ""),
+      modelCallIndex: Number(details.modelCallIndex || 0),
+      phase: String(details.phase || ""),
+      round: Number(details.round || 0),
+      toolIteration: Number(details.toolIteration || 0),
+      agentId: String(details.agentId || context?.agentId || ""),
+      inputMessageCount: inputMessages.length,
+      inputChars,
+      estimatedInputTokens: estimateMessagesTokens(inputMessages)
+    }
+  };
+}
+
+function buildContextReceiptDraft({ agent, session, options, context, visibleMessages, requestedRecentTranscript, recentTranscript, executionEvidence }) {
+  const sections = buildContextPromptSections(context);
+  const sourcesBySection = contextSourcesBySection({ agent, session, options, context, recentTranscript, executionEvidence });
+  const totalTokens = sections.reduce((total, section) => total + estimateTokens(section.content), 0);
+  const targetTokens = compressionTargetTokens(context.limits) || context.limits.effectiveInputLimit;
+  const sectionReceipts = sections.map((section) => {
+    const tokens = estimateTokens(section.content);
+    const id = contextSectionId(section.title);
+    return {
+      id,
+      title: section.title,
+      chars: section.content.length,
+      estimatedTokens: tokens,
+      retainedTokenShare: totalTokens ? Number((tokens / totalTokens).toFixed(6)) : 0,
+      sourceCount: (sourcesBySection[id] || []).length,
+      sources: sourcesBySection[id] || []
+    };
+  });
+  const sectionDecisions = sectionReceipts.flatMap((section) => section.sources.map((source) => ({
+    section: section.id,
+    source,
+    status: "injected",
+    reason: `retained_in_${section.id}`
+  })));
+  const decisions = mergeReceiptDecisions(sectionDecisions, [
+    ...buildTranscriptReceiptDecisions(session, visibleMessages, requestedRecentTranscript, recentTranscript),
+    ...(executionEvidence.receipt?.decisions || []),
+    ...(context.summaries.retrievedContext.receipt?.decisions || [])
+  ]);
+  return {
+    schema: "ai-council.context-receipt.v1",
+    builder: "buildMemberContext",
+    agentId: String(agent?.id || ""),
+    transcriptVisibility: context.transcriptVisibility,
+    budget: {
+      effectiveInputLimit: Number(context.limits.effectiveInputLimit || 0),
+      compressionTargetTokens: Number(targetTokens || 0),
+      estimatedContextTokens: Number(context.tokenEstimate.total || 0),
+      nonCompressibleCoreTokens: Number(context.tokenEstimate.nonCompressibleCore || 0),
+      coreOverflow: Boolean(context.coreOverflow)
+    },
+    sections: sectionReceipts,
+    decisions,
+    observability: {
+      notRetrieved: "not_observed_by_buildMemberContext; only retrieval candidates supplied to this call can be classified",
+      exactSourceLoading: "use retained session/event/archive pointers; receipt stores no prompt or private-message content"
+    },
+    policy: {
+      conflicts: [],
+      invalidatedSources: [],
+      priorityDecisions: [{
+        rule: "existing_context_builder_section_order",
+        selectedSections: sectionReceipts.map((section) => section.id)
+      }]
+    },
+    privacy: {
+      privateBossMessages: context.summaries.privateBossMessages.length ? "injected_source_redacted" : "none",
+      credentialContent: "never_recorded"
+    }
+  };
+}
+
+function mergeReceiptDecisions(base, specific) {
+  const byKey = new Map();
+  for (const decision of base) byKey.set(receiptDecisionKey(decision), decision);
+  for (const decision of specific) byKey.set(receiptDecisionKey(decision), decision);
+  return [...byKey.values()];
+}
+
+function receiptDecisionKey(decision = {}) {
+  const source = decision.source || {};
+  return [decision.section || "", source.type || "", source.id || ""].join("\u001f");
+}
+
+function contextSourcesBySection({ agent, session, options, context, recentTranscript, executionEvidence }) {
+  const sessionId = String(session?.id || "active-session");
+  const coreSources = [
+    contextSource("session_question", sessionId, { sessionId }),
+    ...context.core.latestArtifacts.map((item, index) => contextSource("artifact", item?.id || `${sessionId}:artifact:${index}`, { sessionId, sourcePath: item?.sourcePath, path: item?.path })),
+    ...objectionSources(context.core.unresolvedObjections, sessionId),
+    ...context.core.attachedFiles.map((item, index) => contextSource("attachment", item?.id || `${sessionId}:attachment:${index}`, { sessionId, sourcePath: item?.path || item?.name || item?.fileName })),
+    ...executionEvidenceReceiptSources(executionEvidence)
+  ];
+  const retrievedSources = context.summaries.retrievedContext.items.map(retrievedContextSource);
+  const historySources = context.summaries.historyCatalogue.map((item) => contextSource("session_catalogue", item.sessionId, { sessionId: item.sessionId }));
+  const hotCacheSources = context.summaries.publicEventHotCache.events.map((item) => contextSource("public_event", item.eventId || item.sequence, { eventId: item.eventId, sourcePath: item.sourcePath }));
+  const continuation = context.summaries.continuationContext;
+  return {
+    stable_context: [contextSource("agent_config", agent?.id || agent?.name || "unknown", { sessionId, sourcePath: "group.agent" })],
+    non_compressible_core: coreSources,
+    summaries: [
+      ...(context.summaries.memberShortSummary ? [contextSource("member_summary", agent?.id || "unknown", { sessionId, sourcePath: "shared/memory/member-summary" })] : []),
+      ...(context.summaries.groupSharedSummary ? [contextSource("group_summary", sessionId, { sessionId, sourcePath: "shared/memory/group-summary" })] : [])
+    ],
+    relevant_archived_context: retrievedSources,
+    group_history_catalogue: historySources,
+    recent_public_activity_cache: hotCacheSources,
+    cycle_continuation: continuation?.previousSessionId ? [contextSource("continuation", continuation.previousSessionId, { sessionId: continuation.previousSessionId, sourcePath: continuation.sourcePath })] : [],
+    private_boss_messages: [],
+    enabled_skills: context.summaries.enabledSkills ? [contextSource("enabled_skill_metadata", sessionId, { sessionId })] : [],
+    recent_transcript: recentTranscript.map((message, index) => transcriptSource(message, sessionId, index))
+  };
+}
+
+function buildTranscriptReceiptDecisions(session, visibleMessages, requestedRecentTranscript, recentTranscript) {
+  const sessionId = String(session?.id || "active-session");
+  const requested = new Set(requestedRecentTranscript);
+  const injected = new Set(recentTranscript);
+  return visibleMessages.map((message, index) => ({
+    section: "recent_transcript",
+    source: transcriptSource(message, sessionId, index),
+    status: injected.has(message) ? "injected" : "retrieved_but_omitted",
+    reason: injected.has(message)
+      ? "selected_recent_transcript"
+      : requested.has(message)
+        ? "context_token_budget"
+        : "recent_message_limit"
+  }));
+}
+
+function executionEvidenceReceiptSources(executionEvidence) {
+  return (executionEvidence.receipt?.decisions || [])
+    .filter((item) => item.status === "injected" || item.status === "shortened")
+    .map((item) => item.source);
+}
+
+function objectionSources(value, sessionId) {
+  return Object.entries(value || {}).flatMap(([agentId, items]) => (Array.isArray(items) ? items : [items]).map((item, index) => {
+    const id = typeof item === "object" ? item.id || item.issue || index : index;
+    return contextSource("objection", `${agentId}:${id}`, { sessionId });
+  }));
+}
+
+function transcriptSource(message, sessionId, index) {
+  return contextSource("member_message", message?.id || `${sessionId}:message:${message?.modelCallIndex || index}`, {
+    sessionId,
+    agentId: message?.agentId,
+    round: message?.round
+  });
+}
+
+function retrievedContextSource(item) {
+  return contextSource("retrieved_context", item?.eventId || item?.sourcePath || `${item?.sessionId || "unknown"}:${item?.round || 0}`, {
+    sessionId: item?.sessionId,
+    eventId: item?.eventId,
+    sourcePath: item?.sourcePath,
+    round: item?.round
+  });
+}
+
+function contextSource(type, id, details = {}) {
+  const source = { type, id: String(id || "unknown") };
+  for (const key of ["sessionId", "eventId", "sourcePath", "path", "agentId", "round"]) {
+    const value = details[key];
+    if (value !== undefined && value !== null && value !== "") source[key] = value;
+  }
+  return source;
+}
+
+function contextSectionId(title) {
+  return String(title || "context").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+}
+
+function contextMessageChars(message = {}) {
+  if (typeof message.content === "string") return message.content.length;
+  return JSON.stringify(message.content || "").length;
 }
 
 export function buildContextPromptSections(context) {
@@ -253,7 +453,7 @@ function buildExecutionEvidencePack(groups, maxTokens) {
     const remaining = Math.max(0, maxTokens - estimatedTokens);
     const fitted = fitExecutionEvidenceCandidate(candidate, remaining);
     if (!fitted) continue;
-    kept.push({ ...candidate, record: fitted.record });
+    kept.push({ ...candidate, record: fitted.record, shortened: fitted.shortened });
     estimatedTokens += fitted.tokens;
     if (fitted.shortened) shortenedCount += 1;
   }
@@ -265,6 +465,23 @@ function buildExecutionEvidencePack(groups, maxTokens) {
   const omittedCount = Math.max(0, dedupedCount - keptCount);
   const duplicateCount = Math.max(0, originalCount - dedupedCount);
 
+  const keptBySequence = new Map(kept.map((item) => [item.sequence, item]));
+  const receiptDecisions = [
+    ...deduplicatedEvidenceReceiptDecisions("file_operation_result", rawFileResults, fileOperationResultSignature),
+    ...deduplicatedEvidenceReceiptDecisions("tool_result", rawToolResults, toolResultSignature),
+    ...deduplicatedEvidenceReceiptDecisions("rejected_tool_request", rawRejected, toolResultSignature),
+    ...candidates.map((candidate) => {
+      const retained = keptBySequence.get(candidate.sequence);
+      return {
+        section: "non_compressible_core",
+        source: executionEvidenceSource(candidate.kind, candidate.item, candidate.sequence),
+        status: retained ? (retained.shortened ? "shortened" : "injected") : "retrieved_but_omitted",
+        reason: retained
+          ? (retained.shortened ? "evidence_value_compacted" : "execution_evidence_priority")
+          : "execution_evidence_token_budget"
+      };
+    })
+  ];
   return {
     fileOperationExecutionResults: byKind("file"),
     toolExecutionResults: byKind("tool"),
@@ -290,8 +507,39 @@ function buildExecutionEvidencePack(groups, maxTokens) {
       },
       applied: duplicateCount > 0 || omittedCount > 0 || shortenedCount > 0,
       source: "complete raw results remain in session storage"
-    }
+    },
+    receipt: { decisions: receiptDecisions }
   };
+}
+
+function deduplicatedEvidenceReceiptDecisions(kind, items, signatureFor) {
+  const seen = new Set();
+  const decisions = [];
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index];
+    const signature = signatureFor(item);
+    if (signature && seen.has(signature)) {
+      decisions.push({
+        section: "non_compressible_core",
+        source: executionEvidenceSource(kind, item, index),
+        status: "deduplicated",
+        reason: "newer_equivalent_execution_result_retained"
+      });
+      continue;
+    }
+    if (signature) seen.add(signature);
+  }
+  return decisions.reverse();
+}
+
+function executionEvidenceSource(kind, item = {}, index = 0) {
+  const id = item.id || item.proposalId || `${item.source_agent_id || item.sourceAgentId || item.agentId || "unknown"}:${item.tool || item.op || kind}:${index}`;
+  return contextSource(kind, id, {
+    agentId: item.source_agent_id || item.sourceAgentId || item.agentId,
+    sourcePath: item.sourcePath,
+    path: item.path || item.targetPath,
+    round: item.round
+  });
 }
 
 function executionEvidenceCandidate(kind, item, sequence) {
@@ -710,27 +958,41 @@ function buildRetrievedContextPack(items, options = {}) {
   const maxTokens = clampInteger(options.maxTokens || DEFAULT_ARCHIVE_CONTEXT_TOKENS, 120, 4000);
   const normalized = normalizeRetrievedContext(items)
     .sort(compareRetrievedContextHit);
-  const deduped = dedupeRetrievedContext(normalized);
+  const dedupeResult = dedupeRetrievedContext(normalized);
+  const deduped = dedupeResult.items;
   const kept = [];
+  const omitted = [];
   let estimatedTokens = 0;
   let truncatedSnippets = 0;
 
   for (const item of deduped) {
-    if (kept.length >= maxItems) break;
+    if (kept.length >= maxItems) {
+      omitted.push({ item, reason: "archive_item_limit" });
+      continue;
+    }
     let candidate = { ...item };
     let snippetWasTrimmed = false;
     let formatted = formatRetrievedContextItem(candidate, kept.length + 1);
     let tokens = estimateTokens(formatted);
     if (estimatedTokens + tokens > maxTokens) {
       const remaining = maxTokens - estimatedTokens - estimateTokens(formatRetrievedContextItem({ ...candidate, snippet: "" }, kept.length + 1));
-      if (remaining <= 40) continue;
+      if (remaining <= 40) {
+        omitted.push({ item, reason: "archive_token_budget" });
+        continue;
+      }
       const trimmed = trimTextToEstimatedTokens(candidate.snippet, remaining);
-      if (!trimmed || trimmed === candidate.snippet) continue;
+      if (!trimmed || trimmed === candidate.snippet) {
+        omitted.push({ item, reason: "archive_token_budget" });
+        continue;
+      }
       candidate = { ...candidate, snippet: trimmed, snippetTruncated: true };
       snippetWasTrimmed = true;
       formatted = formatRetrievedContextItem(candidate, kept.length + 1);
       tokens = estimateTokens(formatted);
-      if (estimatedTokens + tokens > maxTokens && kept.length) continue;
+      if (estimatedTokens + tokens > maxTokens && kept.length) {
+        omitted.push({ item, reason: "archive_token_budget" });
+        continue;
+      }
     }
     kept.push(candidate);
     if (snippetWasTrimmed) truncatedSnippets += 1;
@@ -738,6 +1000,26 @@ function buildRetrievedContextPack(items, options = {}) {
   }
 
   const droppedCount = Math.max(0, deduped.length - kept.length);
+  const retainedByKey = new Map(kept.map((item) => [retrievedContextKey(item), item]));
+  const receiptDecisions = [
+    ...dedupeResult.duplicates.map((item) => ({
+      section: "relevant_archived_context",
+      source: retrievedContextSource(item),
+      status: "deduplicated",
+      reason: "equivalent_archive_hit_retained"
+    })),
+    ...deduped.map((item) => {
+      const retained = retainedByKey.get(retrievedContextKey(item));
+      return {
+        section: "relevant_archived_context",
+        source: retrievedContextSource(item),
+        status: retained ? (retained.snippetTruncated ? "shortened" : "injected") : "retrieved_but_omitted",
+        reason: retained
+          ? (retained.snippetTruncated ? "archive_snippet_token_budget" : "archive_ranked_selection")
+          : (omitted.find((entry) => retrievedContextKey(entry.item) === retrievedContextKey(item))?.reason || "archive_token_budget")
+      };
+    })
+  ];
   return {
     source: "local_context_archive",
     items: kept,
@@ -751,7 +1033,8 @@ function buildRetrievedContextPack(items, options = {}) {
       truncatedSnippets,
       estimatedTokens,
       applied: droppedCount > 0 || truncatedSnippets > 0
-    }
+    },
+    receipt: { decisions: receiptDecisions }
   };
 }
 
@@ -759,6 +1042,7 @@ function normalizeRetrievedContext(items) {
   return (Array.isArray(items) ? items : []).slice(0, 30).map((item) => ({
     source: String(item?.source || "local_context_archive"),
     sourceType: String(item?.sourceType || ""),
+    eventId: String(item?.eventId || ""),
     sessionId: String(item?.sessionId || ""),
     round: Number(item?.round || 0) || undefined,
     question: String(item?.question || ""),
@@ -801,18 +1085,26 @@ function compareRetrievedContextHit(a, b) {
 function dedupeRetrievedContext(items) {
   const seen = new Set();
   const kept = [];
+  const duplicates = [];
   for (const item of items) {
-    const key = [
-      item.sessionId || "unknown",
-      item.round || 0,
-      item.sourceType || "unknown",
-      item.sourcePath || item.snippet.slice(0, 80)
-    ].join("|");
-    if (seen.has(key)) continue;
+    const key = retrievedContextKey(item);
+    if (seen.has(key)) {
+      duplicates.push(item);
+      continue;
+    }
     seen.add(key);
     kept.push(item);
   }
-  return kept;
+  return { items: kept, duplicates };
+}
+
+function retrievedContextKey(item = {}) {
+  return [
+    item.sessionId || "unknown",
+    item.round || 0,
+    item.sourceType || "unknown",
+    item.sourcePath || item.eventId || String(item.snippet || "").slice(0, 80)
+  ].join("|");
 }
 
 function trimTextToEstimatedTokens(text, maxTokens) {

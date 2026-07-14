@@ -2319,10 +2319,16 @@ test("group model call trace records prompt and output summaries without api key
       ]
     });
 
-    await runCouncil("Trace this call.", group, tmp, { groupPath: tmp });
+    const result = await runCouncil("Trace this call.", group, tmp, { groupPath: tmp });
 
     const traceFile = path.join(tmp, "shared", "logs", "model-calls.jsonl");
+    const sessionFile = path.join(tmp, "sessions", `${result.session.id}.json`);
     const lines = fs.readFileSync(traceFile, "utf8").trim().split(/\r?\n/).map((line) => JSON.parse(line));
+    const persistedSession = JSON.parse(fs.readFileSync(sessionFile, "utf8"));
+    assert.ok(result.session.contextReceipts.length >= 1);
+    assert.deepEqual(persistedSession.contextReceipts, result.session.contextReceipts);
+    assert.equal(result.session.contextReceipts.every((receipt) => receipt.schema === "ai-council.context-receipt.v1"), true);
+    assert.ok(lines.some((line) => line.contextReceipt?.call?.sessionId === result.session.id));
     assert.ok(lines.some((line) => line.event === "start" && `${line.input.head}${line.input.tail}`.includes("Trace this call.")));
     assert.ok(lines.some((line) => line.event === "complete" && `${line.output.head}${line.output.tail}`.includes("Traceable answer.")));
     assert.doesNotMatch(fs.readFileSync(traceFile, "utf8"), /secret-runtime-key/);

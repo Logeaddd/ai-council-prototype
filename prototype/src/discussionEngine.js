@@ -1,6 +1,6 @@
 import { callAgentResult } from "./modelClient.js";
 import { buildFinalPrompt, buildRoundPrompt } from "./promptBuilder.js";
-import { buildContextPromptSections, buildMemberContext } from "./contextBuilder.js";
+import { buildContextPromptSections, buildMemberContext, materializeContextReceipt } from "./contextBuilder.js";
 import { hasValidFinalDecision, parseFinalDecision, parseRoundModelResult } from "./responseParser.js";
 import { makeId, nowIso } from "./types.js";
 import { isConsensusParticipant, scoreConsensus, shouldStop, updateUnresolvedObjections } from "./consensusEngine.js";
@@ -116,6 +116,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
     toolRequests: [],
     rejectedToolRequests: [],
     contextRetrievalResults: retrievedContext,
+    contextReceipts: [],
     rejectedFileOperationProposals: [],
     pendingFileOperationProposals: [],
     modelCallCount: 0,
@@ -253,6 +254,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
         phase: "round",
         round,
         agent,
+        memberContext,
         messages,
         timeoutMs: group.settings.agentTimeoutMs,
         nativeToolPermissionTier: fileOperationPermissionTier
@@ -331,6 +333,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
           phase: "file_operation_recovery",
           round,
           agent,
+          memberContext,
           messages: [...messages, {
             role: "user",
             content: `Your file operation did not execute: ${rejectionDetails}. Correct it now with a real non-empty workspace_edit native tool call (or tool_requests fallback), then continue to build or verify. Do not return another plan or placeholder.`
@@ -418,6 +421,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
           phase: "tool_followup",
           round,
           agent,
+          memberContext: followupContext,
           messages: followupMessages,
           timeoutMs: group.settings.agentTimeoutMs,
           toolIteration: toolIterations,
@@ -586,6 +590,15 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
       globalRequirement,
       contextSections: buildContextPromptSections(finalContext)
     });
+    const contextReceipt = recordContextReceipt(session, finalContext, {
+      sessionId: session.id,
+      modelCallIndex: session.modelCallCount,
+      phase: "final",
+      agentId: judge.id,
+      round: 0,
+      toolIteration: 0,
+      inputMessages: finalMessages
+    });
     const modelCallRecord = notifyModelCall(options, {
       sessionId: session.id,
       phase: "final",
@@ -593,7 +606,8 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
       agentName: judge.name,
       model: judge.model || "",
       provider: judge.provider || "",
-      inputMessages: finalMessages
+      inputMessages: finalMessages,
+      contextReceipt
     });
     throwIfAborted(options.signal);
     const finalRaw = await safeCall(judge, finalMessages, group.settings.agentTimeoutMs, options.signal);
@@ -730,7 +744,7 @@ function persistSummarizerPublicMemory(groupPath, candidates, options = {}) {
   }
 }
 
-async function* callRoundModel({ options, session, phase, round, agent, messages, timeoutMs, toolIteration, formatRecovery = true, nativeToolPermissionTier = "text", nativeToolChoice = "auto" }) {
+async function* callRoundModel({ options, session, phase, round, agent, memberContext, messages, timeoutMs, toolIteration, formatRecovery = true, nativeToolPermissionTier = "text", nativeToolChoice = "auto" }) {
   if (!reserveModelCall(session)) {
     session.guardStopReason = "model_call_budget_exhausted";
     return {
@@ -739,6 +753,15 @@ async function* callRoundModel({ options, session, phase, round, agent, messages
       errorForMessage: session.guardStopReason
     };
   }
+  const contextReceipt = recordContextReceipt(session, memberContext, {
+    sessionId: session.id,
+    modelCallIndex: session.modelCallCount,
+    phase,
+    round,
+    toolIteration,
+    agentId: agent.id,
+    inputMessages: messages
+  });
   const modelCallRecord = notifyModelCall(options, {
     sessionId: session.id,
     phase,
@@ -748,7 +771,8 @@ async function* callRoundModel({ options, session, phase, round, agent, messages
     agentName: agent.name,
     model: agent.model || "",
     provider: agent.provider || "",
-    inputMessages: messages
+    inputMessages: messages,
+    contextReceipt
   });
   throwIfAborted(options.signal);
   const streamingCall = startAgentCallWithDeltaQueue(agent, messages, timeoutMs, options.signal, nativeToolDefinitions(nativeToolPermissionTier), nativeToolChoice);
@@ -796,6 +820,7 @@ async function* callRoundModel({ options, session, phase, round, agent, messages
       phase: "format_recovery",
       round,
       agent,
+      memberContext,
       timeoutMs,
       toolIteration,
       formatRecovery: false,
@@ -932,6 +957,13 @@ function completeModelCall(record, raw = {}) {
   appendModelCallTrace(record, { event: "complete", raw });
 }
 
+function recordContextReceipt(session, memberContext, details = {}) {
+  const receipt = materializeContextReceipt(memberContext, details);
+  if (!Array.isArray(session.contextReceipts)) session.contextReceipts = [];
+  session.contextReceipts.push(receipt);
+  return receipt;
+}
+
 function appendModelCallTrace(record, { event, raw } = {}) {
   const groupPath = record?.__trace?.groupPath;
   if (!groupPath) return;
@@ -947,7 +979,8 @@ function appendModelCallTrace(record, { event, raw } = {}) {
     agentName: record.agentName || "",
     provider: record.provider || "",
     model: record.model || "",
-    input: summarizePromptMessages(record.inputMessages || [])
+    input: summarizePromptMessages(record.inputMessages || []),
+    contextReceipt: record.contextReceipt || undefined
   };
   if (raw?.error) payload.error = String(raw.error).slice(0, 500);
   if (raw?.text != null) payload.output = summarizeText(raw.text);

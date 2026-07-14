@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildContextPromptSections, buildMemberContext } from "../src/contextBuilder.js";
+import { buildContextPromptSections, buildMemberContext, materializeContextReceipt } from "../src/contextBuilder.js";
 
 const agent = {
   id: "critic",
@@ -734,4 +734,47 @@ test("retrieved archive context is budgeted and keeps load pointers", () => {
   assert.match(archived, /HIGH_VALUE_ARCHIVE_SNIPPET/);
   assert.doesNotMatch(archived, /DUPLICATE_SHOULD_NOT_APPEAR/);
   assert.doesNotMatch(archived, /LOW_VALUE_ARCHIVE_SNIPPET/);
+});
+
+test("context receipts retain source pointers and explain transcript, evidence, and archive omissions without private content", () => {
+  const context = buildMemberContext(agent, {
+    id: "session_receipt_1",
+    question: "Preserve the real source evidence.",
+    unresolvedObjections: {},
+    artifacts: [{ id: "artifact_1", round: 1, type: "text", title: "evidence.txt", content: "public artifact" }],
+    messages: [
+      { id: "old_message", round: 1, agentId: "writer", agentName: "Writer", modelCallIndex: 1, response: { status: "speak", argument: "OLD_CONTEXT_FACT" } },
+      { id: "new_message", round: 2, agentId: "writer", agentName: "Writer", modelCallIndex: 2, response: { status: "speak", argument: "NEW_CONTEXT_FACT" } }
+    ],
+    fileOperationExecutionResults: [
+      { id: "write_old", op: "write", path: "deliverables/evidence.txt", source_agent_id: "writer", status: "completed", content: "old" },
+      { id: "write_new", op: "write", path: "deliverables/evidence.txt", source_agent_id: "writer", status: "completed", content: "new" }
+    ]
+  }, {
+    groupSettings: { recentMessageLimit: 1 },
+    privateBossMessages: [{ id: "private_1", from: "boss", text: "PRIVATE_RECEIPT_SECRET" }],
+    retrievedContext: [
+      { eventId: "event_keep", sessionId: "session_old", round: 1, sourceType: "round_summary", sourcePath: "sessions/session_old/round_1.json", snippet: "ARCHIVE_KEEP" },
+      { eventId: "event_duplicate", sessionId: "session_old", round: 1, sourceType: "round_summary", sourcePath: "sessions/session_old/round_1.json", snippet: "ARCHIVE_DUPLICATE" }
+    ]
+  });
+  const receipt = materializeContextReceipt(context, {
+    sessionId: "session_receipt_1",
+    modelCallIndex: 3,
+    phase: "tool_followup",
+    round: 2,
+    toolIteration: 1,
+    inputMessages: [{ role: "user", content: "Prompt metadata only." }]
+  });
+
+  assert.equal(receipt.schema, "ai-council.context-receipt.v1");
+  assert.equal(receipt.call.id, undefined);
+  assert.equal(receipt.call.estimatedInputTokens > 0, true);
+  assert.equal(receipt.sections.some((section) => section.id === "recent_transcript" && section.sourceCount === 1), true);
+  assert.equal(receipt.sections.some((section) => section.id === "non_compressible_core" && section.sources.some((source) => source.id === "artifact_1")), true);
+  assert.equal(receipt.decisions.some((item) => item.source.id === "old_message" && item.status === "retrieved_but_omitted" && item.reason === "recent_message_limit"), true);
+  assert.equal(receipt.decisions.some((item) => item.source.id === "write_old" && item.status === "deduplicated"), true);
+  assert.equal(receipt.decisions.some((item) => item.source.id === "event_duplicate" && item.status === "deduplicated"), true);
+  assert.equal(receipt.privacy.privateBossMessages, "injected_source_redacted");
+  assert.doesNotMatch(JSON.stringify(receipt), /PRIVATE_RECEIPT_SECRET/);
 });
