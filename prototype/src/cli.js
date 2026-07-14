@@ -11,6 +11,7 @@ import { readAppSettings } from "./appSettings.js";
 import { runRealProviderBenchmark } from "./realProviderBenchmark.js";
 import { runProductHarnessCheck } from "./productHarness.js";
 import { runSeededRealUserBaseline } from "./realUserHarness.js";
+import { runContextPressureBaseline } from "./contextPressureHarness.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const baseDir = path.resolve(__dirname, "..");
@@ -70,6 +71,11 @@ async function main() {
 
   if (command === "real-user-baseline") {
     await runRealUserBaselineCommand(args);
+    return;
+  }
+
+  if (command === "context-pressure") {
+    runContextPressureCommand(args);
     return;
   }
 
@@ -136,6 +142,21 @@ async function runRealUserBaselineCommand(args) {
     seed: run.report.seed,
     autonomousExecution: run.report.autonomousExecution.passed,
     minimumUsableDelivery: run.report.minimumUsableDelivery.passed
+  }, null, 2));
+}
+
+function runContextPressureCommand(args) {
+  const run = runContextPressureBaseline({
+    seed: getArg(args, "--seed"),
+    outputDir: getArg(args, "--output", path.join(baseDir, "eval", "context-pressure"))
+  });
+  console.log(JSON.stringify({
+    runDir: run.runDir,
+    groupPath: run.groupPath,
+    status: run.report.status,
+    seed: run.report.seed,
+    scenarios: run.report.scenarios?.map((scenario) => ({ id: scenario.id, status: scenario.status })) || [],
+    limitations: run.report.limitations || []
   }, null, 2));
 }
 
@@ -325,6 +346,7 @@ function printHelp() {
   node src/cli.js eval-compare --baseline ./eval/reports/baseline --candidate ./eval/reports/candidate --mode council-current
   node src/cli.js benchmark-real --group ./config/group.real.json --task ./eval/real-task.json --workspace ./workspace-template --output ./eval/real-provider --max-cost-usd 1.00 --max-model-calls 24
   node src/cli.js real-user-baseline --group ./config/group.real.json --output ./eval/real-user --seed 20260714
+  node src/cli.js context-pressure --output ./eval/context-pressure --seed 20260714
   node src/cli.js harness-check --report ./harness/reports/latest.json
   node src/cli.js workspace init-group --root "D:\\AI小组工作区" --group-folder "产品决策组" --members "gpt-5,claude"
   node src/cli.js workspace replace-member --group-path "D:\\AI小组工作区\\产品决策组" --seat-id seat_01 --next-name gpt-6

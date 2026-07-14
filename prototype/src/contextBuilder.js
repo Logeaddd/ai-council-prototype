@@ -241,6 +241,7 @@ function contextSourcesBySection({ agent, session, options, context, recentTrans
   const sessionId = String(session?.id || "active-session");
   const coreSources = [
     contextSource("session_question", sessionId, { sessionId }),
+    ...(context.core.latestBossInstruction ? [contextSource("latest_boss_instruction", `${sessionId}:latest`, { sessionId })] : []),
     ...context.core.latestArtifacts.map((item, index) => contextSource("artifact", item?.id || `${sessionId}:artifact:${index}`, { sessionId, sourcePath: item?.sourcePath, path: item?.path })),
     ...objectionSources(context.core.unresolvedObjections, sessionId),
     ...context.core.attachedFiles.map((item, index) => contextSource("attachment", item?.id || `${sessionId}:attachment:${index}`, { sessionId, sourcePath: item?.path || item?.name || item?.fileName })),
