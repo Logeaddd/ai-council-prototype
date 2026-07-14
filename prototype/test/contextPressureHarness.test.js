@@ -11,7 +11,7 @@ test("context pressure baseline uses retained sessions, a rebuilt public index, 
     const run = runContextPressureBaseline({ outputDir, seed: 20260714 });
     assert.equal(run.report.status, "passed", JSON.stringify(run.report, null, 2));
     assert.equal(run.report.scope, "deterministic_context_pipeline_only");
-    assert.equal(run.report.scenarios.length, 4);
+    assert.equal(run.report.scenarios.length, 5);
     assert.equal(run.report.scenarios.every((scenario) => scenario.status === "measured"), true);
 
     const buried = run.report.scenarios.find((scenario) => scenario.id === "buried_exact_source");
@@ -23,6 +23,11 @@ test("context pressure baseline uses retained sessions, a rebuilt public index, 
     assert.equal(stale.metrics.currentInstructionPresent, true);
     assert.equal(stale.metrics.staleInstructionPresent, true);
     assert.equal(stale.metrics.conflictPolicyState.invalidatedSources.length, 0);
+
+    const persisted = run.report.scenarios.find((scenario) => scenario.id === "persisted_invalidation_reopen");
+    assert.equal(persisted.metrics.oldSourceExcluded, true);
+    assert.equal(persisted.metrics.currentInstructionPresent, true);
+    assert.equal(persisted.metrics.taskStateInvalidations, 1);
 
     const repeated = run.report.scenarios.find((scenario) => scenario.id === "repeated_execution_evidence");
     assert.equal(repeated.metrics.deduplicated, 95);

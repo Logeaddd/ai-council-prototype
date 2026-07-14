@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { buildContextPromptSections, buildMemberContext } from "./contextBuilder.js";
 import { listSessionHistoryCatalogue, searchSessionContextArchive, writeContextArchive, writeGroupSession } from "./storage.js";
 import { queryPublicEvents, readPublicEventHotCache, rebuildPublicEventIndex } from "./publicEventJournal.js";
+import { readTaskState, updateTaskStateFromSession } from "./taskState.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const prototypeRoot = path.resolve(__dirname, "..");
@@ -21,6 +22,7 @@ export function runContextPressureBaseline(options = {}) {
     const scenarios = [
       runBuriedSourceScenario(groupPath, fixture),
       runSupersededInstructionScenario(groupPath, fixture),
+      runPersistedInvalidationScenario(groupPath, fixture),
       runRepeatedEvidenceScenario(groupPath, fixture),
       runContinuationCacheScenario(groupPath, fixture)
     ];
@@ -168,6 +170,37 @@ function runRepeatedEvidenceScenario(groupPath, fixture) {
   }, deduplicated === repeated.length - 1 && injected <= 1);
 }
 
+function runPersistedInvalidationScenario(groupPath, fixture) {
+  const oldRule = "T113_OLD_PERSISTED_RULE";
+  const currentRule = "T113_CURRENT_PERSISTED_RULE";
+  const source = { type: "member_message", id: "persisted_old_rule" };
+  const supersededBy = { type: "latest_boss_instruction", id: "persisted_invalidation:latest" };
+  const savedSession = completeSession({
+    id: "persisted_invalidation",
+    question: "Record the replacement relationship.",
+    messages: [message({ id: source.id, round: 1, modelCallIndex: 1, text: oldRule })]
+  });
+  savedSession.contextInvalidations = [{ source, supersededBy, reason: "user_replaced_persisted_rule" }];
+  updateTaskStateFromSession(groupPath, savedSession);
+  const persisted = readTaskState(groupPath);
+  const active = activeSession("reopened_invalidation", "Apply the current persisted requirement.", [
+    message({ id: source.id, round: 1, modelCallIndex: 1, text: oldRule })
+  ]);
+  const context = buildRealContext(active, fixture, {
+    latestBossInstruction: currentRule,
+    contextInvalidations: persisted.invalidations,
+    recentMessageLimit: 4
+  });
+  const prompt = contextPrompt(context);
+  const invalidated = context.contextReceipt.policy.invalidatedSources;
+  return measured("persisted_invalidation_reopen", {
+    taskStateInvalidations: persisted.invalidations.length,
+    oldSourceExcluded: !prompt.includes(oldRule),
+    currentInstructionPresent: prompt.includes(currentRule),
+    receiptInvalidation: invalidated[0] || null
+  }, persisted.invalidations.length === 1 && !prompt.includes(oldRule) && prompt.includes(currentRule) && invalidated.length === 1);
+}
+
 function runContinuationCacheScenario(groupPath, fixture) {
   const session = activeSession("continuation_cache", "continue", [
     message({ id: "resume_message", round: 1, modelCallIndex: 1, text: "Resume from the saved group work." })
@@ -200,6 +233,7 @@ function buildRealContext(session, fixture, options = {}) {
     },
     latestBossInstruction: options.latestBossInstruction || "",
     continuationContext: options.continuationContext,
+    contextInvalidations: options.contextInvalidations,
     retrievedContext: options.retrievedContext || [],
     historyCatalogue: fixture.historyCatalogue,
     publicEventHotCache: fixture.hotCache,
