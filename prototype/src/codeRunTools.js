@@ -23,11 +23,13 @@ export async function runCodeTool(request, options = {}) {
   const filePath = path.join(runDir, fileName);
   fs.writeFileSync(filePath, code, "utf8");
 
-  const command = commandForLanguage(language, fileName);
+  // Keep generated code isolated for auditability while running it from the
+  // project root by default, so snippets can inspect and test real workspace files.
+  const command = commandForLanguage(language, filePath);
   const result = await executeCommandTool({
     tool: "execute_command",
     command,
-    cwd: runDir,
+    cwd: request.cwd || ".",
     shell: shellForLanguage(language),
     timeoutMs: request.timeoutMs || options.codeRunTimeoutMs || DEFAULT_TIMEOUT_MS,
     maxOutputBytes: request.maxOutputBytes || options.maxCodeOutputBytes
@@ -66,8 +68,8 @@ function looksLikeVerificationCode(code) {
   return /\b(?:assert|expect|verify|verification|validate|validation|test|check|lint|smoke)\b/i.test(String(code || ""));
 }
 
-function commandForLanguage(language, fileName) {
-  const quoted = quoteShell(fileName);
+function commandForLanguage(language, scriptPath) {
+  const quoted = quoteShell(scriptPath);
   if (language === "javascript") return `${quoteShell(process.execPath)} ${quoted}`;
   if (language === "python") return `python ${quoted}`;
   if (language === "powershell") return `powershell.exe -NoProfile -ExecutionPolicy Bypass -File ${quoted}`;

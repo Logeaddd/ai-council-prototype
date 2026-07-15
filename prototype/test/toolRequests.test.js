@@ -1169,6 +1169,26 @@ test("run_code records a source-free verification intent for assertion checks", 
   assert.equal(String(result.results[0].code).includes("assert.equal"), false);
 });
 
+test("run_code can validate files in the group workspace with relative paths", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-run-code-workspace-"));
+  fs.writeFileSync(path.join(tmp, "workspace-fact.txt"), "WORKSPACE_FACT\n", "utf8");
+  const result = await executeToolRequests({
+    permissionTier: "full",
+    groupPath: tmp,
+    agent: { id: "full", name: "Full" },
+    round: 1,
+    requests: [{
+      tool: "run_code",
+      language: "javascript",
+      code: "const fs = require('node:fs'); process.stdout.write(fs.readFileSync('workspace-fact.txt', 'utf8'));",
+      reason: "Validate a workspace file."
+    }]
+  });
+
+  assert.equal(result.results[0].status, "completed");
+  assert.match(result.results[0].result.stdout, /WORKSPACE_FACT/);
+});
+
 test("run_code reports timeout and unsupported languages honestly", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-run-code-fail-"));
   const timedOut = await executeToolRequests({
