@@ -5,7 +5,7 @@ import path from "node:path";
 import zlib from "node:zlib";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { prepareCampaignFixtures, providerCallMetrics, runSeededRealUserBaseline, runSeededRealUserCampaign, verifyCampaignDeliverable, verifyCampaignPersistence, verifyCampaignToolEvidence } from "../src/realUserHarness.js";
+import { prepareCampaignFixtures, providerCallMetrics, runSeededRealUserBaseline, runSeededRealUserCampaign, verifyCampaignDeliverable, verifyCampaignPersistence, verifyCampaignResumption, verifyCampaignToolEvidence } from "../src/realUserHarness.js";
 import { createSeededCampaignScenario, EXTERNAL_ROOT_TOKEN } from "../src/realUserCampaign.js";
 
 test("seeded real-user baseline uses the HTTP/SSE route, persists interruption, continues after restart, and verifies an edited artifact", async () => {
@@ -98,6 +98,34 @@ test("real-provider campaign reporting uses the durable budget ledger for sent-c
     attemptedModelCalls: 7,
     blockedBeforeSendModelCalls: 0
   });
+});
+
+test("campaign recovery requires completed visible work after every interruption", () => {
+  const interrupted = [{ id: "interrupted-one" }, { id: "interrupted-two" }];
+  const sessions = [
+    {
+      id: "continued-one",
+      status: "incomplete",
+      continuationContext: { previousSessionId: "interrupted-one" },
+      messages: [{ createdAt: "2026-07-16T00:00:00.000Z" }]
+    },
+    {
+      id: "continued-two",
+      status: "interrupted",
+      continuationContext: { previousSessionId: "interrupted-two" },
+      messages: []
+    }
+  ];
+  const failed = verifyCampaignResumption(interrupted, sessions);
+  assert.equal(failed.passed, false);
+  assert.equal(failed.checks.filter((item) => !item.passed).length, 1);
+
+  sessions[1] = {
+    ...sessions[1],
+    status: "completed",
+    messages: [{ createdAt: "2026-07-16T00:01:00.000Z" }]
+  };
+  assert.equal(verifyCampaignResumption(interrupted, sessions).passed, true);
 });
 
 test("real-user baseline rejects mock providers outside its plumbing test mode", async () => {

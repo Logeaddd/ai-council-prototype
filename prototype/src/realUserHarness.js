@@ -229,12 +229,13 @@ export async function runSeededRealUserCampaign(options = {}) {
       realProvider: options.allowMockProvider !== true
     });
     const persistence = verifyCampaignPersistence(groupPath, sessions, group);
-    const recovery = verifyNoDuplicateVerifiedWork(interruptedSessions, sessions);
-    const resumedSources = new Set(sessions
-      .filter((session) => session.question === "continue")
-      .map((session) => session.continuationContext?.previousSessionId)
-      .filter(Boolean));
-    const resumed = interruptedSessions.length > 0 && interruptedSessions.every((session) => resumedSources.has(session.id));
+    const replayRecovery = verifyNoDuplicateVerifiedWork(interruptedSessions, sessions);
+    const resumption = verifyCampaignResumption(interruptedSessions, sessions);
+    const recovery = {
+      passed: replayRecovery.passed && resumption.passed,
+      checks: [...replayRecovery.checks, ...resumption.checks]
+    };
+    const resumed = resumption.passed;
     const report = {
       schema: "ai-council.real-user-campaign-run.v1",
       startedAt,
@@ -268,7 +269,7 @@ export async function runSeededRealUserCampaign(options = {}) {
         campaignStagesExecuted: timeline.filter((item) => item.result === "completed").length,
         materialActionsObserved: timeline.filter((item) => isMaterialActionType(item.type)).length,
         resumedAfterInterruption: resumed,
-        noDuplicateVerifiedWork: recovery.passed,
+        noDuplicateVerifiedWork: replayRecovery.passed,
         passed: !failure && resumed && persistence.passed && recovery.passed
       },
       minimumUsableDelivery: delivery,
@@ -560,6 +561,25 @@ export function verifyNoDuplicateVerifiedWork(interruptedSessions = [], sessions
     check("verified_work_before_interruption", verifiedFingerprints.size > 0, `${verifiedFingerprints.size} successful command fingerprints`),
     check("no_verified_command_replay_after_continue", repeatedCommands.length === 0, `${repeatedCommands.length} duplicate completed commands; ${blockedReplays.length} prevented replays`)
   ];
+  return { passed: checks.every((item) => item.passed), checks };
+}
+
+export function verifyCampaignResumption(interruptedSessions = [], sessions = []) {
+  const checks = [];
+  for (const interrupted of (interruptedSessions || []).filter(Boolean)) {
+    const continuations = (sessions || []).filter((session) => (
+      session.continuationContext?.previousSessionId === interrupted.id
+    ));
+    const resumed = continuations.some((session) => (
+      !["running", "interrupted"].includes(String(session.status || ""))
+      && transcriptEntries(session).length > 0
+    ));
+    const detail = continuations.length
+      ? continuations.map((session) => `${session.id}:${session.status || "unknown"}:visible=${transcriptEntries(session).length}`).join(", ")
+      : "no continuation session";
+    checks.push(check("continuation_completed_visible_work", resumed, `${interrupted.id}: ${detail}`));
+  }
+  if (!checks.length) checks.push(check("continuation_completed_visible_work", false, "no interrupted sessions"));
   return { passed: checks.every((item) => item.passed), checks };
 }
 
