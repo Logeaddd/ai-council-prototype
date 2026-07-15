@@ -1863,6 +1863,53 @@ test("an explicit user tool-iteration limit pauses with continuation instead of 
   }
 });
 
+test("repeated non-progress inspection recovers without imposing a limit on distinct useful tool work", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-tool-stagnation-"));
+  fs.writeFileSync(path.join(tmp, "group.json"), JSON.stringify({
+    permissions: { defaultTier: "tool", seatTiers: { worker: "tool" } }
+  }), "utf8");
+  fs.writeFileSync(path.join(tmp, "brief.md"), "STAGNATION_FACT", "utf8");
+  let recoveryPromptSeen = false;
+  const server = http.createServer(async (req, res) => {
+    const body = JSON.parse(await readRequestBody(req));
+    const prompt = JSON.stringify(body.messages || []);
+    if (prompt.includes("FinalDecision JSON object")) {
+      writeOpenAiStream(res, JSON.stringify({ answer: "Stopped repeated inspection and reported the evidence.", consensus_score: 1, supporting_agents: ["Worker"], dissenting_agents: [], minority_report: "", risks: [], next_actions: [], selected_file_operation_ids: [], memory_candidates: [] }));
+      return;
+    }
+    if (prompt.includes("[Stagnation recovery]")) {
+      recoveryPromptSeen = true;
+      writeOpenAiStream(res, JSON.stringify({ status: "speak", argument: "The same file has already been inspected repeatedly; no further tool call is useful.", objections: [], confidence: 1, memory_candidates: [] }));
+      return;
+    }
+    writeOpenAiStream(res, JSON.stringify({
+      status: "speak",
+      argument: "Inspecting the same file again.",
+      tool_requests: [{ tool: "read_file", path: "brief.md", reason: "Repeated inspection." }],
+      objections: [],
+      confidence: 0.5,
+      memory_candidates: []
+    }));
+  });
+  await listen(server);
+  try {
+    const group = validateGroupConfig({
+      id: "tool-stagnation",
+      name: "Tool Stagnation",
+      settings: { maxRounds: 1, minConsensusWeight: 1, stopWhenAllSkip: true, agentTimeoutMs: 3000, allowSoloCouncil: true },
+      agents: [{ id: "worker", name: "Worker", role: "Builder", provider: "openai-compatible", apiBaseUrl: `http://127.0.0.1:${server.address().port}/v1`, allowUnsafePrivateNetwork: true, apiKey: "secret-runtime-key", model: "tool-stagnation-model", weight: 1, enabled: true, judge: true }]
+    });
+    const result = await runCouncil("Inspect the supplied file and report the result.", group, tmp, { groupPath: tmp });
+
+    assert.equal(recoveryPromptSeen, true);
+    assert.equal(result.session.toolExecutionResults.length, 4);
+    assert.equal(result.session.messages[0].response.tool_requests?.length || 0, 0);
+    assert.equal(result.session.toolContinuation, undefined);
+  } finally {
+    await close(server);
+  }
+});
+
 test("one member can complete more than twelve useful tool iterations without an application limit", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-long-tool-loop-"));
   fs.writeFileSync(path.join(tmp, "group.json"), JSON.stringify({

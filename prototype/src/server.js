@@ -39,6 +39,7 @@ import {
   readConfiguredMcpResource
 } from "./mcpClient.js";
 import { installMcpNpmServer, listMcpInstallCatalog, searchMcpNpmPackages, uninstallManagedMcpServer } from "./mcpInstall.js";
+import { createPersistentCampaignBudgetGuard } from "./harnessCostGuard.js";
 import {
   disableSkillForGroup,
   enableSkillForGroup,
@@ -61,6 +62,7 @@ const dataDir = userDataDir(baseDir);
 const allowedWorkspaceRoot = path.resolve(process.env.AI_COUNCIL_WORKSPACE_ROOT || (process.env.AI_COUNCIL_DATA_DIR ? dataDir : baseDir));
 const defaultGroupsRoot = path.join(process.env.AI_COUNCIL_DATA_DIR ? dataDir : baseDir, "workspace-ui");
 const harnessAllowsLocalHttp = process.env.AI_COUNCIL_HARNESS_ALLOW_LOCAL_HTTP === "1";
+const harnessCampaignBudget = readHarnessCampaignBudget(process.env);
 const execFileAsync = promisify(execFile);
 const activeCouncilRuns = createCouncilRunRegistry();
 
@@ -700,6 +702,7 @@ async function handleApi(req, res, url) {
       contextInvalidations: body.contextInvalidations,
       allowUnsafePrivateNetwork: harnessAllowsLocalHttp,
       allowHttp: harnessAllowsLocalHttp,
+      harnessCampaignBudget,
       appSettings: readCurrentAppSettings(),
       attachments: normalizeFileAttachments(body.attachments || [])
     });
@@ -772,6 +775,7 @@ async function handleApi(req, res, url) {
       contextInvalidations: body.contextInvalidations,
       allowUnsafePrivateNetwork: harnessAllowsLocalHttp,
       allowHttp: harnessAllowsLocalHttp,
+      harnessCampaignBudget,
       appSettings: readCurrentAppSettings(),
       attachments: normalizeFileAttachments(body.attachments || [])
     });
@@ -1223,6 +1227,9 @@ function buildAppSettingsPatch(body) {
 async function streamCouncilEvents(req, res, question, group, options = {}) {
   if (!options.groupPath) throw new Error("A group workspace is required for a council run.");
   const run = activeCouncilRuns.start(options.groupPath);
+  const budgetGuard = options.harnessCampaignBudget
+    ? createPersistentCampaignBudgetGuard({ ...options.harnessCampaignBudget, group, groupPath: options.groupPath, controller: run.controller })
+    : undefined;
   const abortDisconnectedRun = () => activeCouncilRuns.stop(options.groupPath, "client_disconnected");
   req.once("aborted", abortDisconnectedRun);
   res.once("close", abortDisconnectedRun);
@@ -1234,6 +1241,7 @@ async function streamCouncilEvents(req, res, question, group, options = {}) {
   try {
     for await (const event of runCouncilEvents(question, group, baseDir, {
       ...options,
+      onModelCall: budgetGuard?.onModelCall,
       signal: run.controller.signal
     })) {
       if (run.controller.signal.aborted || res.destroyed || res.writableEnded) break;
@@ -1249,6 +1257,13 @@ async function streamCouncilEvents(req, res, question, group, options = {}) {
     activeCouncilRuns.finish(options.groupPath, run.id);
     if (!res.destroyed && !res.writableEnded) res.end();
   }
+}
+
+function readHarnessCampaignBudget(env = process.env) {
+  const maxCostUsd = Number(env.AI_COUNCIL_HARNESS_MAX_COST_USD);
+  const maxModelCalls = Number(env.AI_COUNCIL_HARNESS_MAX_MODEL_CALLS);
+  if (!(maxCostUsd > 0) || !(maxModelCalls > 0)) return undefined;
+  return { maxCostUsd, maxModelCalls };
 }
 
 function writeSse(res, eventName, data) {

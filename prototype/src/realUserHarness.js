@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { once } from "node:events";
 import { readZipArchiveEntries } from "./archiveTools.js";
 import { CAMPAIGN_API_URL_TOKEN, createSeededCampaignScenario, EXTERNAL_ROOT_TOKEN, publicCampaignScenario } from "./realUserCampaign.js";
+import { assertHardCampaignBudgetGroup, readCampaignBudgetLedger } from "./harnessCostGuard.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const prototypeRoot = path.resolve(__dirname, "..");
@@ -133,6 +134,7 @@ export async function runSeededRealUserCampaign(options = {}) {
   const sourceCampaign = options.campaign || createSeededCampaignScenario({ seed: options.seed });
   assertRunnableGroup(group, { allowMockProvider: options.allowMockProvider === true });
   assertCampaignBudget(options, { allowMockProvider: options.allowMockProvider === true });
+  if (options.allowMockProvider !== true) assertHardCampaignBudgetGroup(group);
   if (Number(options.maxModelCalls) > 0) group.settings.maxModelCalls = Number(options.maxModelCalls);
 
   const outputRoot = path.resolve(options.outputDir || path.join(prototypeRoot, "eval", "real-user-campaign"));
@@ -155,7 +157,10 @@ export async function runSeededRealUserCampaign(options = {}) {
     prepareGroupWorkspace(groupPath, group);
     prepareCampaignFixtures(groupPath, campaign.fixtures);
     if (campaign.externalWorkspaceRoot) prepareCampaignFixtures(campaign.externalWorkspaceRoot, campaign.externalFixtures);
-    const environment = harnessEnvironment(options.environment, Boolean(apiFixture));
+    const environment = harnessEnvironment(options.environment, Boolean(apiFixture), options.allowMockProvider === true ? undefined : {
+      maxCostUsd: options.maxCostUsd,
+      maxModelCalls: options.maxModelCalls
+    });
     server = await startHarnessServer({ dataDir, workspaceRoot: dataDir, environment });
     for (const stage of campaign.stages || []) {
       if (stage.kind === "user" || stage.kind === "initial" || stage.kind === "followup" || stage.kind === "reopen") {
@@ -211,6 +216,7 @@ export async function runSeededRealUserCampaign(options = {}) {
       checks: [...artifactDelivery.checks, ...toolEvidence.checks]
     };
     const modelCalls = sessions.reduce((total, session) => total + Number(session.modelCallCount || 0), 0);
+    const budgetLedger = readCampaignBudgetLedger(groupPath);
     const persistence = verifyCampaignPersistence(groupPath, sessions, group);
     const recovery = verifyNoDuplicateVerifiedWork(interruptedSessions, sessions);
     const resumedSources = new Set(sessions
@@ -230,7 +236,8 @@ export async function runSeededRealUserCampaign(options = {}) {
         realProvider: options.allowMockProvider !== true,
         maxCostUsd: Number(options.maxCostUsd || 0),
         maxModelCalls: Number(options.maxModelCalls || 0),
-        observedModelCalls: modelCalls
+        observedModelCalls: modelCalls,
+        budgetLedger: budgetLedger || null
       },
       scenario: publicCampaignScenario(campaign),
       group: redactGroup(group),
@@ -721,10 +728,14 @@ function campaignNeedsApiFixture(campaign = {}) {
   return JSON.stringify(campaign).includes(CAMPAIGN_API_URL_TOKEN);
 }
 
-function harnessEnvironment(environment = {}, allowLocalHttp = false) {
+function harnessEnvironment(environment = {}, allowLocalHttp = false, realCampaignBudget = undefined) {
   return {
     ...(environment || {}),
-    ...(allowLocalHttp ? { AI_COUNCIL_HARNESS_ALLOW_LOCAL_HTTP: "1" } : {})
+    ...(allowLocalHttp ? { AI_COUNCIL_HARNESS_ALLOW_LOCAL_HTTP: "1" } : {}),
+    ...(realCampaignBudget ? {
+      AI_COUNCIL_HARNESS_MAX_COST_USD: String(realCampaignBudget.maxCostUsd),
+      AI_COUNCIL_HARNESS_MAX_MODEL_CALLS: String(realCampaignBudget.maxModelCalls)
+    } : {})
   };
 }
 

@@ -279,6 +279,8 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
       const accumulatedRejectedFileOperationProposals = [];
       const maxToolIterations = normalizeMaxToolIterations(group.settings.maxToolIterations);
       let toolIterations = 0;
+      let consecutiveStagnantToolLoops = 0;
+      const seenToolTargets = new Set();
       const processResponseFileOperations = (currentResponse) => {
         const fileOperationResult = applyFilePermissionTier(
           collectFileOperationProposals(currentResponse, agent, round, options.groupPath),
@@ -403,14 +405,26 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
 
         if (!toolResult.results.length && !toolResult.rejected.length) break;
 
+        const toolLoopStagnated = updateStagnantToolLoopCount({
+          requests: toolResult.accepted,
+          results: toolResult.results,
+          rejected: toolResult.rejected,
+          current: consecutiveStagnantToolLoops,
+          seenTargets: seenToolTargets
+        });
+        consecutiveStagnantToolLoops = toolLoopStagnated.count;
+
         const toolFollowupInstruction = buildToolFollowupInstruction(accumulatedToolResults, accumulatedRejectedToolRequests);
+        const recoveryInstruction = toolLoopStagnated.recoveryRequired
+          ? buildStagnantToolLoopRecoveryInstruction(agent, question, toolFollowupInstruction)
+          : toolFollowupInstruction;
         const followupContext = buildMemberContext(agent, session, {
           question,
           groupSettings: group.settings,
           globalRequirement,
           continuationContext,
           transcriptVisibility,
-          latestBossInstruction: [toolFollowupInstruction, executionDirective].filter(Boolean).join("\n\n"),
+          latestBossInstruction: [recoveryInstruction, executionDirective].filter(Boolean).join("\n\n"),
           attachments,
           taskState,
           retrievedContext,
@@ -427,20 +441,23 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
             ...runtimeDiscoveryOptions,
             refresh: true
           })),
-          resumeInstruction: toolFollowupInstruction,
+          resumeInstruction: recoveryInstruction,
           contextSections: buildContextPromptSections(followupContext),
         });
         callOutcome = yield* callRoundModel({
           options,
           session,
-          phase: "tool_followup",
+          phase: toolLoopStagnated.recoveryRequired ? "tool_stagnation_recovery" : "tool_followup",
           round,
           agent,
           memberContext: followupContext,
           messages: followupMessages,
           timeoutMs: group.settings.agentTimeoutMs,
           toolIteration: toolIterations,
-          nativeToolPermissionTier: fileOperationPermissionTier
+          nativeToolPermissionTier: fileOperationPermissionTier,
+          nativeToolChoice: toolLoopStagnated.recoveryRequired && fileOperationPermissionTier === "full" && !isReviewerLike(agent)
+            ? "required"
+            : "auto"
         });
         response = applyRoundResponseRules(callOutcome.response, agent, round);
         rawTextForMessage = callOutcome.rawTextForMessage;
@@ -945,6 +962,44 @@ function hasMaterialWorkspaceProgress(session = {}) {
     if (Number(changes.totalChanges || 0) > 0) return true;
     return [changes.created, changes.modified, changes.deleted].some((entries) => Array.isArray(entries) && entries.length > 0);
   });
+}
+
+function updateStagnantToolLoopCount({ requests = [], results = [], rejected = [], current = 0, seenTargets = new Set() } = {}) {
+  const material = (results || []).some(hasMaterialWorkspaceChange);
+  const actionableFailure = (rejected || []).some((item) => ["permission_denied", "capability_disabled", "invalid_tool"].includes(String(item.code || "")))
+    || (results || []).some((item) => item.status === "failed" && !isRepeatableInspectionTool(item));
+  const targets = (requests || []).map(toolLoopTarget).filter(Boolean);
+  const hasNovelTarget = targets.some((target) => !seenTargets.has(target));
+  for (const target of targets) seenTargets.add(target);
+  const count = material || actionableFailure || hasNovelTarget ? 0 : Number(current || 0) + 1;
+  return { count, recoveryRequired: count >= 3 };
+}
+
+function toolLoopTarget(request = {}) {
+  const tool = String(request.tool || "");
+  if (!tool) return "";
+  if (request.path) return `${tool}:path:${String(request.path).toLowerCase()}`;
+  if (request.url) return `${tool}:url:${String(request.url).toLowerCase()}`;
+  if (request.command) {
+    const command = String(request.command).toLowerCase();
+    const fileTarget = command.match(/[a-z0-9_./-]+\.(?:json|js|ts|py|java|txt|csv|zip|jar)\b/)?.[0] || "";
+    return `${tool}:command:${fileTarget || command.replace(/\s+/g, " ").slice(0, 180)}`;
+  }
+  return `${tool}:generic`;
+}
+
+function isRepeatableInspectionTool(item = {}) {
+  return ["list_directory", "read_file", "search_files", "grep_content", "web_search", "fetch_url", "api_request", "execute_command", "git_operation", "run_tests"].includes(item.tool);
+}
+
+function buildStagnantToolLoopRecoveryInstruction(agent, question, toolFollowupInstruction) {
+  const reviewer = isReviewerLike(agent);
+  const roleDirective = reviewer
+    ? "You are reviewing. Stop issuing more inspection, search, API, Git or verification calls unless there is one distinct unresolved evidence gap. Use the evidence already returned and give a concrete review conclusion, objection, or skip."
+    : isFileDeliveryTask(question)
+      ? "You are delivering a file task. Stop repeating inspection, search, API, Git or verification calls. Use the evidence already returned and make the concrete workspace edit or repair needed for the current requirement. Do not return another investigation plan."
+      : "Stop repeating inspection, search, API, Git or verification calls. Use the evidence already returned and take a materially different next action, or state the concrete blocker with its evidence.";
+  return `${toolFollowupInstruction}\n\n[Stagnation recovery]\nSeveral consecutive tool turns produced no material workspace progress. ${roleDirective}`;
 }
 
 function abortReasonCode(signal) {

@@ -16,6 +16,9 @@
       "apiBaseUrl": "env:AI_COUNCIL_API_BASE_URL",
       "apiKeyEnv": "AI_COUNCIL_API_KEY",
       "model": "env:AI_COUNCIL_MODEL",
+      "pricing": { "inputPerMillion": 0.14, "outputPerMillion": 0.28 },
+      "costGuardMaxInputTokens": 1000000,
+      "costGuardMaxOutputTokens": 384000,
       "weight": 1,
       "enabled": true
     },
@@ -27,6 +30,9 @@
       "apiBaseUrl": "env:AI_COUNCIL_API_BASE_URL",
       "apiKeyEnv": "AI_COUNCIL_API_KEY",
       "model": "env:AI_COUNCIL_MODEL",
+      "pricing": { "inputPerMillion": 0.14, "outputPerMillion": 0.28 },
+      "costGuardMaxInputTokens": 1000000,
+      "costGuardMaxOutputTokens": 384000,
       "weight": 1,
       "enabled": true,
       "mandatoryRedTeam": true
@@ -39,6 +45,9 @@
       "apiBaseUrl": "env:AI_COUNCIL_API_BASE_URL",
       "apiKeyEnv": "AI_COUNCIL_API_KEY",
       "model": "env:AI_COUNCIL_MODEL",
+      "pricing": { "inputPerMillion": 0.14, "outputPerMillion": 0.28 },
+      "costGuardMaxInputTokens": 1000000,
+      "costGuardMaxOutputTokens": 384000,
       "weight": 1,
       "enabled": true,
       "judge": true
