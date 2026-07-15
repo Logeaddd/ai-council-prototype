@@ -169,7 +169,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
       const agentStartedAt = nowIso();
       const seat = findWorkspaceSeat(workspaceGroup, agent);
       const transcriptVisibility = contextVisibilityForAgent(agent, workMode);
-      const executionDirective = executionInstruction(session.executionState, agent);
+      let executionDirective = executionInstruction(session.executionState, agent);
       const memberContext = buildMemberContext(agent, session, {
         question,
         groupSettings: group.settings,
@@ -310,6 +310,17 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
         accumulatedFileOperationExecutionResults.push(...readListResults, ...autoFileExecutionResults);
         accumulatedPendingFileOperationProposals.push(...queueResult.queued);
         accumulatedRejectedFileOperationProposals.push(...fileOperationResult.rejected, ...queueResult.rejected);
+        if (agent.id === session.executionState?.executorId) {
+          advanceExecutionState({
+            state: session.executionState,
+            session,
+            agent,
+            groupPath: options.groupPath,
+            question: executionQuestion,
+            response: currentResponse
+          });
+          executionDirective = executionInstruction(session.executionState, agent);
+        }
       };
 
       processResponseFileOperations(response);
@@ -398,6 +409,17 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
         session.toolRequests.push(...toolResult.accepted);
         session.toolExecutionResults.push(...toolResult.results);
         session.rejectedToolRequests.push(...toolResult.rejected);
+        if (agent.id === session.executionState?.executorId) {
+          advanceExecutionState({
+            state: session.executionState,
+            session,
+            agent,
+            groupPath: options.groupPath,
+            question: executionQuestion,
+            response
+          });
+          executionDirective = executionInstruction(session.executionState, agent);
+        }
         persistRunningSession();
         for (const event of toolResult.events || []) {
           yield event;

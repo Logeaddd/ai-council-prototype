@@ -4540,6 +4540,7 @@ test("primary executor completes a deterministic project through real writes tes
     assert.equal(session.executionState.phase, "complete");
     assert.equal(session.executionState.reviewedCheckpointVersion, session.executionState.checkpointVersion);
     assert.equal(session.guardStopReason, "");
+    assert.match(calls[1], /Current phase: verify/);
     assert.ok(calls.length <= 6);
   } finally {
     await close(server);
