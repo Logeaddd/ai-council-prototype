@@ -4,6 +4,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { once } from "node:events";
+import { createSeededCampaignScenario, publicCampaignScenario } from "./realUserCampaign.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const prototypeRoot = path.resolve(__dirname, "..");
@@ -120,6 +121,98 @@ export async function runSeededRealUserBaseline(options = {}) {
       interruption: "SSE client disconnect followed by server restart",
       continuation: scenario.continueQuestion
     }
+  };
+  fs.writeFileSync(path.join(runDir, "report.json"), JSON.stringify(report, null, 2), "utf8");
+  return { runDir, groupPath, report };
+}
+
+export async function runSeededRealUserCampaign(options = {}) {
+  const group = structuredClone(options.group || {});
+  const campaign = options.campaign || createSeededCampaignScenario({ seed: options.seed });
+  assertRunnableGroup(group, { allowMockProvider: options.allowMockProvider === true });
+  assertCampaignBudget(options, { allowMockProvider: options.allowMockProvider === true });
+  if (Number(options.maxModelCalls) > 0) group.settings.maxModelCalls = Number(options.maxModelCalls);
+
+  const outputRoot = path.resolve(options.outputDir || path.join(prototypeRoot, "eval", "real-user-campaign"));
+  const runDir = path.join(outputRoot, `${safeId(campaign.id)}-${Date.now()}`);
+  const dataDir = path.join(runDir, "data");
+  const groupPath = path.join(dataDir, "workspace-ui", "campaign-group");
+  const timeline = [];
+  const startedAt = new Date().toISOString();
+  let server;
+  let interruptedSession;
+  let failure;
+  let failureKind = "failed";
+
+  fs.mkdirSync(runDir, { recursive: true });
+  try {
+    prepareGroupWorkspace(groupPath, group);
+    server = await startHarnessServer({ dataDir, workspaceRoot: dataDir, environment: options.environment });
+    for (const stage of campaign.stages || []) {
+      if (stage.kind === "user" || stage.kind === "initial" || stage.kind === "followup" || stage.kind === "reopen") {
+        const run = await postCouncilEvents({
+          port: server.port,
+          group,
+          groupPath,
+          question: stage.prompt,
+          onEvent(event) { timeline.push(compactCampaignEvent(stage, event)); }
+        });
+        timeline.push({ stageId: stage.id, kind: stage.kind, result: "completed", events: run.events.length });
+        continue;
+      }
+      if (stage.kind === "member_mutation") {
+        const mutation = await applyCampaignMutation(server.port, groupPath, group, stage.mutation);
+        timeline.push({ stageId: stage.id, kind: stage.kind, mutation: stage.mutation?.type || "", result: mutation.ok ? "completed" : "failed" });
+        continue;
+      }
+      if (stage.kind === "interrupt") {
+        const run = await postCouncilEvents({
+          port: server.port,
+          group,
+          groupPath,
+          question: "continue",
+          onEvent(event) { timeline.push(compactCampaignEvent(stage, event)); },
+          abortWhen: isMaterialActionEvent
+        });
+        if (!run.aborted) throw harnessFailure("campaign_interrupt_did_not_reach_action", "Campaign interruption did not reach model or tool activity.");
+        interruptedSession = await waitForSession(server.port, groupPath, (session) => session.status === "interrupted");
+        await stopHarnessServer(server);
+        server = await startHarnessServer({ dataDir, workspaceRoot: dataDir, environment: options.environment });
+        timeline.push({ stageId: stage.id, kind: stage.kind, result: "interrupted", sessionId: interruptedSession.id });
+        continue;
+      }
+      timeline.push({ stageId: stage.id, kind: stage.kind, result: "checkpoint" });
+    }
+  } catch (error) {
+    failure = error;
+    failureKind = error?.harnessInfrastructure ? "infrastructure_error" : "failed";
+  } finally {
+    if (server) await stopHarnessServer(server);
+  }
+
+  const delivery = await verifyCampaignDeliverable(campaign.hiddenVerifier, groupPath);
+  const sessions = listPersistedSessions(groupPath);
+  const resumed = sessions.some((session) => session.question === "continue" && session.continuationContext?.previousSessionId === interruptedSession?.id);
+  const report = {
+    schema: "ai-council.real-user-campaign-run.v1",
+    startedAt,
+    completedAt: new Date().toISOString(),
+    status: failure ? failureKind : delivery.passed && Boolean(interruptedSession?.id) && resumed ? "passed" : "failed",
+    error: failure ? String(failure.message || failure).slice(0, 1600) : "",
+    seed: campaign.seed,
+    scenario: publicCampaignScenario(campaign),
+    group: redactGroup(group),
+    workspacePath: groupPath,
+    autonomousExecution: {
+      campaignStagesExecuted: timeline.filter((item) => item.result === "completed").length,
+      materialActionsObserved: timeline.filter((item) => isMaterialActionType(item.type)).length,
+      resumedAfterInterruption: resumed,
+      passed: !failure && resumed
+    },
+    minimumUsableDelivery: delivery,
+    subjectiveQuality: { status: "not_scored" },
+    sessions: { interrupted: summarizeSession(interruptedSession), total: sessions.length },
+    timeline
   };
   fs.writeFileSync(path.join(runDir, "report.json"), JSON.stringify(report, null, 2), "utf8");
   return { runDir, groupPath, report };
@@ -247,6 +340,112 @@ function assertRunnableGroup(group, options = {}) {
     noProgressModelCalls: 0,
     ...(group.settings || {})
   };
+}
+
+function assertCampaignBudget(options = {}, { allowMockProvider }) {
+  if (allowMockProvider) return;
+  const maxCostUsd = Number(options.maxCostUsd);
+  const maxModelCalls = Number(options.maxModelCalls);
+  if (!(maxCostUsd > 0) || !(maxModelCalls > 0)) {
+    throw harnessFailure("campaign_budget_required", "A real user campaign requires explicit positive maxCostUsd and maxModelCalls.", true);
+  }
+}
+
+async function applyCampaignMutation(port, groupPath, group, mutation = {}) {
+  const agents = group.agents || [];
+  const agentAt = (value) => agents[seatIndex(value)].id;
+  if (mutation.type === "reorder") {
+    const seatIds = mutation.seatIds.map(agentAt);
+    const response = await postJson(port, "/api/group/seats/reorder", { groupPath, seatIds });
+    const byId = new Map(agents.map((agent) => [agent.id, agent]));
+    group.agents = seatIds.map((id) => byId.get(id));
+    return response;
+  }
+  const seatId = agentAt(mutation.seatId);
+  const patch = mutation.type === "rename"
+    ? { displayName: mutation.displayName }
+    : mutation.type === "disable"
+      ? { enabled: false }
+      : mutation.type === "restore"
+        ? { enabled: true, role: mutation.role || "ordinary" }
+        : { role: mutation.role || "ordinary" };
+  const response = await postJson(port, "/api/group/seat", { groupPath, seatId, patch });
+  const agent = agents.find((item) => item.id === seatId);
+  if (agent) applyRuntimeAgentMutation(agent, patch);
+  return response;
+}
+
+function seatIndex(value) {
+  const match = String(value || "").match(/(\d+)$/);
+  return Math.max(0, Number(match?.[1] || 1) - 1);
+}
+
+function applyRuntimeAgentMutation(agent, patch) {
+  if (patch.displayName !== undefined) agent.name = patch.displayName;
+  if (patch.enabled !== undefined) agent.enabled = Boolean(patch.enabled);
+  if (patch.role === "reviewer") {
+    agent.reviewer = true;
+    agent.mandatoryRedTeam = true;
+    agent.judge = false;
+  } else if (patch.role === "summarizer") {
+    agent.reviewer = false;
+    agent.mandatoryRedTeam = false;
+    agent.judge = true;
+  } else if (patch.role) {
+    agent.reviewer = false;
+    agent.mandatoryRedTeam = false;
+    agent.judge = false;
+  }
+}
+
+async function postJson(port, pathname, body) {
+  const response = await fetch(`http://127.0.0.1:${port}${pathname}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  if (!response.ok) throw harnessFailure("campaign_mutation_failed", `Campaign mutation ${pathname} failed with HTTP ${response.status}.`, true);
+  return response.json();
+}
+
+function compactCampaignEvent(stage, event) {
+  return { stageId: stage.id, ...compactEvent(stage.kind, event) };
+}
+
+function listPersistedSessions(groupPath) {
+  const root = path.join(groupPath, "sessions");
+  if (!fs.existsSync(root)) return [];
+  return fs.readdirSync(root).filter((name) => name.endsWith(".json")).map((name) => {
+    try { return JSON.parse(fs.readFileSync(path.join(root, name), "utf8")); } catch { return null; }
+  }).filter(Boolean);
+}
+
+async function verifyCampaignDeliverable(verifier = {}, groupPath) {
+  const filePath = path.resolve(groupPath, String(verifier.file || ""));
+  const checks = [check("file_exists", fs.existsSync(filePath), verifier.file || "")];
+  if (verifier.kind === "json" && fs.existsSync(filePath)) {
+    try {
+      const value = JSON.parse(fs.readFileSync(filePath, "utf8"));
+      checks.push(check("json_expected", Object.entries(verifier.expected || {}).every(([key, expected]) => value[key] === expected), JSON.stringify(value)));
+    } catch (error) { checks.push(check("json_parses", false, error.message)); }
+  } else if (["node_cli", "python_cli"].includes(verifier.kind)) {
+    const command = verifier.kind === "python_cli" ? "python" : process.execPath;
+    const result = await runProcess(command, [filePath, ...(verifier.args || [])]);
+    checks.push(check("command_exit", result.exitCode === 0, `exit=${result.exitCode}`));
+    checks.push(check("final_requirement", result.stdout.trim() === verifier.expectedOutput, result.stdout.trim()));
+  }
+  return { passed: checks.every((item) => item.passed), checks };
+}
+
+function runProcess(command, args) {
+  const result = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+  const stdout = [];
+  result.stdout.on("data", (chunk) => stdout.push(Buffer.from(chunk)));
+  const timer = setTimeout(() => result.kill(), 10000);
+  return new Promise((resolve) => result.once("exit", (code) => {
+    clearTimeout(timer);
+    resolve({ exitCode: code ?? -1, stdout: Buffer.concat(stdout).toString("utf8") });
+  }));
 }
 
 function prepareGroupWorkspace(groupPath, group) {

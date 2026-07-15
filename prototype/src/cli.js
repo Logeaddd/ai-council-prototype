@@ -10,7 +10,7 @@ import { addReview, createRecorderDraft, finalizeDraft, listDrafts } from "./wri
 import { readAppSettings } from "./appSettings.js";
 import { runRealProviderBenchmark } from "./realProviderBenchmark.js";
 import { runProductHarnessCheck } from "./productHarness.js";
-import { runSeededRealUserBaseline } from "./realUserHarness.js";
+import { runSeededRealUserBaseline, runSeededRealUserCampaign } from "./realUserHarness.js";
 import { runContextPressureBaseline } from "./contextPressureHarness.js";
 import { runRetrievalCoverageAudit } from "./retrievalAuditHarness.js";
 
@@ -72,6 +72,11 @@ async function main() {
 
   if (command === "real-user-baseline") {
     await runRealUserBaselineCommand(args);
+    return;
+  }
+
+  if (command === "real-user-campaign") {
+    await runRealUserCampaignCommand(args);
     return;
   }
 
@@ -140,6 +145,33 @@ async function runRealUserBaselineCommand(args) {
     group,
     seed: getArg(args, "--seed"),
     outputDir: getArg(args, "--output", path.join(baseDir, "eval", "real-user"))
+  });
+  console.log(JSON.stringify({
+    runDir: run.runDir,
+    workspacePath: run.groupPath,
+    status: run.report.status,
+    seed: run.report.seed,
+    autonomousExecution: run.report.autonomousExecution.passed,
+    minimumUsableDelivery: run.report.minimumUsableDelivery.passed
+  }, null, 2));
+}
+
+async function runRealUserCampaignCommand(args) {
+  const groupPath = getArg(args, "--group");
+  if (!groupPath) throw new Error("real-user-campaign requires --group with a real provider configuration.");
+  const maxCostUsd = Number(getArg(args, "--max-cost-usd"));
+  const maxModelCalls = Number(getArg(args, "--max-model-calls"));
+  if (!(maxCostUsd > 0) || !(maxModelCalls > 0)) {
+    throw new Error("real-user-campaign requires positive --max-cost-usd and --max-model-calls.");
+  }
+  const group = validateGroupConfig(loadJson(groupPath));
+  validateRuntimeEnv(group);
+  const run = await runSeededRealUserCampaign({
+    group,
+    seed: getArg(args, "--seed"),
+    outputDir: getArg(args, "--output", path.join(baseDir, "eval", "real-user-campaign")),
+    maxCostUsd,
+    maxModelCalls
   });
   console.log(JSON.stringify({
     runDir: run.runDir,

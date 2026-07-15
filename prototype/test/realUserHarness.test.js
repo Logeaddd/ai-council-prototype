@@ -4,7 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { runSeededRealUserBaseline } from "../src/realUserHarness.js";
+import { runSeededRealUserBaseline, runSeededRealUserCampaign } from "../src/realUserHarness.js";
+import { createSeededCampaignScenario } from "../src/realUserCampaign.js";
 
 test("seeded real-user baseline uses the HTTP/SSE route, persists interruption, continues after restart, and verifies an edited artifact", async () => {
   const provider = http.createServer(async (req, res) => {
@@ -92,6 +93,50 @@ test("real-user baseline rejects mock providers outside its plumbing test mode",
       }
     }), (error) => error.code === "mock_provider_denied");
   } finally {
+    fs.rmSync(outputDir, { recursive: true, force: true });
+  }
+});
+
+test("seeded campaign drives HTTP/SSE stages, member disturbances and interruption recovery", async () => {
+  const campaign = createSeededCampaignScenario({ seed: 6 });
+  const code = `const index = process.argv.indexOf('--name');\nconst name = index >= 0 ? process.argv[index + 1] : '';\nconsole.log('Thanks, ' + name + '.');\n`;
+  const provider = http.createServer(async (req, res) => {
+    const body = JSON.parse(await readBody(req));
+    const prompt = JSON.stringify(body.messages || []);
+    if (prompt.includes("FinalDecision JSON object")) {
+      writeOpenAiStream(res, JSON.stringify({ answer: "Completed.", consensus_score: 1, supporting_agents: ["Worker"], dissenting_agents: [], minority_report: "", risks: [], next_actions: [], selected_file_operation_ids: [], memory_candidates: [] }));
+      return;
+    }
+    if (prompt.includes("Tool results from your previous request are now available")) {
+      writeOpenAiStream(res, JSON.stringify({ status: "speak", argument: "The current deliverable was written and verified.", objections: [], confidence: 1, memory_candidates: [] }));
+      return;
+    }
+    writeOpenAiStream(res, JSON.stringify({
+      status: "speak",
+      argument: "I will update the requested deliverable.",
+      objections: [],
+      confidence: 1,
+      memory_candidates: [],
+      tool_requests: [{ tool: "workspace_edit", action: "write", path: campaign.hiddenVerifier.file, code, reason: "Write the current requested CLI." }]
+    }));
+  });
+  await listen(provider);
+  const outputDir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-real-campaign-"));
+  try {
+    const agent = (id, name) => ({ id, name, role: "Deliver the requested artifact.", provider: "openai-compatible", apiBaseUrl: `http://127.0.0.1:${provider.address().port}`, allowUnsafePrivateNetwork: true, apiKey: "test-key", model: "test-model", weight: 1, enabled: true });
+    const run = await runSeededRealUserCampaign({
+      group: { id: "campaign-group", name: "Campaign Group", settings: { maxRounds: 1, minRounds: 1, allowSoloCouncil: true, stopWhenAllSkip: false }, agents: [agent("worker", "Worker"), agent("reviewer", "Reviewer"), agent("judge", "Judge")] },
+      campaign,
+      outputDir,
+      allowMockProvider: true
+    });
+    assert.equal(run.report.status, "passed", JSON.stringify(run.report, null, 2));
+    assert.equal(run.report.autonomousExecution.resumedAfterInterruption, true);
+    assert.equal(run.report.minimumUsableDelivery.passed, true);
+    assert.equal(run.report.timeline.some((item) => item.mutation === "reorder" && item.result === "completed"), true);
+    assert.equal(JSON.stringify(run.report).includes("test-key"), false);
+  } finally {
+    await close(provider);
     fs.rmSync(outputDir, { recursive: true, force: true });
   }
 });
