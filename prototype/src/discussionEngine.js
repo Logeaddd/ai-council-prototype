@@ -26,6 +26,7 @@ import { formatEnabledSkillMetadataForPrompt, listEnabledSkillMetadata } from ".
 import { capabilityEnabled } from "./capabilityPolicy.js";
 import fs from "node:fs";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { createObservationCache, hasMaterialWorkspaceChange } from "./observationCache.js";
 import { advanceExecutionState, createExecutionState, executionInstruction, isDeliveryTask, selectExecutionAgents } from "./executionState.js";
 import { nativeToolDefinitions } from "./nativeToolProtocol.js";
@@ -377,7 +378,11 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
           managedToolRoots: runtimeDiscoveryOptions.managedToolRoots,
           signal: options.signal,
           observationCache,
-          previousResults: session.toolExecutionResults.filter((item) => item.source_agent_id === agent.id)
+          previousResults: [
+            ...session.toolExecutionResults.filter((item) => item.source_agent_id === agent.id),
+            ...continuationVerifiedToolResults(continuationContext)
+          ],
+          blockVerifiedContinuationCommands: Boolean(continuationContext && isPlainContinuationRequest(question))
         });
         accumulatedToolRequests.push(...toolResult.accepted);
         accumulatedToolResults.push(...toolResult.results);
@@ -1123,7 +1128,8 @@ function normalizeContinuationContext(value) {
     nextActions,
     participantMessages: normalizeContinuationMessages(value.participantMessages || value.participant_messages, 12),
     recentMessages: normalizeContinuationMessages(value.recentMessages || value.recent_messages, 12),
-    recentActivity: normalizeTextList(value.recentActivity || value.recent_activity).slice(0, 12)
+    recentActivity: normalizeTextList(value.recentActivity || value.recent_activity).slice(0, 12),
+    verifiedToolResults: normalizeVerifiedContinuationToolResults(value.verifiedToolResults || value.verified_tool_results, 12)
   };
   return Object.values(normalized).some((item) => Array.isArray(item) ? item.length : Boolean(item)) ? normalized : null;
 }
@@ -1156,6 +1162,10 @@ function buildAutomaticContinuationContext(previousSession) {
     ...(Array.isArray(previousSession.fileOperationExecutionResults) ? previousSession.fileOperationExecutionResults.slice(-8).map((item) => compactContinuationActivity("file result", item)) : []),
     ...(Array.isArray(previousSession.fileOperationProposals) ? previousSession.fileOperationProposals.slice(-8).map((item) => compactContinuationActivity("file proposal", item)) : [])
   ].filter(Boolean).slice(-12);
+  const verifiedToolResults = mergeVerifiedContinuationToolResults([
+    ...(previousSession.toolExecutionResults || []).map(compactVerifiedContinuationToolResult),
+    ...(inherited?.verifiedToolResults || [])
+  ]);
   return normalizeContinuationContext({
     previousSessionId: previousSession.id,
     previousQuestion: inherited?.previousQuestion || previousSession.question,
@@ -1169,8 +1179,58 @@ function buildAutomaticContinuationContext(previousSession) {
     nextActions: finalDecision.next_actions || inherited?.nextActions,
     participantMessages,
     recentMessages,
-    recentActivity: recentActivity.length ? recentActivity : inherited?.recentActivity
+    recentActivity: recentActivity.length ? recentActivity : inherited?.recentActivity,
+    verifiedToolResults
   });
+}
+
+function isPlainContinuationRequest(question) {
+  return /^(?:continue|go\s+on|keep\s+going|\u7ee7\u7eed|\u63a5\u7740|\u7ee7\u7eed\u505a|\u7ee7\u7eed\u5b8c\u6210)[\s.!?\u3002\uff01\uff1f]*$/iu.test(String(question || "").trim());
+}
+
+function normalizeVerifiedContinuationToolResults(value, limit) {
+  return mergeVerifiedContinuationToolResults(Array.isArray(value) ? value.slice(-limit).map((item) => ({
+    tool: String(item?.tool || "").trim(),
+    commandFingerprint: String(item?.commandFingerprint || item?.command_fingerprint || "").trim(),
+    sourceAgentId: String(item?.sourceAgentId || item?.source_agent_id || "").trim(),
+    createdAt: String(item?.createdAt || item?.created_at || "").trim()
+  })) : []);
+}
+
+function mergeVerifiedContinuationToolResults(items = []) {
+  const seen = new Set();
+  return items.filter((item) => {
+    if (!item || item.tool !== "execute_command" || !/^[a-f0-9]{64}$/i.test(item.commandFingerprint || "")) return false;
+    if (seen.has(item.commandFingerprint)) return false;
+    seen.add(item.commandFingerprint);
+    return true;
+  }).slice(-12);
+}
+
+function compactVerifiedContinuationToolResult(item = {}) {
+  const command = String(item.command || item.result?.command || "").trim();
+  const exitCode = Number(item.result?.exitCode);
+  if (item.tool !== "execute_command" || item.status !== "completed" || !command || !Number.isFinite(exitCode) || exitCode !== 0) return null;
+  return {
+    tool: "execute_command",
+    commandFingerprint: continuationCommandFingerprint(command),
+    sourceAgentId: String(item.source_agent_id || item.sourceAgentId || ""),
+    createdAt: String(item.createdAt || "")
+  };
+}
+
+function continuationVerifiedToolResults(context) {
+  return (context?.verifiedToolResults || []).map((item) => ({
+    tool: item.tool,
+    status: "completed",
+    continuationVerified: true,
+    commandFingerprint: item.commandFingerprint,
+    source_agent_id: item.sourceAgentId || ""
+  }));
+}
+
+function continuationCommandFingerprint(command) {
+  return createHash("sha256").update(String(command || "").trim().replace(/\s+/g, " ").toLowerCase()).digest("hex");
 }
 
 function allSessionMessages(session = {}) {

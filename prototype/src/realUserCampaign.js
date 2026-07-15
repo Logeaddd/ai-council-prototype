@@ -8,7 +8,7 @@ export function createSeededCampaignScenario(options = {}) {
   const followupCount = randomInteger(random, 7, 9);
   const stageCount = randomInteger(random, Math.max(17, followupCount + 10), 30);
   const followups = buildFollowups(task, followupCount);
-  const disturbances = buildDisturbances(seed);
+  const disturbances = buildDisturbances(seed, task);
   const stages = [
     userStage("initial", task.initialQuestion, { artifactEdit: true }),
     ...followups,
@@ -70,7 +70,7 @@ function buildFollowups(task, count) {
   return [...edits, ...remaining].slice(0, count);
 }
 
-function buildDisturbances(seed) {
+function buildDisturbances(seed, task) {
   const suffix = String(seed).slice(-4);
   return [
     { kind: "member_mutation", mutation: { type: "rename", seatId: "seat_01", displayName: `Builder ${suffix}` } },
@@ -80,7 +80,7 @@ function buildDisturbances(seed) {
     { kind: "member_mutation", mutation: { type: "restore", seatId: "seat_02", role: "summarizer" } },
     { kind: "interrupt", interruptAt: "during_model_streaming" },
     { kind: "reopen", prompt: "continue" },
-    { kind: "interrupt", interruptAt: "during_tool_or_build_activity" },
+    { kind: "interrupt", prompt: task.recoveryVerificationPrompt, interruptAt: "during_tool_or_build_activity" },
     { kind: "reopen", prompt: "continue" }
   ];
 }
@@ -109,6 +109,7 @@ function nodeCliTemplate(seed, random) {
     reversalPrompt: "Use the current requirements only; do not restore a superseded earlier greeting. Verify the current program.",
     recallPrompt: "Check the retained task history for the current artifact and continue from the latest requirement.",
     finalPrompt: "Make the final requested greeting change and verify the deliverable again.",
+    recoveryVerificationPrompt: "Run the current deliverable once more to verify its current state after recovery.",
     hiddenVerifier: { kind: "node_cli", file, args: ["--name", "Ada"], expectedOutput: "Thanks, Ada." }
   };
 }
@@ -125,6 +126,7 @@ function pythonCliTemplate(seed, random) {
     reversalPrompt: "Apply only the newest label requirement and verify the utility without restoring old labels.",
     recallPrompt: "Retrieve the current task context, then continue the existing utility without creating a replacement project.",
     finalPrompt: "Apply the final requested utility edit and run the current program to verify it.",
+    recoveryVerificationPrompt: "Run the current utility once more to verify its current state after recovery.",
     hiddenVerifier: { kind: "python_cli", file, args: ["Ada"], expectedOutput: "delta: Ada" }
   };
 }
@@ -141,6 +143,7 @@ function jsonDocumentTemplate(seed, random) {
     reversalPrompt: "Use the newest status only. Do not bring back an earlier status from retained discussion.",
     recallPrompt: "Inspect the current artifact and retained context, then continue from the latest JSON requirement.",
     finalPrompt: "Apply the final JSON record change and validate the file one more time.",
+    recoveryVerificationPrompt: "Validate the current JSON record once more after recovery.",
     hiddenVerifier: { kind: "json", file, expected: { status: "released" } }
   };
 }

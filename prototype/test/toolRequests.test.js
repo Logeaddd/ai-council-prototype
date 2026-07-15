@@ -2,6 +2,7 @@ import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import zlib from "node:zlib";
 import { execFileSync } from "node:child_process";
 import test from "node:test";
@@ -967,6 +968,55 @@ test("execute_command rejects an identical command after it already failed in th
   assert.equal(result.accepted.length, 0);
   assert.equal(result.rejected[0].code, "repeated_failed_command");
   assert.equal(fs.existsSync(marker), false);
+});
+
+test("plain continuation does not replay an already verified command", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-continuation-command-"));
+  const marker = path.join(tmp, "should-not-run.txt");
+  const command = nodeCommand(`require('fs').writeFileSync(${JSON.stringify(marker)}, 'RAN')`);
+  const fingerprint = createHash("sha256").update(command.trim().replace(/\s+/g, " ").toLowerCase()).digest("hex");
+  try {
+    const result = await executeToolRequests({
+      permissionTier: "full",
+      groupPath: tmp,
+      agent: { id: "full", name: "Full" },
+      round: 1,
+      blockVerifiedContinuationCommands: true,
+      previousResults: [{ tool: "execute_command", status: "completed", continuationVerified: true, commandFingerprint: fingerprint }],
+      requests: [{ tool: "execute_command", command, shell: shellForNodeCommand(), reason: "Repeat prior verification." }]
+    });
+    assert.equal(result.accepted.length, 0);
+    assert.equal(result.rejected[0].code, "already_verified_continuation_command");
+    assert.equal(fs.existsSync(marker), false);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("plain continuation may rerun verification after a real workspace change", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-continuation-change-"));
+  const marker = path.join(tmp, "verification-ran.txt");
+  const command = nodeCommand(`require('fs').writeFileSync(${JSON.stringify(marker)}, 'RAN')`);
+  const fingerprint = createHash("sha256").update(command.trim().replace(/\s+/g, " ").toLowerCase()).digest("hex");
+  try {
+    const result = await executeToolRequests({
+      permissionTier: "full",
+      groupPath: tmp,
+      agent: { id: "full", name: "Full" },
+      round: 1,
+      blockVerifiedContinuationCommands: true,
+      previousResults: [{ tool: "execute_command", status: "completed", continuationVerified: true, commandFingerprint: fingerprint }],
+      requests: [
+        { tool: "workspace_edit", action: "write", path: "changed.txt", code: "changed", reason: "Apply the recovered fix." },
+        { tool: "execute_command", command, shell: shellForNodeCommand(), reason: "Verify the recovered fix." }
+      ]
+    });
+    assert.equal(result.accepted.length, 2);
+    assert.equal(result.results[1].status, "completed");
+    assert.equal(fs.readFileSync(marker, "utf8"), "RAN");
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
 });
 
 test("tool loop limits repeated download failures without limiting build retries", async () => {

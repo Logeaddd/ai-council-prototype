@@ -2,6 +2,7 @@ import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { once } from "node:events";
 import { createSeededCampaignScenario, publicCampaignScenario } from "./realUserCampaign.js";
@@ -170,9 +171,9 @@ export async function runSeededRealUserCampaign(options = {}) {
           port: server.port,
           group,
           groupPath,
-          question: "continue",
+          question: stage.prompt || "continue",
           onEvent(event) { timeline.push(compactCampaignEvent(stage, event)); },
-          abortWhen: stage.interruptAt === "during_model_streaming" ? isStreamingActivityEvent : isMaterialActionEvent
+          abortWhen: stage.interruptAt === "during_model_streaming" ? isStreamingActivityEvent : isVerifiedToolActivityEvent
         });
         if (!run.aborted) throw harnessFailure("campaign_interrupt_did_not_reach_action", "Campaign interruption did not reach the requested activity boundary.");
         const interruptedSession = await waitForSession(server.port, groupPath, (session) => (
@@ -197,6 +198,7 @@ export async function runSeededRealUserCampaign(options = {}) {
   const sessions = listPersistedSessions(groupPath);
   const modelCalls = sessions.reduce((total, session) => total + Number(session.modelCallCount || 0), 0);
   const persistence = verifyCampaignPersistence(groupPath, sessions, group);
+  const recovery = verifyNoDuplicateVerifiedWork(interruptedSessions, sessions);
   const resumedSources = new Set(sessions
     .filter((session) => session.question === "continue")
     .map((session) => session.continuationContext?.previousSessionId)
@@ -206,7 +208,7 @@ export async function runSeededRealUserCampaign(options = {}) {
     schema: "ai-council.real-user-campaign-run.v1",
     startedAt,
     completedAt: new Date().toISOString(),
-    status: failure ? failureKind : delivery.passed && interruptedSessions.length === 2 && resumed && persistence.passed ? "passed" : "failed",
+    status: failure ? failureKind : delivery.passed && interruptedSessions.length === 2 && resumed && persistence.passed && recovery.passed ? "passed" : "failed",
     error: failure ? String(failure.message || failure).slice(0, 1600) : "",
     seed: campaign.seed,
     providerAcceptance: {
@@ -223,12 +225,14 @@ export async function runSeededRealUserCampaign(options = {}) {
       campaignStagesExecuted: timeline.filter((item) => item.result === "completed").length,
       materialActionsObserved: timeline.filter((item) => isMaterialActionType(item.type)).length,
       resumedAfterInterruption: resumed,
-      passed: !failure && resumed && persistence.passed
+      noDuplicateVerifiedWork: recovery.passed,
+      passed: !failure && resumed && persistence.passed && recovery.passed
     },
     minimumUsableDelivery: delivery,
     subjectiveQuality: { status: "not_scored" },
     sessions: { interrupted: interruptedSessions.map(summarizeSession), total: sessions.length, modelCalls },
     persistence,
+    recovery,
     timeline
   };
   fs.writeFileSync(path.join(runDir, "report.json"), JSON.stringify(report, null, 2), "utf8");
@@ -460,6 +464,36 @@ export function verifyCampaignPersistence(groupPath, sessions, runtimeGroup) {
   checks.push(check("visible_history_complete", visibleHistoryComplete, `${rawVisibleMessages.length}/${renderedVisibleMessages.length} visible messages`));
   checks.push(check("visible_history_chronological", chronological, `${sessions.length} persisted sessions`));
   return { passed: checks.every((item) => item.passed), checks };
+}
+
+export function verifyNoDuplicateVerifiedWork(interruptedSessions = [], sessions = []) {
+  const interruptedById = new Map((interruptedSessions || []).filter(Boolean).map((session) => [session.id, session]));
+  const verifiedFingerprints = new Set([...interruptedById.values()].flatMap((session) => (
+    (session.toolExecutionResults || []).filter(isSuccessfulCommand).map(commandFingerprint)
+  )).filter(Boolean));
+  const continuations = (sessions || []).filter((session) => interruptedById.has(session.continuationContext?.previousSessionId));
+  const repeatedCommands = continuations.flatMap((session) => (
+    (session.toolExecutionResults || []).filter(isSuccessfulCommand).filter((item) => verifiedFingerprints.has(commandFingerprint(item)))
+  ));
+  const blockedReplays = continuations.flatMap((session) => session.rejectedToolRequests || [])
+    .filter((item) => item.code === "already_verified_continuation_command");
+  const checks = [
+    check("verified_work_before_interruption", verifiedFingerprints.size > 0, `${verifiedFingerprints.size} successful command fingerprints`),
+    check("no_verified_command_replay_after_continue", repeatedCommands.length === 0, `${repeatedCommands.length} duplicate completed commands; ${blockedReplays.length} prevented replays`)
+  ];
+  return { passed: checks.every((item) => item.passed), checks };
+}
+
+function isSuccessfulCommand(item = {}) {
+  return item.tool === "execute_command"
+    && item.status === "completed"
+    && Number(item.result?.exitCode) === 0
+    && Boolean(item.command || item.result?.command);
+}
+
+function commandFingerprint(item = {}) {
+  const command = String(item.command || item.result?.command || "").trim().replace(/\s+/g, " ").toLowerCase();
+  return command ? createHash("sha256").update(command).digest("hex") : "";
 }
 
 function runtimeSeatSnapshot(agent = {}) {
@@ -698,6 +732,10 @@ function isMaterialActionEvent(event = {}) {
 
 function isStreamingActivityEvent(event = {}) {
   return event.type === "agent_delta" || event.type === "model_start";
+}
+
+function isVerifiedToolActivityEvent(event = {}) {
+  return event.type === "tool_success" && event.tool === "execute_command" && event.status === "completed";
 }
 
 function isMaterialActionType(type) {

@@ -117,7 +117,10 @@ test("seeded campaign drives HTTP/SSE stages, member disturbances and interrupti
       objections: [],
       confidence: 1,
       memory_candidates: [],
-      tool_requests: [{ tool: "workspace_edit", action: "write", path: campaign.hiddenVerifier.file, code, reason: "Write the current requested CLI." }]
+      tool_requests: [
+        { tool: "workspace_edit", action: "write", path: campaign.hiddenVerifier.file, code, reason: "Write the current requested CLI." },
+        { tool: "execute_command", command: `node ${campaign.hiddenVerifier.file} --name Ada`, shell: "system", reason: "Verify the current deliverable." }
+      ]
     }));
   });
   await listen(provider);
@@ -136,6 +139,8 @@ test("seeded campaign drives HTTP/SSE stages, member disturbances and interrupti
     assert.equal(run.report.minimumUsableDelivery.passed, true);
     assert.equal(run.report.persistence.passed, true);
     assert.equal(run.report.persistence.checks.every((check) => check.passed), true);
+    assert.equal(run.report.recovery.passed, true);
+    assert.equal(run.report.recovery.checks.every((check) => check.passed), true);
     assert.equal(run.report.timeline.some((item) => item.mutation === "reorder" && item.result === "completed"), true);
     assert.equal(JSON.stringify(run.report).includes("test-key"), false);
   } finally {

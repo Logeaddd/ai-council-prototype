@@ -1,4 +1,5 @@
 import { makeId, nowIso } from "./types.js";
+import { createHash } from "node:crypto";
 import { fetchPublicUrl, searchWeb } from "./webTools.js";
 import { executeFileTool } from "./fileTools.js";
 import { extractArchiveTool } from "./archiveTools.js";
@@ -233,6 +234,16 @@ export async function executeToolRequests(options = {}) {
       appendCommandAuditLog(options.groupPath, "rejected", rejection);
       continue;
     }
+    if (options.blockVerifiedContinuationCommands
+      && ![...(options.previousResults || []), ...results].some(hasMaterialWorkspaceChange)
+      && isRepeatedVerifiedContinuationCommand(normalized, [...(options.previousResults || []), ...results])) {
+      const rejection = reject(base, "already_verified_continuation_command", "This exact command already completed successfully before this plain continuation. Reuse the retained verification evidence; inspect or repair only when the workspace changes or the user requests a new verification.");
+      rejected.push(rejection);
+      events.push(toolEvent("tool_failure", base, { status: "rejected", code: rejection.code, error: rejection.error }));
+      appendToolAuditLog(options.groupPath, "rejected", rejection);
+      appendCommandAuditLog(options.groupPath, "rejected", rejection);
+      continue;
+    }
     const exhaustedStrategy = exhaustedFailureStrategy(normalized, [...(options.previousResults || []), ...results]);
     if (exhaustedStrategy) {
       const rejection = reject(base, "failed_strategy_budget_exhausted", `The ${exhaustedStrategy} strategy already failed 3 times in the current tool loop. Inspect existing runtimes, files, artifacts, and prior errors before trying that strategy again in a later round.`);
@@ -331,8 +342,25 @@ function isRepeatedFailedCommand(request, previousResults = []) {
   ));
 }
 
+function isRepeatedVerifiedContinuationCommand(request, previousResults = []) {
+  if (request.tool !== "execute_command") return false;
+  const fingerprint = commandFingerprint(request.command);
+  if (!fingerprint) return false;
+  return (Array.isArray(previousResults) ? previousResults : []).some((item) => (
+    item?.tool === "execute_command"
+    && item?.status === "completed"
+    && item?.continuationVerified === true
+    && item.commandFingerprint === fingerprint
+  ));
+}
+
 function commandSignature(value) {
   return String(value || "").trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+function commandFingerprint(value) {
+  const signature = commandSignature(value);
+  return signature ? createHash("sha256").update(signature).digest("hex") : "";
 }
 
 function exhaustedFailureStrategy(request, previousResults = []) {
