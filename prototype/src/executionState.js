@@ -165,6 +165,10 @@ export function isDeliveryTask(question) {
   const explicitDelivery = /\b(build|create|implement|write|modify|fix|generate|package|compile|assemble|install|delete|rename|move|commit|push)\b|\b(?:make|produce)\s+(?:a|an|the)?\s*(?:jar|mod|app|project|file|patch|package|build)\b|构建|生成|制作|开发|实现|编写|写入|修改|修复|打包|安装|删除|重命名|移动|提交|推送/i;
   if (explicitDelivery.test(directive.combined)) return true;
 
+  const imperativeContinuation = /^(?:use|keep|make|ensure|preserve|apply|update|continue|finish|complete|validate|verify)\b|^(?:\u4f7f\u7528|\u4fdd\u7559|\u786e\u4fdd|\u66f4\u65b0|\u7ee7\u7eed|\u5b8c\u6210|\u9a8c\u8bc1|\u6821\u9a8c)/i;
+  const constrainedArtifact = /\b(?:final|current|requested|existing)\s+(?:[a-z0-9_-]+\s+)?(?:json|file|artifact|document|spreadsheet|archive|package|project)\b[\s\S]{0,480}\b(?:must|shall|need(?:s)?|require(?:s|d)?)\b/i;
+  if (imperativeContinuation.test(directive.leading) && constrainedArtifact.test(text)) return true;
+
   const requestedArtifact = /\b(?:jar|exe|msi|apk|ipa|dmg|deb|rpm)\b[^\r\n]{0,40}\b(?:needed|required|deliver|output)\b|(?:需要|产出|交付|给我|做成)[^\r\n]{0,30}\.(?:jar|exe|msi|apk|ipa|dmg|deb|rpm)\b/i;
   return requestedArtifact.test(directive.combined);
 }
