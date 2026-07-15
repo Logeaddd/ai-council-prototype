@@ -1929,6 +1929,49 @@ test("repeated non-progress inspection recovers without imposing a limit on dist
   }
 });
 
+test("a stalled reviewer is required to conclude instead of issuing another repeated tool request", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-review-stagnation-"));
+  fs.writeFileSync(path.join(tmp, "group.json"), JSON.stringify({
+    permissions: { defaultTier: "tool", seatTiers: { reviewer: "tool" } }
+  }), "utf8");
+  fs.writeFileSync(path.join(tmp, "brief.md"), "REVIEW_STAGNATION_FACT", "utf8");
+  let forcedConclusionPromptSeen = false;
+  const server = http.createServer(async (req, res) => {
+    const body = JSON.parse(await readRequestBody(req));
+    const prompt = JSON.stringify(body.messages || []);
+    if (prompt.includes("FinalDecision JSON object")) {
+      writeOpenAiStream(res, JSON.stringify({ answer: "Review is incomplete.", consensus_score: 0, supporting_agents: [], dissenting_agents: ["Reviewer"], minority_report: "Reviewer stalled.", risks: ["review_stagnation"], next_actions: [], selected_file_operation_ids: [], memory_candidates: [] }));
+      return;
+    }
+    if (prompt.includes("Your review stagnated and you requested more tools again")) forcedConclusionPromptSeen = true;
+    writeOpenAiStream(res, JSON.stringify({
+      status: "speak",
+      argument: "I want to inspect the same evidence again.",
+      tool_requests: [{ tool: "read_file", path: "brief.md", reason: "Repeat reviewer inspection." }],
+      objections: [],
+      confidence: 0.2,
+      memory_candidates: []
+    }));
+  });
+  await listen(server);
+  try {
+    const group = validateGroupConfig({
+      id: "review-stagnation",
+      name: "Review Stagnation",
+      settings: { maxRounds: 1, minConsensusWeight: 1, stopWhenAllSkip: true, agentTimeoutMs: 3000, allowSoloCouncil: true },
+      agents: [{ id: "reviewer", name: "Reviewer", role: "Reviewer", provider: "openai-compatible", apiBaseUrl: `http://127.0.0.1:${server.address().port}/v1`, allowUnsafePrivateNetwork: true, apiKey: "secret-runtime-key", model: "review-stagnation-model", weight: 1, enabled: true, judge: true, mandatoryRedTeam: true }]
+    });
+    const result = await runCouncil("Review the supplied file and report risks.", group, tmp, { groupPath: tmp });
+
+    assert.equal(forcedConclusionPromptSeen, true);
+    assert.equal(result.session.toolExecutionResults.length, 4);
+    assert.equal(result.session.toolContinuation.reason, "stagnation_recovery_reviewer_requested_more_tools");
+    assert.equal(result.session.messages[0].response.tool_requests?.length || 0, 0);
+  } finally {
+    await close(server);
+  }
+});
+
 test("one member can complete more than twelve useful tool iterations without an application limit", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-long-tool-loop-"));
   fs.writeFileSync(path.join(tmp, "group.json"), JSON.stringify({

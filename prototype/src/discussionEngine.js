@@ -462,6 +462,43 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
         response = applyRoundResponseRules(callOutcome.response, agent, round);
         rawTextForMessage = callOutcome.rawTextForMessage;
         errorForMessage = callOutcome.errorForMessage;
+        if (toolLoopStagnated.recoveryRequired && isReviewerLike(agent) && response.tool_requests?.length) {
+          callOutcome = yield* callRoundModel({
+            options,
+            session,
+            phase: "tool_stagnation_review_recovery",
+            round,
+            agent,
+            memberContext: followupContext,
+            messages: [...followupMessages, {
+              role: "user",
+              content: "Your review stagnated and you requested more tools again. Do not call any tool. Respond now with a concrete review conclusion, objection, or skip based only on the evidence already returned."
+            }],
+            timeoutMs: group.settings.agentTimeoutMs,
+            toolIteration: toolIterations,
+            nativeToolPermissionTier: fileOperationPermissionTier,
+            nativeToolChoice: "auto"
+          });
+          response = applyRoundResponseRules(callOutcome.response, agent, round);
+          rawTextForMessage = callOutcome.rawTextForMessage;
+          errorForMessage = callOutcome.errorForMessage;
+          if (response.tool_requests?.length) {
+            session.toolContinuation = {
+              agentId: agent.id,
+              round,
+              completedIterations: toolIterations,
+              reason: "stagnation_recovery_reviewer_requested_more_tools",
+              pendingRequests: response.tool_requests
+            };
+            response = {
+              status: "speak",
+              argument: "Reviewer stagnation recovery did not produce a tool-free conclusion.",
+              objections: ["stagnation_recovery_reviewer_requested_more_tools"],
+              confidence: 0,
+              memory_candidates: []
+            };
+          }
+        }
         if (toolLoopStagnated.recoveryRequired && requiresStagnationWorkspaceEdit(agent, question, fileOperationPermissionTier) && !hasWorkspaceMutationRequest(response)) {
           callOutcome = yield* callRoundModel({
             options,
