@@ -62,10 +62,35 @@ function evaluateGate(root, gate, testEvidence) {
       return { ...base, status: testEvidence.status === "passed" ? "passed" : "failed", evidence: summarizeTestEvidence(testEvidence) };
     }
     if (gate.type === "real_benchmark") return evaluateRealBenchmarkGate(root, gate, base);
+    if (gate.type === "real_user_campaign") return evaluateRealUserCampaignGate(root, gate, base);
     return { ...base, evidence: { error: `unknown_gate_type:${gate.type}` } };
   } catch (error) {
     return { ...base, evidence: { error: String(error.message || error) } };
   }
+}
+
+function evaluateRealUserCampaignGate(root, gate, base) {
+  const reportsRoot = path.resolve(root, gate.reportsRoot || path.join("eval", "real-user-campaign"));
+  const reports = findReports(reportsRoot).map((filePath) => {
+    try { return { filePath, report: JSON.parse(fs.readFileSync(filePath, "utf8")) }; } catch { return null; }
+  }).filter(Boolean).filter(({ report }) => report?.schema === "ai-council.real-user-campaign-run.v1");
+  const passed = reports.find(({ report }) => (
+    report.status === "passed"
+    && report.providerAcceptance?.realProvider === true
+    && report.autonomousExecution?.passed === true
+    && report.minimumUsableDelivery?.passed === true
+    && report.autonomousExecution?.resumedAfterInterruption === true
+    && Number(report.providerAcceptance?.observedModelCalls || report.sessions?.modelCalls || 0) > 0
+  ));
+  return {
+    ...base,
+    status: passed ? "passed" : "failed",
+    evidence: {
+      reportsRoot: path.relative(root, reportsRoot).replaceAll("\\", "/"),
+      matchingReports: reports.length,
+      passedReport: passed ? path.relative(root, passed.filePath).replaceAll("\\", "/") : ""
+    }
+  };
 }
 
 function evaluateRealBenchmarkGate(root, gate, base) {

@@ -192,6 +192,7 @@ export async function runSeededRealUserCampaign(options = {}) {
 
   const delivery = await verifyCampaignDeliverable(campaign.hiddenVerifier, groupPath);
   const sessions = listPersistedSessions(groupPath);
+  const modelCalls = sessions.reduce((total, session) => total + Number(session.modelCallCount || 0), 0);
   const resumed = sessions.some((session) => session.question === "continue" && session.continuationContext?.previousSessionId === interruptedSession?.id);
   const report = {
     schema: "ai-council.real-user-campaign-run.v1",
@@ -200,6 +201,13 @@ export async function runSeededRealUserCampaign(options = {}) {
     status: failure ? failureKind : delivery.passed && Boolean(interruptedSession?.id) && resumed ? "passed" : "failed",
     error: failure ? String(failure.message || failure).slice(0, 1600) : "",
     seed: campaign.seed,
+    providerAcceptance: {
+      mode: options.allowMockProvider === true ? "local_fake_provider_plumbing" : "real_provider",
+      realProvider: options.allowMockProvider !== true,
+      maxCostUsd: Number(options.maxCostUsd || 0),
+      maxModelCalls: Number(options.maxModelCalls || 0),
+      observedModelCalls: modelCalls
+    },
     scenario: publicCampaignScenario(campaign),
     group: redactGroup(group),
     workspacePath: groupPath,
@@ -211,7 +219,7 @@ export async function runSeededRealUserCampaign(options = {}) {
     },
     minimumUsableDelivery: delivery,
     subjectiveQuality: { status: "not_scored" },
-    sessions: { interrupted: summarizeSession(interruptedSession), total: sessions.length },
+    sessions: { interrupted: summarizeSession(interruptedSession), total: sessions.length, modelCalls },
     timeline
   };
   fs.writeFileSync(path.join(runDir, "report.json"), JSON.stringify(report, null, 2), "utf8");

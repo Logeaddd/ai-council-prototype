@@ -64,6 +64,25 @@ test("product harness can require completion source to be tracked by Git", () =>
   assert.equal(report.tasks[0].gates[0].evidence.tracked, false);
 });
 
+test("product harness rejects fake campaign reports and accepts retained real-provider survival evidence", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-product-campaign-"));
+  const manifest = { tasks: [{ id: "T117", gates: [{ id: "campaign", type: "real_user_campaign", reportsRoot: "eval/campaign" }] }] };
+  const reportDir = path.join(root, "eval", "campaign", "run-1");
+  fs.mkdirSync(reportDir, { recursive: true });
+  const report = {
+    schema: "ai-council.real-user-campaign-run.v1",
+    status: "passed",
+    providerAcceptance: { realProvider: false, observedModelCalls: 12 },
+    autonomousExecution: { passed: true, resumedAfterInterruption: true },
+    minimumUsableDelivery: { passed: true }
+  };
+  fs.writeFileSync(path.join(reportDir, "report.json"), JSON.stringify(report), "utf8");
+  assert.equal(evaluateProductHarness({ root, manifest, testEvidence: { status: "passed" } }).status, "incomplete");
+  report.providerAcceptance.realProvider = true;
+  fs.writeFileSync(path.join(reportDir, "report.json"), JSON.stringify(report), "utf8");
+  assert.equal(evaluateProductHarness({ root, manifest, testEvidence: { status: "passed" } }).status, "complete");
+});
+
 test("repository product harness keeps T105 incomplete without a paid Forge pass", () => {
   const root = path.resolve(import.meta.dirname, "..");
   const manifestPath = path.join(root, "config", "product-harness.json");

@@ -48,6 +48,25 @@
         },
         { "id": "full_test_suite", "type": "test_suite" }
       ]
+    },
+    {
+      "id": "T117",
+      "title": "Seeded real user survival acceptance",
+      "gates": [
+        {
+          "id": "campaign_runner",
+          "type": "file_contains",
+          "path": "src/realUserHarness.js",
+          "requireTracked": true,
+          "patterns": ["runSeededRealUserCampaign", "campaign_budget_required"]
+        },
+        { "id": "full_test_suite", "type": "test_suite" },
+        {
+          "id": "real_provider_campaign",
+          "type": "real_user_campaign",
+          "reportsRoot": "eval/real-user-campaign"
+        }
+      ]
     }
   ]
 }
