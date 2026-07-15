@@ -140,7 +140,7 @@ export async function runSeededRealUserCampaign(options = {}) {
   const timeline = [];
   const startedAt = new Date().toISOString();
   let server;
-  let interruptedSession;
+  const interruptedSessions = [];
   let failure;
   let failureKind = "failed";
 
@@ -172,13 +172,16 @@ export async function runSeededRealUserCampaign(options = {}) {
           groupPath,
           question: "continue",
           onEvent(event) { timeline.push(compactCampaignEvent(stage, event)); },
-          abortWhen: isMaterialActionEvent
+          abortWhen: stage.interruptAt === "during_model_streaming" ? isStreamingActivityEvent : isMaterialActionEvent
         });
-        if (!run.aborted) throw harnessFailure("campaign_interrupt_did_not_reach_action", "Campaign interruption did not reach model or tool activity.");
-        interruptedSession = await waitForSession(server.port, groupPath, (session) => session.status === "interrupted");
+        if (!run.aborted) throw harnessFailure("campaign_interrupt_did_not_reach_action", "Campaign interruption did not reach the requested activity boundary.");
+        const interruptedSession = await waitForSession(server.port, groupPath, (session) => (
+          session.status === "interrupted" && !interruptedSessions.some((item) => item.id === session.id)
+        ));
+        interruptedSessions.push(interruptedSession);
         await stopHarnessServer(server);
         server = await startHarnessServer({ dataDir, workspaceRoot: dataDir, environment: options.environment });
-        timeline.push({ stageId: stage.id, kind: stage.kind, result: "interrupted", sessionId: interruptedSession.id });
+        timeline.push({ stageId: stage.id, kind: stage.kind, interruptAt: stage.interruptAt, result: "interrupted", sessionId: interruptedSession.id });
         continue;
       }
       timeline.push({ stageId: stage.id, kind: stage.kind, result: "checkpoint" });
@@ -193,12 +196,16 @@ export async function runSeededRealUserCampaign(options = {}) {
   const delivery = await verifyCampaignDeliverable(campaign.hiddenVerifier, groupPath);
   const sessions = listPersistedSessions(groupPath);
   const modelCalls = sessions.reduce((total, session) => total + Number(session.modelCallCount || 0), 0);
-  const resumed = sessions.some((session) => session.question === "continue" && session.continuationContext?.previousSessionId === interruptedSession?.id);
+  const resumedSources = new Set(sessions
+    .filter((session) => session.question === "continue")
+    .map((session) => session.continuationContext?.previousSessionId)
+    .filter(Boolean));
+  const resumed = interruptedSessions.length > 0 && interruptedSessions.every((session) => resumedSources.has(session.id));
   const report = {
     schema: "ai-council.real-user-campaign-run.v1",
     startedAt,
     completedAt: new Date().toISOString(),
-    status: failure ? failureKind : delivery.passed && Boolean(interruptedSession?.id) && resumed ? "passed" : "failed",
+    status: failure ? failureKind : delivery.passed && interruptedSessions.length === 2 && resumed ? "passed" : "failed",
     error: failure ? String(failure.message || failure).slice(0, 1600) : "",
     seed: campaign.seed,
     providerAcceptance: {
@@ -219,7 +226,7 @@ export async function runSeededRealUserCampaign(options = {}) {
     },
     minimumUsableDelivery: delivery,
     subjectiveQuality: { status: "not_scored" },
-    sessions: { interrupted: summarizeSession(interruptedSession), total: sessions.length, modelCalls },
+    sessions: { interrupted: interruptedSessions.map(summarizeSession), total: sessions.length, modelCalls },
     timeline
   };
   fs.writeFileSync(path.join(runDir, "report.json"), JSON.stringify(report, null, 2), "utf8");
@@ -604,6 +611,10 @@ function runNode(filePath, args) {
 
 function isMaterialActionEvent(event = {}) {
   return isMaterialActionType(event.type) && event.status !== "rejected";
+}
+
+function isStreamingActivityEvent(event = {}) {
+  return event.type === "agent_delta" || event.type === "model_start";
 }
 
 function isMaterialActionType(type) {

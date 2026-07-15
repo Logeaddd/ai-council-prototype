@@ -17,8 +17,8 @@ test("seeded user campaign generates reproducible capacity, edits, followups and
   assert.equal(followups.length >= 5 && followups.length <= 10, true);
   assert.equal(artifactEdits.length >= first.capacity.requiredArtifactEdits, true);
   assert.deepEqual(mutations, ["rename", "role", "reorder", "disable", "restore"]);
-  assert.equal(first.stages.some((stage) => stage.kind === "interrupt"), true);
-  assert.equal(first.stages.some((stage) => stage.kind === "reopen" && stage.prompt === "continue"), true);
+  assert.deepEqual(first.stages.filter((stage) => stage.kind === "interrupt").map((stage) => stage.interruptAt), ["during_model_streaming", "during_tool_or_build_activity"]);
+  assert.equal(first.stages.filter((stage) => stage.kind === "reopen" && stage.prompt === "continue").length, 2);
   assert.equal(JSON.stringify(publicScenario).includes("hiddenVerifier"), false);
   assert.equal(JSON.stringify(publicScenario).includes(first.hiddenVerifier.expectedOutput), false);
 });

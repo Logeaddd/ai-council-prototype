@@ -132,6 +132,7 @@ test("seeded campaign drives HTTP/SSE stages, member disturbances and interrupti
     });
     assert.equal(run.report.status, "passed", JSON.stringify(run.report, null, 2));
     assert.equal(run.report.autonomousExecution.resumedAfterInterruption, true);
+    assert.equal(run.report.sessions.interrupted.length, 2);
     assert.equal(run.report.minimumUsableDelivery.passed, true);
     assert.equal(run.report.timeline.some((item) => item.mutation === "reorder" && item.result === "completed"), true);
     assert.equal(JSON.stringify(run.report).includes("test-key"), false);

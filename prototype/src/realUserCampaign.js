@@ -6,7 +6,7 @@ export function createSeededCampaignScenario(options = {}) {
   const template = TASK_TEMPLATES[seed % TASK_TEMPLATES.length];
   const task = template(seed, random);
   const followupCount = randomInteger(random, 7, 9);
-  const stageCount = randomInteger(random, Math.max(14, followupCount + 9), 30);
+  const stageCount = randomInteger(random, Math.max(17, followupCount + 10), 30);
   const followups = buildFollowups(task, followupCount);
   const disturbances = buildDisturbances(seed);
   const stages = [
@@ -78,7 +78,9 @@ function buildDisturbances(seed) {
     { kind: "member_mutation", mutation: { type: "reorder", seatIds: ["seat_02", "seat_01", "seat_03"] } },
     { kind: "member_mutation", mutation: { type: "disable", seatId: "seat_02" } },
     { kind: "member_mutation", mutation: { type: "restore", seatId: "seat_02", role: "summarizer" } },
-    { kind: "interrupt", interruptAt: "during_model_or_tool_activity" },
+    { kind: "interrupt", interruptAt: "during_model_streaming" },
+    { kind: "reopen", prompt: "continue" },
+    { kind: "interrupt", interruptAt: "during_tool_or_build_activity" },
     { kind: "reopen", prompt: "continue" }
   ];
 }
