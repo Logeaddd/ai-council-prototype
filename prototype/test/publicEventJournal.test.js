@@ -5,7 +5,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import { executeToolRequests } from "../src/toolRequests.js";
-import { loadPublicEvent, queryPublicEvents, readPublicEventCompression, readPublicEventHotCache, rebuildPublicEventIndex, tombstonePublicEvents } from "../src/publicEventJournal.js";
+import { loadPublicEvent, queryPublicEventPage, queryPublicEvents, readPublicEventCompression, readPublicEventHotCache, rebuildPublicEventIndex, tombstonePublicEvents } from "../src/publicEventJournal.js";
 import { listGroupSessions, readGroupSession, readSessionContextArchive, searchSessionContextArchive, writeContextArchive, writeGroupSession } from "../src/storage.js";
 
 test("public event journal appends typed session events without duplicating repeated saves", () => {
@@ -75,6 +75,35 @@ test("public event index queries actor type task file commit tool status and exa
   assert.match(loaded.sourcePath, /public-events\.jsonl#event=/);
 });
 
+test("public event queries expose stable offset pagination without changing the array API", () => {
+  const groupPath = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-event-page-"));
+  const first = sampleSession();
+  const second = {
+    ...sampleSession(),
+    id: "session_events_2",
+    createdAt: "2026-07-12T11:00:00.000Z",
+    startedAt: "2026-07-12T11:00:00.000Z",
+    messages: [{
+      ...sampleSession().messages[0],
+      response: { status: "speak", argument: "The implementation is ready in the later session." },
+      createdAt: "2026-07-12T11:01:00.000Z"
+    }]
+  };
+  writeGroupSession(first, groupPath);
+  writeGroupSession(second, groupPath);
+
+  const firstPage = queryPublicEventPage(groupPath, { type: "member_message", actorId: "builder", limit: 1, offset: 0 });
+  const secondPage = queryPublicEventPage(groupPath, { type: "member_message", actorId: "builder", limit: 1, offset: firstPage.pagination.nextOffset });
+
+  assert.equal(firstPage.events.length, 1);
+  assert.equal(firstPage.pagination.total, 2);
+  assert.equal(firstPage.pagination.hasMore, true);
+  assert.equal(secondPage.events.length, 1);
+  assert.equal(secondPage.pagination.hasMore, false);
+  assert.notEqual(firstPage.events[0].id, secondPage.events[0].id);
+  assert.equal(queryPublicEvents(groupPath, { type: "member_message", actorId: "builder", limit: 1 }).length, 1);
+});
+
 test("public event journal keeps interim member attempts as searchable retained events", () => {
   const groupPath = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-interim-events-"));
   const session = sampleSession();
@@ -142,6 +171,34 @@ test("text-only members can search and load exact retained public events", async
   assert.equal(loaded.results[0].status, "completed");
   assert.equal(loaded.results[0].result.content.type, "member_message");
   assert.match(loaded.results[0].result.content.payload.response.argument, /implementation/);
+});
+
+test("search_context forwards offset pagination through the real tool boundary", async () => {
+  const groupPath = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-event-tool-page-"));
+  const first = sampleSession();
+  const second = { ...sampleSession(), id: "session_events_page_2", createdAt: "2026-07-12T12:00:00.000Z", startedAt: "2026-07-12T12:00:00.000Z" };
+  writeGroupSession(first, groupPath);
+  writeGroupSession(second, groupPath);
+
+  const pageOne = await executeToolRequests({
+    requests: [{ tool: "search_context", eventType: "member_message", actorId: "builder", count: 1, offset: 0, reason: "Read page one." }],
+    permissionTier: "text",
+    agent: { id: "reader", name: "Reader" },
+    round: 2,
+    groupPath
+  });
+  const nextOffset = pageOne.results[0].result.pagination.publicEvents.nextOffset;
+  const pageTwo = await executeToolRequests({
+    requests: [{ tool: "search_context", eventType: "member_message", actorId: "builder", count: 1, offset: nextOffset, reason: "Read page two." }],
+    permissionTier: "text",
+    agent: { id: "reader", name: "Reader" },
+    round: 2,
+    groupPath
+  });
+
+  assert.equal(pageOne.results[0].result.pagination.publicEvents.total, 2);
+  assert.equal(pageTwo.results[0].result.pagination.publicEvents.hasMore, false);
+  assert.notEqual(pageOne.results[0].result.results[0].eventId, pageTwo.results[0].result.results[0].eventId);
 });
 
 test("derived compression keeps complete provenance and never rewrites the raw journal", () => {

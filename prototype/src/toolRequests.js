@@ -34,7 +34,7 @@ import {
   searchSkillCandidates
 } from "./skillPacks.js";
 import { loadLiveSessionContext, loadSessionContextArchiveItem, searchLiveSessionContext, searchSessionContextArchive } from "./storage.js";
-import { loadPublicEvent, queryPublicEvents } from "./publicEventJournal.js";
+import { loadPublicEvent, queryPublicEventPage } from "./publicEventJournal.js";
 import { loadGitCommitContext } from "./gitContext.js";
 import { disabledCapabilityForRequest } from "./capabilityPolicy.js";
 import fs from "node:fs";
@@ -306,7 +306,8 @@ function observationSignature(request = {}) {
   if (tool === "search_context") {
     return `${tool}:${normalizeObservationValue([
       request.query, request.eventType, request.actorId, request.taskId, request.file, request.commit,
-      request.toolFilter, request.statusFilter, request.fromTime, request.toTime
+      request.toolFilter, request.statusFilter, request.fromTime, request.toTime, request.contextSessionId,
+      request.count, request.offset
     ].join(":"))}`;
   }
   if (tool === "load_context") {
@@ -388,7 +389,7 @@ async function executeOne(request, options) {
       }
       const hasEventFilters = Boolean(request.eventType || request.actorId || request.taskId || request.file || request.commit || request.toolFilter || request.statusFilter || request.fromTime || request.toTime);
       const query = request.query || (hasEventFilters ? "" : request.reason);
-      const eventResults = queryPublicEvents(options.groupPath, {
+      const eventPage = queryPublicEventPage(options.groupPath, {
         query,
         eventType: request.eventType,
         actorId: request.actorId,
@@ -401,8 +402,10 @@ async function executeOne(request, options) {
         to: request.toTime,
         sessionId: request.contextSessionId,
         excludeSessionId: options.currentSession?.id,
-        limit: request.count || 5
-      }).map((item) => ({
+        limit: request.count || 5,
+        offset: request.offset
+      });
+      const eventResults = eventPage.events.map((item) => ({
         ...item,
         sourceType: item.type,
         snippet: item.text,
@@ -427,7 +430,11 @@ async function executeOne(request, options) {
           ok: true,
           source: eventResults.length ? "public_event_journal" : liveResults.length ? "group_history_with_live_session" : "local_context_archive",
           query,
-          results
+          results,
+          pagination: {
+            publicEvents: eventPage.pagination,
+            combinedResultCount: results.length
+          }
         }
       });
     }

@@ -12,6 +12,7 @@ import { runRealProviderBenchmark } from "./realProviderBenchmark.js";
 import { runProductHarnessCheck } from "./productHarness.js";
 import { runSeededRealUserBaseline } from "./realUserHarness.js";
 import { runContextPressureBaseline } from "./contextPressureHarness.js";
+import { runRetrievalCoverageAudit } from "./retrievalAuditHarness.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const baseDir = path.resolve(__dirname, "..");
@@ -76,6 +77,11 @@ async function main() {
 
   if (command === "context-pressure") {
     runContextPressureCommand(args);
+    return;
+  }
+
+  if (command === "retrieval-audit") {
+    await runRetrievalAuditCommand(args);
     return;
   }
 
@@ -156,6 +162,23 @@ function runContextPressureCommand(args) {
     status: run.report.status,
     seed: run.report.seed,
     scenarios: run.report.scenarios?.map((scenario) => ({ id: scenario.id, status: scenario.status })) || [],
+    limitations: run.report.limitations || []
+  }, null, 2));
+}
+
+async function runRetrievalAuditCommand(args) {
+  const run = await runRetrievalCoverageAudit({
+    seed: getArg(args, "--seed"),
+    outputDir: getArg(args, "--output", path.join(baseDir, "eval", "retrieval-audit")),
+    largeEventCount: getArg(args, "--large-events"),
+    maxLargeQueryMs: getArg(args, "--max-query-ms")
+  });
+  console.log(JSON.stringify({
+    runDir: run.runDir,
+    groupPath: run.groupPath,
+    status: run.report.status,
+    seed: run.report.seed,
+    scenarios: run.report.scenarios?.map((scenario) => ({ id: scenario.id, status: scenario.status, metrics: scenario.metrics })) || [],
     limitations: run.report.limitations || []
   }, null, 2));
 }

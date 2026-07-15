@@ -128,6 +128,10 @@ export function readPublicEventCompression(groupPath) {
 }
 
 export function queryPublicEvents(groupPath, filters = {}) {
+  return queryPublicEventPage(groupPath, filters).events;
+}
+
+export function queryPublicEventPage(groupPath, filters = {}) {
   const index = readOrRebuildIndex(groupPath);
   const terms = tokenize(filters.query || filters.text);
   const types = stringSet(filters.type || filters.eventType || filters.eventTypes);
@@ -143,18 +147,30 @@ export function queryPublicEvents(groupPath, filters = {}) {
   const toMs = timestamp(filters.to || filters.toTime || filters.before);
   const includeDeleted = Boolean(filters.includeDeleted);
   const limit = clamp(filters.limit || filters.count || 20, 1, 200);
+  const offset = clamp(filters.offset ?? filters.pageOffset ?? 0, 0, 1000000);
 
-  return index.events
+  const matched = index.events
     .map((item) => ({ item, score: matchScore(item, { terms, types, actors, tools, statuses, task, file, commit, sessionId, excludedSessionIds, fromMs, toMs, includeDeleted }) }))
     .filter(({ score }) => score >= 0)
-    .sort((a, b) => b.score - a.score || b.item.sequence - a.item.sequence)
-    .slice(0, limit)
+    .sort((a, b) => b.score - a.score || b.item.sequence - a.item.sequence);
+  const events = matched
+    .slice(offset, offset + limit)
     .map(({ item, score }) => ({
       ...item,
       score,
       source: "local_public_event_journal",
       sourcePath: `${index.journalPath}#event=${item.id}`
     }));
+  return {
+    events,
+    pagination: {
+      offset,
+      limit,
+      total: matched.length,
+      hasMore: offset + events.length < matched.length,
+      nextOffset: offset + events.length < matched.length ? offset + events.length : null
+    }
+  };
 }
 
 export function loadPublicEvent(groupPath, eventId, options = {}) {
