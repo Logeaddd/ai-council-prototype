@@ -264,6 +264,8 @@ test("review directive is not overridden by delivery words inside the supplied p
 
 test("delivery classification requires an explicit delivery action", () => {
   assert.equal(isDeliveryTask("Fix the code and build the JAR."), true);
+  assert.equal(isDeliveryTask("Update the existing catalog JSON to preserve every collected item."), true);
+  assert.equal(isDeliveryTask("Should we update the existing catalog JSON?"), false);
   const followUp = "Use the latest requirements only: the final JSON must have source set to api_collection and an items array with id, title, priority and active for every collected item. Validate it.";
   assert.equal(isDeliveryTask(followUp), true);
   assert.equal(createExecutionState({ question: followUp, agents, workspaceGroup }).active, true);

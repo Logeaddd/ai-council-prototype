@@ -162,6 +162,7 @@ export function isDeliveryTask(question) {
   const explicitDirectiveDelivery = /\b(build|create|implement|write|modify|fix|generate|package|compile|assemble|install|delete|rename|move|commit|push)\b|\u6784\u5efa|\u751f\u6210|\u5236\u4f5c|\u5f00\u53d1|\u5b9e\u73b0|\u7f16\u5199|\u5199\u5165|\u4fee\u6539|\u4fee\u590d|\u6253\u5305|\u5b89\u88c5|\u5220\u9664|\u91cd\u547d\u540d|\u79fb\u52a8|\u63d0\u4ea4|\u63a8\u9001/i;
   if (explicitReview.test(directive.leading) && !explicitDirectiveDelivery.test(directive.leading)) return false;
   if (explicitDirectiveDelivery.test(directive.combined)) return true;
+  if (/^(?:update|edit|change|adjust|extend|refactor)\b/i.test(directive.leading)) return true;
   const explicitDelivery = /\b(build|create|implement|write|modify|fix|generate|package|compile|assemble|install|delete|rename|move|commit|push)\b|\b(?:make|produce)\s+(?:a|an|the)?\s*(?:jar|mod|app|project|file|patch|package|build)\b|构建|生成|制作|开发|实现|编写|写入|修改|修复|打包|安装|删除|重命名|移动|提交|推送/i;
   if (explicitDelivery.test(directive.combined)) return true;
 
