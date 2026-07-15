@@ -196,6 +196,7 @@ export async function runSeededRealUserCampaign(options = {}) {
   const delivery = await verifyCampaignDeliverable(campaign.hiddenVerifier, groupPath);
   const sessions = listPersistedSessions(groupPath);
   const modelCalls = sessions.reduce((total, session) => total + Number(session.modelCallCount || 0), 0);
+  const persistence = verifyCampaignPersistence(groupPath, sessions, group);
   const resumedSources = new Set(sessions
     .filter((session) => session.question === "continue")
     .map((session) => session.continuationContext?.previousSessionId)
@@ -205,7 +206,7 @@ export async function runSeededRealUserCampaign(options = {}) {
     schema: "ai-council.real-user-campaign-run.v1",
     startedAt,
     completedAt: new Date().toISOString(),
-    status: failure ? failureKind : delivery.passed && interruptedSessions.length === 2 && resumed ? "passed" : "failed",
+    status: failure ? failureKind : delivery.passed && interruptedSessions.length === 2 && resumed && persistence.passed ? "passed" : "failed",
     error: failure ? String(failure.message || failure).slice(0, 1600) : "",
     seed: campaign.seed,
     providerAcceptance: {
@@ -222,11 +223,12 @@ export async function runSeededRealUserCampaign(options = {}) {
       campaignStagesExecuted: timeline.filter((item) => item.result === "completed").length,
       materialActionsObserved: timeline.filter((item) => isMaterialActionType(item.type)).length,
       resumedAfterInterruption: resumed,
-      passed: !failure && resumed
+      passed: !failure && resumed && persistence.passed
     },
     minimumUsableDelivery: delivery,
     subjectiveQuality: { status: "not_scored" },
     sessions: { interrupted: interruptedSessions.map(summarizeSession), total: sessions.length, modelCalls },
+    persistence,
     timeline
   };
   fs.writeFileSync(path.join(runDir, "report.json"), JSON.stringify(report, null, 2), "utf8");
@@ -433,6 +435,87 @@ function listPersistedSessions(groupPath) {
   return fs.readdirSync(root).filter((name) => name.endsWith(".json")).map((name) => {
     try { return JSON.parse(fs.readFileSync(path.join(root, name), "utf8")); } catch { return null; }
   }).filter(Boolean);
+}
+
+export function verifyCampaignPersistence(groupPath, sessions, runtimeGroup) {
+  const checks = [];
+  const taskStatePath = path.join(groupPath, "shared", "task_state.json");
+  let taskState;
+  try { taskState = JSON.parse(fs.readFileSync(taskStatePath, "utf8")); } catch {}
+  checks.push(check("task_state_persisted", Boolean(taskState), taskStatePath));
+  const group = readJsonIfExists(path.join(groupPath, "group.json"));
+  const expectedSeats = (runtimeGroup.agents || []).map(runtimeSeatSnapshot);
+  const persistedSeats = (group?.seats || []).map(persistedSeatSnapshot);
+  const memberStatePersisted = expectedSeats.length > 0
+    && expectedSeats.length === persistedSeats.length
+    && expectedSeats.every((seat, index) => sameSeatState(seat, persistedSeats[index]));
+  checks.push(check("member_state_persisted", memberStatePersisted, JSON.stringify({ expectedSeats, persistedSeats })));
+
+  const rawVisibleMessages = sessions.flatMap((session) => transcriptEntries(session));
+  const renderedVisibleMessages = sessions.flatMap((session) => visibleTranscriptMessages(session));
+  const timestampsPresent = rawVisibleMessages.every((message) => Number.isFinite(Date.parse(message.createdAt || "")));
+  const visibleHistoryComplete = rawVisibleMessages.length === renderedVisibleMessages.length;
+  const chronological = sessions.every((session) => isChronological(visibleTranscriptMessages(session)));
+  checks.push(check("visible_history_timestamped", timestampsPresent, `${rawVisibleMessages.length} persisted visible messages`));
+  checks.push(check("visible_history_complete", visibleHistoryComplete, `${rawVisibleMessages.length}/${renderedVisibleMessages.length} visible messages`));
+  checks.push(check("visible_history_chronological", chronological, `${sessions.length} persisted sessions`));
+  return { passed: checks.every((item) => item.passed), checks };
+}
+
+function runtimeSeatSnapshot(agent = {}) {
+  return {
+    seatId: String(agent.id || ""),
+    displayName: String(agent.name || ""),
+    role: agent.judge ? "summarizer" : agent.mandatoryRedTeam ? "reviewer" : "ordinary",
+    enabled: agent.enabled !== false
+  };
+}
+
+function persistedSeatSnapshot(seat = {}) {
+  return {
+    seatId: String(seat.seatId || seat.id || ""),
+    displayName: String(seat.displayName || seat.name || ""),
+    role: String(seat.role || "ordinary"),
+    enabled: seat.enabled !== false
+  };
+}
+
+function sameSeatState(expected, actual) {
+  return Boolean(actual)
+    && expected.seatId === actual.seatId
+    && expected.displayName === actual.displayName
+    && expected.role === actual.role
+    && expected.enabled === actual.enabled;
+}
+
+function transcriptEntries(session = {}) {
+  return [
+    ...(Array.isArray(session.interimMessages) ? session.interimMessages : []),
+    ...(Array.isArray(session.messages) ? session.messages : [])
+  ];
+}
+
+function visibleTranscriptMessages(session = {}) {
+  return transcriptEntries(session).map((message, index) => ({ message, index })).sort((left, right) => {
+    const time = Date.parse(left.message.createdAt || "") - Date.parse(right.message.createdAt || "");
+    if (time) return time;
+    const call = Number(left.message.modelCallIndex || 0) - Number(right.message.modelCallIndex || 0);
+    return call || left.index - right.index;
+  }).map((entry) => entry.message);
+}
+
+function isChronological(messages) {
+  let previous = -Infinity;
+  for (const message of messages) {
+    const timestamp = Date.parse(message.createdAt || "");
+    if (!Number.isFinite(timestamp) || timestamp < previous) return false;
+    previous = timestamp;
+  }
+  return true;
+}
+
+function readJsonIfExists(filePath) {
+  try { return fs.existsSync(filePath) ? JSON.parse(fs.readFileSync(filePath, "utf8")) : undefined; } catch { return undefined; }
 }
 
 async function verifyCampaignDeliverable(verifier = {}, groupPath) {

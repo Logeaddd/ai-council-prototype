@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { runSeededRealUserBaseline, runSeededRealUserCampaign } from "../src/realUserHarness.js";
+import { runSeededRealUserBaseline, runSeededRealUserCampaign, verifyCampaignPersistence } from "../src/realUserHarness.js";
 import { createSeededCampaignScenario } from "../src/realUserCampaign.js";
 
 test("seeded real-user baseline uses the HTTP/SSE route, persists interruption, continues after restart, and verifies an edited artifact", async () => {
@@ -134,11 +134,35 @@ test("seeded campaign drives HTTP/SSE stages, member disturbances and interrupti
     assert.equal(run.report.autonomousExecution.resumedAfterInterruption, true);
     assert.equal(run.report.sessions.interrupted.length, 2);
     assert.equal(run.report.minimumUsableDelivery.passed, true);
+    assert.equal(run.report.persistence.passed, true);
+    assert.equal(run.report.persistence.checks.every((check) => check.passed), true);
     assert.equal(run.report.timeline.some((item) => item.mutation === "reorder" && item.result === "completed"), true);
     assert.equal(JSON.stringify(run.report).includes("test-key"), false);
   } finally {
     await close(provider);
     fs.rmSync(outputDir, { recursive: true, force: true });
+  }
+});
+
+test("campaign persistence rejects missing visible-message timestamps and lost member mutations", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-persistence-"));
+  try {
+    fs.mkdirSync(path.join(root, "shared"), { recursive: true });
+    fs.writeFileSync(path.join(root, "shared", "task_state.json"), "{}", "utf8");
+    fs.writeFileSync(path.join(root, "group.json"), JSON.stringify({
+      seats: [{ seatId: "worker", displayName: "Old name", role: "ordinary", enabled: true }]
+    }), "utf8");
+    const persistence = verifyCampaignPersistence(root, [{
+      interimMessages: [{ createdAt: "", modelCallIndex: 1 }],
+      messages: [{ createdAt: "2026-07-15T00:00:01.000Z", modelCallIndex: 2 }]
+    }], {
+      agents: [{ id: "worker", name: "Renamed worker", mandatoryRedTeam: true, enabled: false }]
+    });
+    assert.equal(persistence.passed, false);
+    assert.equal(persistence.checks.find((check) => check.id === "visible_history_timestamped")?.passed, false);
+    assert.equal(persistence.checks.find((check) => check.id === "member_state_persisted")?.passed, false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
   }
 });
 
