@@ -148,6 +148,7 @@ export async function runSeededRealUserCampaign(options = {}) {
   fs.mkdirSync(runDir, { recursive: true });
   try {
     prepareGroupWorkspace(groupPath, group);
+    prepareCampaignFixtures(groupPath, campaign.fixtures);
     server = await startHarnessServer({ dataDir, workspaceRoot: dataDir, environment: options.environment });
     for (const stage of campaign.stages || []) {
       if (stage.kind === "user" || stage.kind === "initial" || stage.kind === "followup" || stage.kind === "reopen") {
@@ -552,7 +553,7 @@ function readJsonIfExists(filePath) {
   try { return fs.existsSync(filePath) ? JSON.parse(fs.readFileSync(filePath, "utf8")) : undefined; } catch { return undefined; }
 }
 
-async function verifyCampaignDeliverable(verifier = {}, groupPath) {
+export async function verifyCampaignDeliverable(verifier = {}, groupPath) {
   const filePath = path.resolve(groupPath, String(verifier.file || ""));
   const checks = [check("file_exists", fs.existsSync(filePath), verifier.file || "")];
   if (verifier.kind === "json" && fs.existsSync(filePath)) {
@@ -560,6 +561,16 @@ async function verifyCampaignDeliverable(verifier = {}, groupPath) {
       const value = JSON.parse(fs.readFileSync(filePath, "utf8"));
       checks.push(check("json_expected", Object.entries(verifier.expected || {}).every(([key, expected]) => value[key] === expected), JSON.stringify(value)));
     } catch (error) { checks.push(check("json_parses", false, error.message)); }
+  } else if (verifier.kind === "csv" && fs.existsSync(filePath)) {
+    try {
+      const rows = parseCsv(fs.readFileSync(filePath, "utf8"));
+      const [headers = [], ...records] = rows;
+      const expectedHeaders = (verifier.headers || []).map(String);
+      const expectedRows = (verifier.rows || []).map((row) => row.map(String));
+      checks.push(check("csv_parses", rows.length > 0, `${rows.length} rows`));
+      checks.push(check("csv_headers", JSON.stringify(headers) === JSON.stringify(expectedHeaders), JSON.stringify(headers)));
+      checks.push(check("csv_rows", JSON.stringify(records) === JSON.stringify(expectedRows), JSON.stringify(records)));
+    } catch (error) { checks.push(check("csv_parses", false, error.message)); }
   } else if (["node_cli", "python_cli"].includes(verifier.kind)) {
     const command = verifier.kind === "python_cli" ? "python" : process.execPath;
     const result = await runProcess(command, [filePath, ...(verifier.args || [])]);
@@ -567,6 +578,44 @@ async function verifyCampaignDeliverable(verifier = {}, groupPath) {
     checks.push(check("final_requirement", result.stdout.trim() === verifier.expectedOutput, result.stdout.trim()));
   }
   return { passed: checks.every((item) => item.passed), checks };
+}
+
+function parseCsv(text) {
+  const rows = [];
+  let row = [];
+  let cell = "";
+  let quoted = false;
+  const source = String(text || "").replace(/^\uFEFF/, "");
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index];
+    if (character === '"') {
+      if (quoted && source[index + 1] === '"') {
+        cell += '"';
+        index += 1;
+      } else quoted = !quoted;
+      continue;
+    }
+    if (!quoted && character === ",") {
+      row.push(cell);
+      cell = "";
+      continue;
+    }
+    if (!quoted && (character === "\n" || character === "\r")) {
+      if (character === "\r" && source[index + 1] === "\n") index += 1;
+      row.push(cell);
+      rows.push(row);
+      row = [];
+      cell = "";
+      continue;
+    }
+    cell += character;
+  }
+  if (quoted) throw new Error("unterminated_csv_quote");
+  if (cell || row.length) {
+    row.push(cell);
+    rows.push(row);
+  }
+  return rows.filter((item) => item.some((value) => value !== ""));
 }
 
 function runProcess(command, args) {
@@ -599,6 +648,18 @@ function prepareGroupWorkspace(groupPath, group) {
     permissions: { defaultTier: "full", seatTiers: {} },
     seats
   }, null, 2), "utf8");
+}
+
+export function prepareCampaignFixtures(groupPath, fixtures = []) {
+  const root = path.resolve(groupPath);
+  for (const fixture of Array.isArray(fixtures) ? fixtures : []) {
+    const target = path.resolve(root, String(fixture?.path || ""));
+    if (!target.startsWith(`${root}${path.sep}`)) {
+      throw harnessFailure("invalid_campaign_fixture", `Campaign fixture escapes the group workspace: ${fixture?.path || ""}`, true);
+    }
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, String(fixture?.content || ""), "utf8");
+  }
 }
 
 async function startHarnessServer(options = {}) {

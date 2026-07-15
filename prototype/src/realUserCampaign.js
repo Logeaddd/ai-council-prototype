@@ -33,6 +33,7 @@ export function createSeededCampaignScenario(options = {}) {
       deliverable: task.deliverable
     },
     stages: stages.map((stage, index) => ({ id: `stage_${String(index + 1).padStart(2, "0")}`, ...stage })),
+    fixtures: task.fixtures || [],
     hiddenVerifier: task.hiddenVerifier
   };
 }
@@ -148,7 +149,36 @@ function jsonDocumentTemplate(seed, random) {
   };
 }
 
-const TASK_TEMPLATES = [nodeCliTemplate, pythonCliTemplate, jsonDocumentTemplate];
+function jsonToCsvTemplate(seed, random) {
+  const source = `inputs/records-${seed}.json`;
+  const file = `deliverables/records-${seed}.csv`;
+  const records = [
+    { name: `Ada-${seed % 10}`, score: 92 },
+    { name: `Lin-${seed % 7}`, score: 67 },
+    { name: `Mika-${seed % 5}`, score: 81 }
+  ];
+  const rows = records.map((record) => [record.name, String(record.score), record.score >= 80 ? "PASS" : "REVIEW"]);
+  return {
+    id: "json-to-csv",
+    domain: "file_read_write_and_data_transform",
+    deliverable: file,
+    initialQuestion: `Read the JSON records in ${source} and create ${file} as valid CSV with name and score columns. Preserve every source record and validate the generated file.`,
+    edits: [
+      { prompt: "Update the existing CSV to add a result column: use PASS for scores at least 80 and REVIEW otherwise. Keep every source record and validate the file." },
+      { prompt: "Keep the existing CSV artifact, preserve source order, and ensure score values remain plain integers. Validate the updated file." },
+      { prompt: "Use the latest requirements only: the CSV header must be name,score,result and its result values must be PASS or REVIEW. Validate it." },
+      { prompt: "Make the final requested CSV update without replacing the project. Re-read the source when needed, preserve all records, and validate the output." }
+    ],
+    reversalPrompt: "Use only the current CSV requirements. Do not restore an earlier column layout or label from retained discussion.",
+    recallPrompt: "Inspect the retained source file and current CSV artifact, then continue from the newest requirement.",
+    finalPrompt: "Apply the final CSV requirement and validate the current artifact one more time.",
+    recoveryVerificationPrompt: "Validate the current CSV artifact once more after recovery.",
+    fixtures: [{ path: source, content: JSON.stringify({ records }, null, 2) }],
+    hiddenVerifier: { kind: "csv", file, headers: ["name", "score", "result"], rows }
+  };
+}
+
+const TASK_TEMPLATES = [nodeCliTemplate, pythonCliTemplate, jsonDocumentTemplate, jsonToCsvTemplate];
 
 function seededRandom(seed) {
   let state = (seed >>> 0) || 1;

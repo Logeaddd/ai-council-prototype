@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { runSeededRealUserBaseline, runSeededRealUserCampaign, verifyCampaignPersistence } from "../src/realUserHarness.js";
+import { prepareCampaignFixtures, runSeededRealUserBaseline, runSeededRealUserCampaign, verifyCampaignDeliverable, verifyCampaignPersistence } from "../src/realUserHarness.js";
 import { createSeededCampaignScenario } from "../src/realUserCampaign.js";
 
 test("seeded real-user baseline uses the HTTP/SSE route, persists interruption, continues after restart, and verifies an edited artifact", async () => {
@@ -98,7 +98,7 @@ test("real-user baseline rejects mock providers outside its plumbing test mode",
 });
 
 test("seeded campaign drives HTTP/SSE stages, member disturbances and interruption recovery", async () => {
-  const campaign = createSeededCampaignScenario({ seed: 6 });
+  const campaign = createSeededCampaignScenario({ seed: 8 });
   const code = `const index = process.argv.indexOf('--name');\nconst name = index >= 0 ? process.argv[index + 1] : '';\nconsole.log('Thanks, ' + name + '.');\n`;
   const provider = http.createServer(async (req, res) => {
     const body = JSON.parse(await readBody(req));
@@ -166,6 +166,25 @@ test("campaign persistence rejects missing visible-message timestamps and lost m
     assert.equal(persistence.passed, false);
     assert.equal(persistence.checks.find((check) => check.id === "visible_history_timestamped")?.passed, false);
     assert.equal(persistence.checks.find((check) => check.id === "member_state_persisted")?.passed, false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("campaign CSV fixtures stay hidden from prompts and have a mechanical delivery verifier", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-campaign-csv-"));
+  const campaign = createSeededCampaignScenario({ seed: 3 });
+  try {
+    prepareCampaignFixtures(root, campaign.fixtures);
+    const fixture = campaign.fixtures[0];
+    assert.equal(fs.readFileSync(path.join(root, fixture.path), "utf8"), fixture.content);
+    fs.mkdirSync(path.join(root, path.dirname(campaign.hiddenVerifier.file)), { recursive: true });
+    const [headers, ...rows] = [campaign.hiddenVerifier.headers, ...campaign.hiddenVerifier.rows];
+    fs.writeFileSync(path.join(root, campaign.hiddenVerifier.file), [headers, ...rows].map((row) => row.join(",")).join("\n"), "utf8");
+    assert.equal((await verifyCampaignDeliverable(campaign.hiddenVerifier, root)).passed, true);
+
+    fs.writeFileSync(path.join(root, campaign.hiddenVerifier.file), "name,score,result\nwrong,0,REVIEW\n", "utf8");
+    assert.equal((await verifyCampaignDeliverable(campaign.hiddenVerifier, root)).passed, false);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

@@ -23,6 +23,17 @@ test("seeded user campaign generates reproducible capacity, edits, followups and
   assert.equal(JSON.stringify(publicScenario).includes(first.hiddenVerifier.expectedOutput), false);
 });
 
+test("data-transform campaigns retain hidden fixtures and CSV expectations outside the public script", () => {
+  const campaign = createSeededCampaignScenario({ seed: 3 });
+  const publicScenario = publicCampaignScenario(campaign);
+
+  assert.equal(campaign.task.id, "json-to-csv");
+  assert.equal(campaign.fixtures.length, 1);
+  assert.equal(campaign.hiddenVerifier.kind, "csv");
+  assert.equal(JSON.stringify(publicScenario).includes(campaign.fixtures[0].content), false);
+  assert.equal(JSON.stringify(publicScenario).includes(JSON.stringify(campaign.hiddenVerifier.rows)), false);
+});
+
 test("different seeds select deterministic task variants while preserving the campaign contract", () => {
   const campaigns = [1, 2, 3, 4, 5, 6].map((seed) => createSeededCampaignScenario({ seed }));
   assert.equal(new Set(campaigns.map((campaign) => campaign.task.id)).size >= 2, true);
