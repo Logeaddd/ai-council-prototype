@@ -1,4 +1,5 @@
 const CAMPAIGN_SCHEMA = "ai-council.real-user-campaign.v1";
+export const EXTERNAL_ROOT_TOKEN = "{{EXTERNAL_ROOT}}";
 
 export function createSeededCampaignScenario(options = {}) {
   const seed = normalizeSeed(options.seed);
@@ -178,7 +179,25 @@ function jsonToCsvTemplate(seed, random) {
   };
 }
 
-const TASK_TEMPLATES = [nodeCliTemplate, pythonCliTemplate, jsonDocumentTemplate, jsonToCsvTemplate];
+function externalNodeCliTemplate(seed, random) {
+  const file = `${EXTERNAL_ROOT_TOKEN}/deliverables/external-greeting-${seed}.js`;
+  const labels = ["Hello", "Welcome", "Greetings", "Thanks"];
+  return {
+    id: "external-node-cli",
+    domain: "user_authorized_external_workspace",
+    deliverable: file,
+    externalWorkspace: true,
+    initialQuestion: `Use the user-authorized external project root ${EXTERNAL_ROOT_TOKEN}. Create a command-line program at ${file}. It accepts --name <value> and prints a greeting. Run it and verify it works.`,
+    edits: labels.map((label) => ({ prompt: `In the same user-authorized external project, update ${file} so it uses ${JSON.stringify(label)} while keeping the command-line interface. Verify the edited program.` })),
+    reversalPrompt: `Use only the newest requirement in the external project at ${EXTERNAL_ROOT_TOKEN}; do not restore a superseded earlier greeting. Verify the current program.`,
+    recallPrompt: `Check the retained task history for ${file} and continue the user-authorized external project from the latest requirement.`,
+    finalPrompt: `Make the final requested greeting change in ${file} and verify the external deliverable again.`,
+    recoveryVerificationPrompt: `Run ${file} once more to verify its current state after recovery.`,
+    hiddenVerifier: { kind: "node_cli", file, args: ["--name", "Ada"], expectedOutput: "Thanks, Ada." }
+  };
+}
+
+const TASK_TEMPLATES = [nodeCliTemplate, pythonCliTemplate, jsonDocumentTemplate, externalNodeCliTemplate, jsonToCsvTemplate];
 
 function seededRandom(seed) {
   let state = (seed >>> 0) || 1;

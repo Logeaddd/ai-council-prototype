@@ -45,7 +45,6 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
   const attachments = normalizeFileAttachments(options.attachments || []);
   const importedProjectRoots = extractImportedProjectRoots(attachments);
   const userReferencedRoots = extractUserReferencedRoots({ text: question, attachments });
-  const authorizedProjectRoots = [...new Set([...importedProjectRoots, ...userReferencedRoots])];
   const sessionStartMs = Date.now();
   const sessionStartedAt = nowIso();
   const workMode = normalizeWorkMode(group.settings?.workMode);
@@ -67,6 +66,11 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
     || (options.groupPath && memoryEnabled && automaticContinuationSource
       ? buildAutomaticContinuationContext(automaticContinuationSource)
       : null);
+  const authorizedProjectRoots = [...new Set([
+    ...importedProjectRoots,
+    ...userReferencedRoots,
+    ...continuationAuthorizedProjectRoots(continuationContext, automaticContinuationSource)
+  ])];
   const executionQuestion = continuationContext?.previousQuestion || question;
   const excludedLegacyContinuationIds = automaticContinuationSource
     ? recentGroupSessions.filter(isLegacyContinuationShell).map((session) => session.id)
@@ -1129,7 +1133,8 @@ function normalizeContinuationContext(value) {
     participantMessages: normalizeContinuationMessages(value.participantMessages || value.participant_messages, 12),
     recentMessages: normalizeContinuationMessages(value.recentMessages || value.recent_messages, 12),
     recentActivity: normalizeTextList(value.recentActivity || value.recent_activity).slice(0, 12),
-    verifiedToolResults: normalizeVerifiedContinuationToolResults(value.verifiedToolResults || value.verified_tool_results, 12)
+    verifiedToolResults: normalizeVerifiedContinuationToolResults(value.verifiedToolResults || value.verified_tool_results, 12),
+    authorizedProjectRoots: normalizeContinuationProjectRoots(value.authorizedProjectRoots || value.authorized_project_roots)
   };
   return Object.values(normalized).some((item) => Array.isArray(item) ? item.length : Boolean(item)) ? normalized : null;
 }
@@ -1180,8 +1185,27 @@ function buildAutomaticContinuationContext(previousSession) {
     participantMessages,
     recentMessages,
     recentActivity: recentActivity.length ? recentActivity : inherited?.recentActivity,
-    verifiedToolResults
+    verifiedToolResults,
+    authorizedProjectRoots: normalizeContinuationProjectRoots([
+      ...(previousSession.authorizedProjectRoots || []),
+      ...(inherited?.authorizedProjectRoots || [])
+    ])
   });
+}
+
+function normalizeContinuationProjectRoots(value) {
+  return [...new Set((Array.isArray(value) ? value : []).map((item) => String(item || "").trim()).filter((item) => (
+    path.isAbsolute(item) && fs.existsSync(item)
+  )).map((item) => {
+    try { return fs.realpathSync.native(item); } catch { return ""; }
+  }).filter(Boolean))];
+}
+
+function continuationAuthorizedProjectRoots(context, automaticSource) {
+  return normalizeContinuationProjectRoots([
+    ...(automaticSource?.authorizedProjectRoots || []),
+    ...(context?.authorizedProjectRoots || [])
+  ]);
 }
 
 function isPlainContinuationRequest(question) {

@@ -5,7 +5,7 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { once } from "node:events";
-import { createSeededCampaignScenario, publicCampaignScenario } from "./realUserCampaign.js";
+import { createSeededCampaignScenario, EXTERNAL_ROOT_TOKEN, publicCampaignScenario } from "./realUserCampaign.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const prototypeRoot = path.resolve(__dirname, "..");
@@ -129,15 +129,16 @@ export async function runSeededRealUserBaseline(options = {}) {
 
 export async function runSeededRealUserCampaign(options = {}) {
   const group = structuredClone(options.group || {});
-  const campaign = options.campaign || createSeededCampaignScenario({ seed: options.seed });
+  const sourceCampaign = options.campaign || createSeededCampaignScenario({ seed: options.seed });
   assertRunnableGroup(group, { allowMockProvider: options.allowMockProvider === true });
   assertCampaignBudget(options, { allowMockProvider: options.allowMockProvider === true });
   if (Number(options.maxModelCalls) > 0) group.settings.maxModelCalls = Number(options.maxModelCalls);
 
   const outputRoot = path.resolve(options.outputDir || path.join(prototypeRoot, "eval", "real-user-campaign"));
-  const runDir = path.join(outputRoot, `${safeId(campaign.id)}-${Date.now()}`);
+  const runDir = path.join(outputRoot, `${safeId(sourceCampaign.id)}-${Date.now()}`);
   const dataDir = path.join(runDir, "data");
   const groupPath = path.join(dataDir, "workspace-ui", "campaign-group");
+  const campaign = materializeCampaignPaths(sourceCampaign, runDir, options.externalWorkspaceRoot);
   const timeline = [];
   const startedAt = new Date().toISOString();
   let server;
@@ -149,6 +150,7 @@ export async function runSeededRealUserCampaign(options = {}) {
   try {
     prepareGroupWorkspace(groupPath, group);
     prepareCampaignFixtures(groupPath, campaign.fixtures);
+    if (campaign.externalWorkspaceRoot) prepareCampaignFixtures(campaign.externalWorkspaceRoot, campaign.externalFixtures);
     server = await startHarnessServer({ dataDir, workspaceRoot: dataDir, environment: options.environment });
     for (const stage of campaign.stages || []) {
       if (stage.kind === "user" || stage.kind === "initial" || stage.kind === "followup" || stage.kind === "reopen") {
@@ -222,6 +224,7 @@ export async function runSeededRealUserCampaign(options = {}) {
     scenario: publicCampaignScenario(campaign),
     group: redactGroup(group),
     workspacePath: groupPath,
+    externalWorkspacePath: campaign.externalWorkspaceRoot || "",
     autonomousExecution: {
       campaignStagesExecuted: timeline.filter((item) => item.result === "completed").length,
       materialActionsObserved: timeline.filter((item) => isMaterialActionType(item.type)).length,
@@ -238,6 +241,15 @@ export async function runSeededRealUserCampaign(options = {}) {
   };
   fs.writeFileSync(path.join(runDir, "report.json"), JSON.stringify(report, null, 2), "utf8");
   return { runDir, groupPath, report };
+}
+
+function materializeCampaignPaths(sourceCampaign, runDir, externalWorkspaceRoot) {
+  const requiresExternalWorkspace = JSON.stringify(sourceCampaign).includes(EXTERNAL_ROOT_TOKEN);
+  if (!requiresExternalWorkspace) return structuredClone(sourceCampaign);
+  const externalRoot = path.resolve(externalWorkspaceRoot || path.join(runDir, "external-user-project"));
+  fs.mkdirSync(externalRoot, { recursive: true });
+  const campaign = JSON.parse(JSON.stringify(sourceCampaign).replaceAll(EXTERNAL_ROOT_TOKEN, externalRoot.replaceAll("\\", "/")));
+  return { ...campaign, externalWorkspaceRoot: externalRoot };
 }
 
 export function createMinimumBaselineScenario(seed = Date.now()) {

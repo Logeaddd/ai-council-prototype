@@ -107,9 +107,10 @@ function extractAbsolutePathCandidates(value) {
   const patterns = [
     /\]\(([A-Za-z]:[\\/][^)\r\n]+)\)/g,
     /`([^`\r\n]*[A-Za-z]:[\\/][^`\r\n]+)`/g,
-    /["']([A-Za-z]:[\\/][^"'\r\n]+)["']/g,
+    /"([A-Za-z]:[\\/][^"\r\n]+)"/g,
+    /'([A-Za-z]:[\\/][^'\r\n]+)'/g,
     /(?:^|\r?\n)\s*([A-Za-z]:[\\/][^\r\n]+?)\s*(?=\r?\n|$)/g,
-    /(?:^|\s)([A-Za-z]:[\\/][^\s<>{}|"'`]+)(?=\s|$)/g
+    /(?:^|\s)([A-Za-z]:[\\/][^\s<>{}|"`]+)(?=\s|$)/g
   ];
   for (const pattern of patterns) {
     for (const match of text.matchAll(pattern)) {

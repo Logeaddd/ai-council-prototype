@@ -1833,6 +1833,17 @@ test("user pasted and attachment paths authorize their real containing folders",
   assert.equal(roots.includes(fs.realpathSync.native(project)), true);
 });
 
+test("user-referenced Windows paths remain authorized when a path segment contains an apostrophe", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-user's-root-"));
+  try {
+    const pasted = root.replaceAll("\\", "/");
+    const roots = extractUserReferencedRoots({ text: `Use the project at ${pasted} for this task.` });
+    assert.deepEqual(roots, [fs.realpathSync.native(root)]);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 function executeFileToolResult(request, groupPath) {
   try {
     return executeFileTool(request, { groupPath });

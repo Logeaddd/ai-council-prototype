@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { prepareCampaignFixtures, runSeededRealUserBaseline, runSeededRealUserCampaign, verifyCampaignDeliverable, verifyCampaignPersistence } from "../src/realUserHarness.js";
-import { createSeededCampaignScenario } from "../src/realUserCampaign.js";
+import { createSeededCampaignScenario, EXTERNAL_ROOT_TOKEN } from "../src/realUserCampaign.js";
 
 test("seeded real-user baseline uses the HTTP/SSE route, persists interruption, continues after restart, and verifies an edited artifact", async () => {
   const provider = http.createServer(async (req, res) => {
@@ -98,7 +98,10 @@ test("real-user baseline rejects mock providers outside its plumbing test mode",
 });
 
 test("seeded campaign drives HTTP/SSE stages, member disturbances and interruption recovery", async () => {
-  const campaign = createSeededCampaignScenario({ seed: 8 });
+  const campaign = createSeededCampaignScenario({ seed: 3 });
+  const outputDir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-real-campaign-"));
+  const externalWorkspaceRoot = path.join(outputDir, "user-authorized-project");
+  const campaignFile = campaign.hiddenVerifier.file.replaceAll(EXTERNAL_ROOT_TOKEN, externalWorkspaceRoot.replaceAll("\\", "/"));
   const code = `const index = process.argv.indexOf('--name');\nconst name = index >= 0 ? process.argv[index + 1] : '';\nconsole.log('Thanks, ' + name + '.');\n`;
   const provider = http.createServer(async (req, res) => {
     const body = JSON.parse(await readBody(req));
@@ -118,19 +121,19 @@ test("seeded campaign drives HTTP/SSE stages, member disturbances and interrupti
       confidence: 1,
       memory_candidates: [],
       tool_requests: [
-        { tool: "workspace_edit", action: "write", path: campaign.hiddenVerifier.file, code, reason: "Write the current requested CLI." },
-        { tool: "execute_command", command: `node ${campaign.hiddenVerifier.file} --name Ada`, shell: "system", reason: "Verify the current deliverable." }
+        { tool: "workspace_edit", action: "write", path: campaignFile, code, reason: "Write the current requested CLI." },
+        { tool: "execute_command", command: `node ${campaignFile} --name Ada`, shell: "system", reason: "Verify the current deliverable." }
       ]
     }));
   });
   await listen(provider);
-  const outputDir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-real-campaign-"));
   try {
     const agent = (id, name) => ({ id, name, role: "Deliver the requested artifact.", provider: "openai-compatible", apiBaseUrl: `http://127.0.0.1:${provider.address().port}`, allowUnsafePrivateNetwork: true, apiKey: "test-key", model: "test-model", weight: 1, enabled: true });
     const run = await runSeededRealUserCampaign({
       group: { id: "campaign-group", name: "Campaign Group", settings: { maxRounds: 1, minRounds: 1, allowSoloCouncil: true, stopWhenAllSkip: false }, agents: [agent("worker", "Worker"), agent("reviewer", "Reviewer"), agent("judge", "Judge")] },
       campaign,
       outputDir,
+      externalWorkspaceRoot,
       allowMockProvider: true
     });
     assert.equal(run.report.status, "passed", JSON.stringify(run.report, null, 2));
@@ -141,6 +144,8 @@ test("seeded campaign drives HTTP/SSE stages, member disturbances and interrupti
     assert.equal(run.report.persistence.checks.every((check) => check.passed), true);
     assert.equal(run.report.recovery.passed, true);
     assert.equal(run.report.recovery.checks.every((check) => check.passed), true);
+    assert.equal(path.isAbsolute(run.report.externalWorkspacePath), true);
+    assert.equal(run.report.externalWorkspacePath.startsWith(run.groupPath), false);
     assert.equal(run.report.timeline.some((item) => item.mutation === "reorder" && item.result === "completed"), true);
     assert.equal(JSON.stringify(run.report).includes("test-key"), false);
   } finally {
@@ -173,7 +178,7 @@ test("campaign persistence rejects missing visible-message timestamps and lost m
 
 test("campaign CSV fixtures stay hidden from prompts and have a mechanical delivery verifier", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-campaign-csv-"));
-  const campaign = createSeededCampaignScenario({ seed: 3 });
+  const campaign = createSeededCampaignScenario({ seed: 4 });
   try {
     prepareCampaignFixtures(root, campaign.fixtures);
     const fixture = campaign.fixtures[0];

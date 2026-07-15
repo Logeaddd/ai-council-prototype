@@ -24,7 +24,7 @@ test("seeded user campaign generates reproducible capacity, edits, followups and
 });
 
 test("data-transform campaigns retain hidden fixtures and CSV expectations outside the public script", () => {
-  const campaign = createSeededCampaignScenario({ seed: 3 });
+  const campaign = createSeededCampaignScenario({ seed: 4 });
   const publicScenario = publicCampaignScenario(campaign);
 
   assert.equal(campaign.task.id, "json-to-csv");
@@ -32,6 +32,13 @@ test("data-transform campaigns retain hidden fixtures and CSV expectations outsi
   assert.equal(campaign.hiddenVerifier.kind, "csv");
   assert.equal(JSON.stringify(publicScenario).includes(campaign.fixtures[0].content), false);
   assert.equal(JSON.stringify(publicScenario).includes(JSON.stringify(campaign.hiddenVerifier.rows)), false);
+});
+
+test("external-workspace campaigns keep a runtime path placeholder out of the deterministic seed", () => {
+  const campaign = createSeededCampaignScenario({ seed: 3 });
+  assert.equal(campaign.task.id, "external-node-cli");
+  assert.equal(campaign.task.deliverable.includes("{{EXTERNAL_ROOT}}"), true);
+  assert.equal(JSON.stringify(publicCampaignScenario(campaign)).includes("{{EXTERNAL_ROOT}}"), true);
 });
 
 test("different seeds select deterministic task variants while preserving the campaign contract", () => {
