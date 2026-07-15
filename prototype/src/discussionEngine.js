@@ -1563,11 +1563,11 @@ function loadSummaryContext(groupPath, agent, appSettings) {
     const cache = readSummaryCache(groupPath, agent, group);
     return {
       memberShortSummary: cache.memberShortSummary,
-      groupSharedSummary: [
-        capabilityEnabled(appSettings, "memory") ? formatPublicMemoriesForPrompt(groupPath) : "",
-        cache.groupSharedSummary,
-        formatCompressedTranscriptChunks(cache.compressedTranscriptChunks)
-      ].filter(Boolean).join("\n\n")
+      memberShortSummaryRecord: cache.memberShortSummaryRecord,
+      groupSharedSummary: cache.groupSharedSummary,
+      groupSharedSummaryRecord: cache.groupSharedSummaryRecord,
+      compressedTranscriptChunks: cache.compressedTranscriptChunks,
+      publicMemorySummary: formatPublicMemoriesForPrompt(groupPath)
     };
   } catch {
     return {};
@@ -1596,14 +1596,6 @@ function readWorkspaceGroup(groupPath) {
   const filePath = path.join(groupPath, "group.json");
   if (!fs.existsSync(filePath)) return undefined;
   return JSON.parse(fs.readFileSync(filePath, "utf8"));
-}
-
-function formatCompressedTranscriptChunks(chunks = []) {
-  const summaries = chunks
-    .filter((chunk) => chunk.summary)
-    .slice(-3)
-    .map((chunk) => `Compressed rounds ${chunk.fromRound ?? "?"}-${chunk.toRound ?? "?"}: ${chunk.summary}`);
-  return summaries.join("\n");
 }
 
 function loadEnabledSkills(baseDir, groupPath, appSettings) {

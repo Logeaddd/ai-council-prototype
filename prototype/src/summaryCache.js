@@ -14,25 +14,27 @@ export function ensureSummaryCache(groupPath, group = undefined) {
 export function readSummaryCache(groupPath, agent = {}, group = undefined) {
   const root = path.resolve(groupPath);
   const seat = findSeat(group, agent);
+  const memberSummaryPath = memberShortSummaryPath(root, seat);
+  const groupSummaryPath = groupSharedSummaryPath(root);
   return {
-    memberShortSummary: readTextIfExists(memberShortSummaryPath(root, seat)),
-    groupSharedSummary: readTextIfExists(groupSharedSummaryPath(root)),
+    memberShortSummary: readTextIfExists(memberSummaryPath),
+    memberShortSummaryRecord: readSummaryRecord(memberSummaryPath, "member_short"),
+    groupSharedSummary: readTextIfExists(groupSummaryPath),
+    groupSharedSummaryRecord: readSummaryRecord(groupSummaryPath, "group_shared"),
     compressedTranscriptChunks: readJsonlIfExists(transcriptChunksPath(root))
   };
 }
 
-export function writeMemberShortSummary(groupPath, seat, summary) {
+export function writeMemberShortSummary(groupPath, seat, summary, options = {}) {
   const filePath = memberShortSummaryPath(path.resolve(groupPath), seat);
   if (!filePath) throw new Error("Cannot write member summary without a private folder");
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, String(summary || "").trim() + "\n", "utf8");
+  writeSummaryTextAndRecord(filePath, summary, "member_short", options);
   return filePath;
 }
 
-export function writeGroupSharedSummary(groupPath, summary) {
+export function writeGroupSharedSummary(groupPath, summary, options = {}) {
   const filePath = groupSharedSummaryPath(path.resolve(groupPath));
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, String(summary || "").trim() + "\n", "utf8");
+  writeSummaryTextAndRecord(filePath, summary, "group_shared", options);
   return filePath;
 }
 
@@ -48,7 +50,9 @@ export function appendCompressedTranscriptChunk(groupPath, chunk = {}) {
     toRound: chunk.toRound,
     summary: String(chunk.summary || "").trim(),
     protectedArtifacts: chunk.protectedArtifacts || [],
-    protectedObjections: chunk.protectedObjections || []
+    protectedObjections: chunk.protectedObjections || [],
+    sourceRefs: normalizeSourceRefs(chunk.sourceRefs || chunk.sources),
+    provenance: normalizeProvenance(chunk.provenance, chunk.sourceRefs || chunk.sources)
   };
   fs.appendFileSync(filePath, `${JSON.stringify(record)}\n`, "utf8");
   return record;
@@ -66,7 +70,8 @@ export function appendSessionTranscriptChunk(groupPath, session) {
     toRound: rounds.length ? Math.max(...rounds) : undefined,
     summary: summarizeSessionMessages(session.messages),
     protectedArtifacts,
-    protectedObjections
+    protectedObjections,
+    sourceRefs: sessionMessageSources(session)
   });
 }
 
@@ -76,17 +81,17 @@ export function updateDeterministicSummaries(groupPath, session, group = undefin
   const maxLines = positiveInteger(options.maxLines) || 12;
   const groupSummary = buildGroupSummary(session, maxLines);
   const memberSummaries = [];
-  if (groupSummary) writeGroupSharedSummary(root, groupSummary);
+  if (groupSummary.text) writeGroupSharedSummary(root, groupSummary.text, { sourceRefs: groupSummary.sourceRefs, provenance: "attributed" });
 
   for (const seat of group?.seats || []) {
     const summary = buildMemberSummary(session, seat, maxLines);
-    if (!summary) continue;
-    writeMemberShortSummary(root, seat, summary);
-    memberSummaries.push({ seatId: seat.seatId, displayName: seat.displayName, summary });
+    if (!summary.text) continue;
+    writeMemberShortSummary(root, seat, summary.text, { sourceRefs: summary.sourceRefs, provenance: "attributed" });
+    memberSummaries.push({ seatId: seat.seatId, displayName: seat.displayName, summary: summary.text });
   }
 
   return {
-    groupSummary,
+    groupSummary: groupSummary.text,
     memberSummaries
   };
 }
@@ -115,6 +120,10 @@ function groupSharedSummaryPath(root) {
   return path.join(sharedCacheDir(root), "shared-summary.md");
 }
 
+function summaryRecordPath(summaryPath) {
+  return summaryPath ? `${summaryPath}.metadata.json` : undefined;
+}
+
 function transcriptChunksPath(root) {
   return path.join(sharedCacheDir(root), "compressed-transcript.jsonl");
 }
@@ -128,12 +137,72 @@ function readTextIfExists(filePath) {
   return fs.readFileSync(filePath, "utf8").trim();
 }
 
+function writeSummaryTextAndRecord(filePath, summary, kind, options = {}) {
+  const text = String(summary || "").trim();
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, `${text}\n`, "utf8");
+  const record = {
+    schema: "ai-council.summary-record.v1",
+    kind,
+    updatedAt: nowIso(),
+    text,
+    sourceRefs: normalizeSourceRefs(options.sourceRefs || options.sources),
+    provenance: normalizeProvenance(options.provenance, options.sourceRefs || options.sources)
+  };
+  fs.writeFileSync(summaryRecordPath(filePath), JSON.stringify(record, null, 2), "utf8");
+  return record;
+}
+
+function readSummaryRecord(summaryPath, kind) {
+  const text = readTextIfExists(summaryPath);
+  if (!text) return undefined;
+  const metadataPath = summaryRecordPath(summaryPath);
+  if (!metadataPath || !fs.existsSync(metadataPath)) {
+    return legacySummaryRecord(text, kind, "missing_provenance_sidecar");
+  }
+  try {
+    const parsed = JSON.parse(fs.readFileSync(metadataPath, "utf8"));
+    if (parsed?.schema !== "ai-council.summary-record.v1" || parsed?.kind !== kind || String(parsed?.text || "").trim() !== text) {
+      return legacySummaryRecord(text, kind, "summary_text_changed_after_record");
+    }
+    return {
+      schema: parsed.schema,
+      kind,
+      updatedAt: String(parsed.updatedAt || ""),
+      text,
+      sourceRefs: normalizeSourceRefs(parsed.sourceRefs || parsed.sources),
+      provenance: normalizeProvenance(parsed.provenance, parsed.sourceRefs || parsed.sources)
+    };
+  } catch {
+    return legacySummaryRecord(text, kind, "invalid_provenance_sidecar");
+  }
+}
+
+function legacySummaryRecord(text, kind, provenance) {
+  return {
+    schema: "ai-council.summary-record.v1",
+    kind,
+    text,
+    sourceRefs: [],
+    provenance
+  };
+}
+
 function readJsonlIfExists(filePath) {
   if (!fs.existsSync(filePath)) return [];
   return fs.readFileSync(filePath, "utf8")
     .split(/\r?\n/)
     .filter(Boolean)
-    .map((line) => JSON.parse(line));
+    .map((line) => normalizeTranscriptChunk(JSON.parse(line)));
+}
+
+function normalizeTranscriptChunk(chunk = {}) {
+  const sourceRefs = normalizeSourceRefs(chunk.sourceRefs || chunk.sources);
+  return {
+    ...chunk,
+    sourceRefs,
+    provenance: normalizeProvenance(chunk.provenance, sourceRefs)
+  };
 }
 
 function summarizeSessionMessages(messages) {
@@ -159,7 +228,11 @@ function buildGroupSummary(session, maxLines) {
     ...artifactLines(session.artifacts, 3),
     ...objectionLines(session.unresolvedObjections, 4)
   ].filter(Boolean);
-  return lines.slice(0, maxLines).join("\n");
+  return summaryDraft(lines.slice(0, maxLines).join("\n"), [
+    ...sessionSummarySources(session),
+    ...sessionArtifactSources(session),
+    ...sessionObjectionSources(session)
+  ]);
 }
 
 function buildMemberSummary(session, seat, maxLines) {
@@ -182,7 +255,70 @@ function buildMemberSummary(session, seat, maxLines) {
     }), 3),
     ...objectionLines({ [seat.seatId]: session.unresolvedObjections?.[seat.seatId] || [] }, 3)
   ].filter(Boolean);
-  return lines.slice(0, maxLines).join("\n");
+  const sourceRefs = [
+    ...messages.map((message, index) => messageSource(session, message, index)),
+    ...sessionArtifactSources(session, (artifact) => artifact.source_agent_id === seat.seatId || artifact.source_agent_name === seat.displayName),
+    ...sessionObjectionSources(session, [seat.seatId])
+  ];
+  return summaryDraft(lines.slice(0, maxLines).join("\n"), sourceRefs);
+}
+
+function summaryDraft(text, sourceRefs) {
+  return {
+    text: String(text || "").trim(),
+    sourceRefs: normalizeSourceRefs(sourceRefs)
+  };
+}
+
+function sessionMessageSources(session = {}) {
+  return (session.messages || []).map((message, index) => messageSource(session, message, index));
+}
+
+function sessionSummarySources(session = {}) {
+  const sessionId = String(session.id || "session");
+  return [sourceRef("session_question", sessionId), ...sessionMessageSources(session)];
+}
+
+function sessionArtifactSources(session = {}, predicate = () => true) {
+  return (session.artifacts || [])
+    .filter((artifact) => predicate(artifact))
+    .map((artifact, index) => sourceRef("artifact", artifact.id || `${session.id || "session"}:artifact:${index}`));
+}
+
+function sessionObjectionSources(session = {}, agentIds = undefined) {
+  const allowed = agentIds ? new Set(agentIds) : undefined;
+  return Object.entries(session.unresolvedObjections || {})
+    .filter(([agentId]) => !allowed || allowed.has(agentId))
+    .flatMap(([agentId, objections]) => (objections || []).map((objection, index) => {
+      const id = typeof objection === "object" ? objection.id || objection.issue || index : index;
+      return sourceRef("objection", `${agentId}:${id}`);
+    }));
+}
+
+function messageSource(session, message = {}, index = 0) {
+  return sourceRef("member_message", message.id || `${session.id || "session"}:message:${message.modelCallIndex || index}`);
+}
+
+function sourceRef(type, id) {
+  return { type: String(type || "").trim(), id: String(id || "").trim() };
+}
+
+function normalizeSourceRefs(value) {
+  const seen = new Set();
+  const refs = [];
+  for (const item of Array.isArray(value) ? value : value ? [value] : []) {
+    const type = String(item?.type || item?.sourceType || "").trim();
+    const id = String(item?.id || item?.eventId || item?.sourceId || "").trim();
+    if (!type || !id || seen.has(`${type}\u001f${id}`)) continue;
+    seen.add(`${type}\u001f${id}`);
+    refs.push({ type, id });
+  }
+  return refs;
+}
+
+function normalizeProvenance(value, sourceRefs) {
+  if (String(value || "").trim()) return String(value).trim();
+  return normalizeSourceRefs(sourceRefs).length ? "attributed" : "unattributed";
 }
 
 function listLines(prefix, items = [], limit = 3) {

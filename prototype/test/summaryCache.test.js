@@ -122,4 +122,9 @@ test("summary cache can update deterministic group and member summaries", () => 
   assert.match(cache.memberShortSummary, /Implemented helper/);
   assert.match(cache.memberShortSummary, /builder-r1-a1/);
   assert.match(cache.memberShortSummary, /Add an edge case/);
+  assert.equal(cache.groupSharedSummaryRecord.provenance, "attributed");
+  assert.equal(cache.groupSharedSummaryRecord.sourceRefs.some((source) => source.type === "artifact" && source.id === "builder-r1-a1"), true);
+  assert.equal(cache.memberShortSummaryRecord.provenance, "attributed");
+  assert.equal(cache.memberShortSummaryRecord.sourceRefs.some((source) => source.type === "artifact" && source.id === "builder-r1-a1"), true);
+  assert.ok(fs.existsSync(path.join(group.groupPath, "shared", "cache", "shared-summary.md.metadata.json")));
 });

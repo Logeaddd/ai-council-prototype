@@ -5,6 +5,7 @@ import { buildContextPromptSections, buildMemberContext } from "./contextBuilder
 import { listSessionHistoryCatalogue, searchSessionContextArchive, writeContextArchive, writeGroupSession } from "./storage.js";
 import { queryPublicEvents, readPublicEventHotCache, rebuildPublicEventIndex } from "./publicEventJournal.js";
 import { readTaskState, updateTaskStateFromSession } from "./taskState.js";
+import { appendSessionTranscriptChunk, readSummaryCache, updateDeterministicSummaries } from "./summaryCache.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const prototypeRoot = path.resolve(__dirname, "..");
@@ -180,8 +181,12 @@ function runPersistedInvalidationScenario(groupPath, fixture) {
     question: "Record the replacement relationship.",
     messages: [message({ id: source.id, round: 1, modelCallIndex: 1, text: oldRule })]
   });
+  savedSession.finalDecision.answer = `The prior retained summary requires ${oldRule}.`;
   savedSession.contextInvalidations = [{ source, supersededBy, reason: "user_replaced_persisted_rule" }];
   updateTaskStateFromSession(groupPath, savedSession);
+  appendSessionTranscriptChunk(groupPath, savedSession);
+  updateDeterministicSummaries(groupPath, savedSession, { seats: [] });
+  const summaryCache = readSummaryCache(groupPath, baseAgent(), { seats: [] });
   const persisted = readTaskState(groupPath);
   const active = activeSession("reopened_invalidation", "Apply the current persisted requirement.", [
     message({ id: source.id, round: 1, modelCallIndex: 1, text: oldRule })
@@ -189,16 +194,26 @@ function runPersistedInvalidationScenario(groupPath, fixture) {
   const context = buildRealContext(active, fixture, {
     latestBossInstruction: currentRule,
     contextInvalidations: persisted.invalidations,
+    groupSharedSummary: summaryCache.groupSharedSummary,
+    groupSharedSummaryRecord: summaryCache.groupSharedSummaryRecord,
+    compressedTranscriptChunks: summaryCache.compressedTranscriptChunks,
     recentMessageLimit: 4
   });
   const prompt = contextPrompt(context);
   const invalidated = context.contextReceipt.policy.invalidatedSources;
   return measured("persisted_invalidation_reopen", {
     taskStateInvalidations: persisted.invalidations.length,
+    persistedGroupSummaryContainsOldRule: summaryCache.groupSharedSummary.includes(oldRule),
+    persistedChunkContainsOldRule: summaryCache.compressedTranscriptChunks.some((chunk) => chunk.summary.includes(oldRule)),
     oldSourceExcluded: !prompt.includes(oldRule),
     currentInstructionPresent: prompt.includes(currentRule),
     receiptInvalidation: invalidated[0] || null
-  }, persisted.invalidations.length === 1 && !prompt.includes(oldRule) && prompt.includes(currentRule) && invalidated.length === 1);
+  }, persisted.invalidations.length === 1
+    && summaryCache.groupSharedSummary.includes(oldRule)
+    && summaryCache.compressedTranscriptChunks.some((chunk) => chunk.summary.includes(oldRule))
+    && !prompt.includes(oldRule)
+    && prompt.includes(currentRule)
+    && invalidated.length >= 3);
 }
 
 function runContinuationCacheScenario(groupPath, fixture) {
@@ -234,6 +249,12 @@ function buildRealContext(session, fixture, options = {}) {
     latestBossInstruction: options.latestBossInstruction || "",
     continuationContext: options.continuationContext,
     contextInvalidations: options.contextInvalidations,
+    memberShortSummary: options.memberShortSummary,
+    memberShortSummaryRecord: options.memberShortSummaryRecord,
+    groupSharedSummary: options.groupSharedSummary,
+    groupSharedSummaryRecord: options.groupSharedSummaryRecord,
+    compressedTranscriptChunks: options.compressedTranscriptChunks,
+    publicMemorySummary: options.publicMemorySummary,
     retrievedContext: options.retrievedContext || [],
     historyCatalogue: fixture.historyCatalogue,
     publicEventHotCache: fixture.hotCache,

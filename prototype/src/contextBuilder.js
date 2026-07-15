@@ -15,9 +15,10 @@ export function buildMemberContext(agent, session, options = {}) {
   const limits = resolveEffectiveLimits(agent, options.groupSettings || {});
   const originalQuestion = session.question || options.question || "";
   const latestBossInstruction = options.latestBossInstruction || "";
-  const continuationContext = normalizeContinuationContext(options.continuationContext);
   const transcriptVisibility = normalizeTranscriptVisibility(options.transcriptVisibility);
   const priorityPolicy = buildContextPriorityPolicy(options);
+  const continuationSelection = selectContinuationContext(normalizeContinuationContext(options.continuationContext), priorityPolicy);
+  const summarySelection = selectSummaryContext(options, priorityPolicy, agent, session);
   const candidateMessages = selectVisibleMessages([
     ...(Array.isArray(session.interimMessages) ? session.interimMessages : []),
     ...(Array.isArray(session.messages) ? session.messages : [])
@@ -58,9 +59,13 @@ export function buildMemberContext(agent, session, options = {}) {
     attachedFiles
   };
   const summaries = {
-    memberShortSummary: options.memberShortSummary || "",
-    groupSharedSummary: options.groupSharedSummary || "",
-    continuationContext,
+    memberShortSummary: summarySelection.member.text,
+    groupSharedSummary: summarySelection.group.text,
+    compressedTranscriptChunks: summarySelection.chunks,
+    publicMemorySummary: summarySelection.publicMemory.text,
+    summaryContext: summarySelection,
+    continuationContext: continuationSelection.context,
+    continuationContextSelection: continuationSelection,
     retrievedContext: buildRetrievedContextPack(retrievedSelection.items, {
       maxItems: options.retrievedContextLimit || options.groupSettings?.contextArchiveInjectionLimit || options.groupSettings?.contextSearchLimit,
       maxTokens: options.retrievedContextMaxTokens || options.groupSettings?.contextArchiveInjectionTokens
@@ -148,7 +153,13 @@ export function buildMemberContext(agent, session, options = {}) {
     requestedRecentTranscript,
     recentTranscript,
     executionEvidence,
-    invalidatedSources: [...transcriptSelection.invalidated, ...retrievedSelection.invalidated, ...hotCacheSelection.invalidated]
+    invalidatedSources: [
+      ...transcriptSelection.invalidated,
+      ...retrievedSelection.invalidated,
+      ...hotCacheSelection.invalidated,
+      ...summarySelection.invalidated,
+      ...continuationSelection.invalidated
+    ]
   });
   return context;
 }
@@ -201,7 +212,9 @@ function buildContextReceiptDraft({ agent, session, options, context, visibleMes
   const decisions = mergeReceiptDecisions(sectionDecisions, [
     ...buildTranscriptReceiptDecisions(session, visibleMessages, requestedRecentTranscript, recentTranscript),
     ...(executionEvidence.receipt?.decisions || []),
-    ...(context.summaries.retrievedContext.receipt?.decisions || [])
+    ...(context.summaries.retrievedContext.receipt?.decisions || []),
+    ...(context.summaries.summaryContext?.decisions || []),
+    ...(context.summaries.continuationContextSelection?.decisions || [])
   ]);
   return {
     schema: "ai-council.context-receipt.v1",
@@ -320,6 +333,211 @@ function excludeInvalidatedContextItems(items, sourceFor, policy) {
   return { items: kept, invalidated };
 }
 
+function selectSummaryContext(options, policy, agent, session) {
+  const sessionId = String(session?.id || "active-session");
+  const member = selectAttributedSummary({
+    text: options.memberShortSummary,
+    record: options.memberShortSummaryRecord,
+    cacheSource: contextSource("member_summary", agent?.id || agent?.name || "unknown", {
+      sessionId,
+      sourcePath: "members/private_memory/short-summary.md"
+    }),
+    section: "summaries"
+  }, policy);
+  const group = selectAttributedSummary({
+    text: options.groupSharedSummary,
+    record: options.groupSharedSummaryRecord,
+    cacheSource: contextSource("group_summary", sessionId, {
+      sessionId,
+      sourcePath: "shared/cache/shared-summary.md"
+    }),
+    section: "summaries"
+  }, policy);
+  const chunks = (Array.isArray(options.compressedTranscriptChunks) ? options.compressedTranscriptChunks : [])
+    .map((chunk, index) => {
+      const selected = selectAttributedSummary({
+        text: chunk?.summary,
+        record: chunk,
+        cacheSource: contextSource("compressed_transcript_chunk", chunk?.id || `${sessionId}:chunk:${index}`, {
+          sessionId: String(chunk?.sourceSessionId || sessionId),
+          sourcePath: "shared/cache/compressed-transcript.jsonl"
+        }),
+        section: "summaries"
+      }, policy);
+      return { chunk, selected };
+    });
+  const publicMemory = selectAttributedSummary({
+    text: options.publicMemorySummary,
+    cacheSource: contextSource("public_memory_summary", sessionId, {
+      sessionId,
+      sourcePath: "shared/memory/public-memory.json"
+    }),
+    section: "summaries"
+  }, policy);
+  const eligibleChunks = chunks.filter((item) => item.selected.text);
+  const renderedChunkEntries = eligibleChunks.slice(-3);
+  const omittedChunkDecisions = eligibleChunks.slice(0, -3).map((item) => ({
+    section: "summaries",
+    source: item.selected.sources[0],
+    status: "retrieved_but_omitted",
+    reason: "compressed_transcript_limit"
+  }));
+  return {
+    member,
+    group,
+    chunks: renderedChunkEntries.map((item) => item.chunk),
+    publicMemory,
+    sources: [
+      ...member.sources,
+      ...group.sources,
+      ...renderedChunkEntries.flatMap((item) => item.selected.sources),
+      ...publicMemory.sources
+    ],
+    decisions: [
+      ...member.decisions,
+      ...group.decisions,
+      ...chunks.flatMap((item) => item.selected.decisions),
+      ...omittedChunkDecisions,
+      ...publicMemory.decisions
+    ],
+    invalidated: [
+      ...member.invalidated,
+      ...group.invalidated,
+      ...chunks.flatMap((item) => item.selected.invalidated),
+      ...publicMemory.invalidated
+    ]
+  };
+}
+
+function selectContinuationContext(context, policy) {
+  if (!context?.previousSessionId) return { context: null, sources: [], decisions: [], invalidated: [] };
+  const cacheSource = contextSource("continuation", context.previousSessionId, {
+    sessionId: context.previousSessionId,
+    sourcePath: context.sourcePath
+  });
+  const sourceRefs = normalizeSummarySourceRefs(context.sourceRefs);
+  const candidates = [cacheSource, ...sourceRefs];
+  const invalidatedMatches = candidates.map((source) => ({
+    source,
+    invalidation: policy.invalidations.find((item) => item.source.type === source.type && item.source.id === source.id)
+  })).filter((item) => item.invalidation);
+  if (invalidatedMatches.length) {
+    return {
+      context: continuationReferenceOnly(context),
+      sources: [cacheSource],
+      decisions: invalidatedMatches.map((item) => ({
+        section: "cycle_continuation",
+        source: item.source,
+        status: "invalidated",
+        reason: "source_invalidated_in_continuation"
+      })),
+      invalidated: invalidatedMatches.map((item) => ({
+        source: item.source,
+        supersededBy: item.invalidation.supersededBy,
+        reason: item.invalidation.reason,
+        status: "invalidated"
+      }))
+    };
+  }
+  if (policy.invalidations.length && context.provenance !== "attributed") {
+    return {
+      context: continuationReferenceOnly(context),
+      sources: [cacheSource],
+      decisions: [{
+        section: "cycle_continuation",
+        source: cacheSource,
+        status: "shortened",
+        reason: "continuation_provenance_missing_under_invalidation"
+      }],
+      invalidated: []
+    };
+  }
+  return { context, sources: candidates, decisions: [], invalidated: [] };
+}
+
+function continuationReferenceOnly(context) {
+  return {
+    previousSessionId: context.previousSessionId,
+    sourcePath: context.sourcePath,
+    sourceRefs: context.sourceRefs,
+    provenance: context.provenance,
+    previousQuestion: "",
+    previousStatus: "",
+    finalState: "",
+    finalAnswer: "",
+    summary: "",
+    blockingIssues: [],
+    risks: [],
+    nextActions: [],
+    participantMessages: [],
+    recentMessages: [],
+    recentActivity: []
+  };
+}
+
+function selectAttributedSummary(candidate, policy) {
+  const record = candidate.record && typeof candidate.record === "object" ? candidate.record : {};
+  const text = String(candidate.text || record.text || record.summary || "").trim();
+  if (!text) return { text: "", sources: [], decisions: [], invalidated: [] };
+  const sourceRefs = normalizeSummarySourceRefs(record.sourceRefs || record.sources);
+  const provenance = String(record.provenance || (sourceRefs.length ? "attributed" : "unattributed")).trim();
+  const invalidatedMatches = sourceRefs.map((source) => ({
+    source,
+    invalidation: policy.invalidations.find((item) => item.source.type === source.type && item.source.id === source.id)
+  })).filter((item) => item.invalidation);
+  if (invalidatedMatches.length) {
+    const invalidated = invalidatedMatches.map(({ source, invalidation }) => ({
+      source,
+      supersededBy: invalidation.supersededBy,
+      reason: invalidation.reason,
+      status: "invalidated"
+    }));
+    return {
+      text: "",
+      sources: [],
+      decisions: invalidated.map((item) => ({
+        section: candidate.section,
+        source: item.source,
+        status: "invalidated",
+        reason: "source_invalidated_in_attributed_summary"
+      })),
+      invalidated
+    };
+  }
+  if (policy.invalidations.length && provenance !== "attributed") {
+    return {
+      text: "",
+      sources: [],
+      decisions: [{
+        section: candidate.section,
+        source: candidate.cacheSource,
+        status: "retrieved_but_omitted",
+        reason: "summary_provenance_missing_under_invalidation"
+      }],
+      invalidated: []
+    };
+  }
+  return {
+    text,
+    sources: [candidate.cacheSource, ...sourceRefs],
+    decisions: [],
+    invalidated: []
+  };
+}
+
+function normalizeSummarySourceRefs(value) {
+  const seen = new Set();
+  const refs = [];
+  for (const item of Array.isArray(value) ? value : value ? [value] : []) {
+    const type = String(item?.type || item?.sourceType || "").trim();
+    const id = String(item?.id || item?.eventId || item?.sourceId || "").trim();
+    if (!type || !id || seen.has(`${type}\u001f${id}`)) continue;
+    seen.add(`${type}\u001f${id}`);
+    refs.push({ type, id });
+  }
+  return refs;
+}
+
 function formatContextPriorityPolicy(policy = {}) {
   const tiers = Array.isArray(policy.tiers) ? policy.tiers : [];
   if (!tiers.length) return "";
@@ -344,13 +562,13 @@ function contextSourcesBySection({ agent, session, options, context, recentTrans
     stable_context: [contextSource("agent_config", agent?.id || agent?.name || "unknown", { sessionId, sourcePath: "group.agent" })],
     non_compressible_core: coreSources,
     summaries: [
-      ...(context.summaries.memberShortSummary ? [contextSource("member_summary", agent?.id || "unknown", { sessionId, sourcePath: "shared/memory/member-summary" })] : []),
-      ...(context.summaries.groupSharedSummary ? [contextSource("group_summary", sessionId, { sessionId, sourcePath: "shared/memory/group-summary" })] : [])
+      ...(context.summaries.summaryContext?.sources || [])
     ],
     relevant_archived_context: retrievedSources,
     group_history_catalogue: historySources,
     recent_public_activity_cache: hotCacheSources,
-    cycle_continuation: continuation?.previousSessionId ? [contextSource("continuation", continuation.previousSessionId, { sessionId: continuation.previousSessionId, sourcePath: continuation.sourcePath })] : [],
+    cycle_continuation: context.summaries.continuationContextSelection?.sources
+      || (continuation?.previousSessionId ? [contextSource("continuation", continuation.previousSessionId, { sessionId: continuation.previousSessionId, sourcePath: continuation.sourcePath })] : []),
     private_boss_messages: [],
     enabled_skills: context.summaries.enabledSkills ? [contextSource("enabled_skill_metadata", sessionId, { sessionId })] : [],
     recent_transcript: recentTranscript.map((message, index) => transcriptSource(message, sessionId, index))
@@ -448,7 +666,9 @@ export function buildContextPromptSections(context) {
     ]],
     ["Summaries", [
       context.summaries.memberShortSummary ? `Member summary: ${context.summaries.memberShortSummary}` : "",
-      context.summaries.groupSharedSummary ? `Group summary: ${context.summaries.groupSharedSummary}` : ""
+      context.summaries.groupSharedSummary ? `Group summary: ${context.summaries.groupSharedSummary}` : "",
+      ...formatCompressedTranscriptChunks(context.summaries.compressedTranscriptChunks),
+      context.summaries.publicMemorySummary ? `Public memory summary: ${context.summaries.publicMemorySummary}` : ""
     ]],
     ["Relevant archived context", formatRetrievedContext(context.summaries.retrievedContext)],
     ["Group history catalogue", formatHistoryCatalogue(context.summaries.historyCatalogue)],
@@ -986,6 +1206,8 @@ function contextMessagesFromSummaries(summaries) {
   return [
     { role: "user", content: summaries.memberShortSummary },
     { role: "user", content: summaries.groupSharedSummary },
+    { role: "user", content: formatCompressedTranscriptChunks(summaries.compressedTranscriptChunks).join("\n") },
+    { role: "user", content: summaries.publicMemorySummary },
     { role: "user", content: summaries.enabledSkills },
     { role: "user", content: formatRetrievedContext(summaries.retrievedContext).join("\n") },
     { role: "user", content: formatHistoryCatalogue(summaries.historyCatalogue).join("\n") },
@@ -996,6 +1218,13 @@ function contextMessagesFromSummaries(summaries) {
       content: formatPrivateBossMessage(message)
     }))
   ].filter((message) => message.content);
+}
+
+function formatCompressedTranscriptChunks(chunks = []) {
+  return (Array.isArray(chunks) ? chunks : [])
+    .filter((chunk) => chunk?.summary)
+    .slice(-3)
+    .map((chunk) => `Compressed rounds ${chunk.fromRound ?? "?"}-${chunk.toRound ?? "?"}: ${chunk.summary}`);
 }
 
 function normalizeHistoryCatalogue(items) {
@@ -1249,7 +1478,9 @@ function normalizeContinuationContext(value) {
     nextActions: normalizeTextList(value.nextActions || value.next_actions),
     participantMessages: normalizeContinuationMessages(value.participantMessages || value.participant_messages, 12),
     recentMessages: normalizeContinuationMessages(value.recentMessages || value.recent_messages, 12),
-    recentActivity: normalizeTextList(value.recentActivity || value.recent_activity).slice(0, 12)
+    recentActivity: normalizeTextList(value.recentActivity || value.recent_activity).slice(0, 12),
+    sourceRefs: normalizeSummarySourceRefs(value.sourceRefs || value.sources),
+    provenance: String(value.provenance || (normalizeSummarySourceRefs(value.sourceRefs || value.sources).length ? "attributed" : "unattributed")).trim()
   };
 }
 

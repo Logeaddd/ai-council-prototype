@@ -812,3 +812,63 @@ test("explicit context invalidation preserves raw history while excluding supers
   });
   assert.equal(context.contextReceipt.policy.priorityDecisions.some((item) => item.rule === "current_instruction_outranks_retained_history"), true);
 });
+
+test("explicit invalidation excludes attributed summaries and compressed caches while retaining raw source history", () => {
+  const session = {
+    id: "session_summary_invalidation_1",
+    question: "Apply the current requirement.",
+    unresolvedObjections: {},
+    artifacts: [],
+    messages: []
+  };
+  const context = buildMemberContext(agent, session, {
+    latestBossInstruction: "Use the CURRENT_SUMMARY_RENDER_RULE.",
+    memberShortSummary: "Member cache says OLD_SUMMARY_RENDER_RULE.",
+    memberShortSummaryRecord: {
+      text: "Member cache says OLD_SUMMARY_RENDER_RULE.",
+      provenance: "attributed",
+      sourceRefs: [{ type: "member_message", id: "old_summary_rule" }]
+    },
+    groupSharedSummary: "Group cache says CURRENT_GROUP_SUMMARY_RULE.",
+    groupSharedSummaryRecord: {
+      text: "Group cache says CURRENT_GROUP_SUMMARY_RULE.",
+      provenance: "attributed",
+      sourceRefs: [{ type: "member_message", id: "current_summary_rule" }]
+    },
+    compressedTranscriptChunks: [{
+      id: "old_chunk",
+      sourceSessionId: "session_old",
+      fromRound: 1,
+      toRound: 2,
+      summary: "Compressed cache says OLD_CHUNK_RENDER_RULE.",
+      provenance: "attributed",
+      sourceRefs: [{ type: "member_message", id: "old_summary_rule" }]
+    }],
+    continuationContext: {
+      previousSessionId: "session_old",
+      sourcePath: "sessions/session_old.json",
+      summary: "Continuation cache says OLD_CONTINUATION_RENDER_RULE.",
+      provenance: "attributed",
+      sourceRefs: [{ type: "member_message", id: "old_summary_rule" }]
+    },
+    publicMemorySummary: "Legacy cached public memory says OLD_PUBLIC_MEMORY_RULE.",
+    contextInvalidations: [{
+      source: { type: "member_message", id: "old_summary_rule" },
+      supersededBy: { type: "latest_boss_instruction", id: "session_summary_invalidation_1:latest" },
+      reason: "user_replaced_summary_rule"
+    }]
+  });
+  const prompt = buildContextPromptSections(context).map((section) => section.content).join("\n");
+
+  assert.match(prompt, /CURRENT_SUMMARY_RENDER_RULE/);
+  assert.match(prompt, /CURRENT_GROUP_SUMMARY_RULE/);
+  assert.doesNotMatch(prompt, /OLD_SUMMARY_RENDER_RULE/);
+  assert.doesNotMatch(prompt, /OLD_CHUNK_RENDER_RULE/);
+  assert.doesNotMatch(prompt, /OLD_CONTINUATION_RENDER_RULE/);
+  assert.doesNotMatch(prompt, /OLD_PUBLIC_MEMORY_RULE/);
+  assert.match(prompt, /Previous session: session_old/);
+  assert.equal(context.contextReceipt.policy.invalidatedSources.filter((item) => item.source.id === "old_summary_rule").length, 3);
+  assert.equal(context.contextReceipt.decisions.some((item) => item.status === "invalidated" && item.reason === "source_invalidated_in_attributed_summary"), true);
+  assert.equal(context.contextReceipt.decisions.some((item) => item.status === "invalidated" && item.reason === "source_invalidated_in_continuation"), true);
+  assert.equal(context.contextReceipt.decisions.some((item) => item.reason === "summary_provenance_missing_under_invalidation"), true);
+});
