@@ -50,8 +50,20 @@ test("archive campaigns retain source files and expected ZIP contents outside th
   assert.equal(JSON.stringify(publicScenario).includes(campaign.hiddenVerifier.entries[0].content), false);
 });
 
+test("API collection campaigns expose only the endpoint and requirements, never the hidden response or verifier", () => {
+  const campaign = createSeededCampaignScenario({ seed: 6 });
+  const publicScenario = publicCampaignScenario(campaign);
+
+  assert.equal(campaign.task.id, "api-collection");
+  assert.equal(campaign.hiddenVerifier.kind, "api_collection");
+  assert.equal(campaign.apiFixture.path.startsWith("/v1/catalog/"), true);
+  assert.equal(JSON.stringify(publicScenario).includes(campaign.apiFixture.body.items[0].id), false);
+  assert.equal(JSON.stringify(publicScenario).includes(campaign.hiddenVerifier.expected.items[0].title), false);
+  assert.equal(JSON.stringify(publicScenario).includes("hiddenVerifier"), false);
+});
+
 test("different seeds select deterministic task variants while preserving the campaign contract", () => {
-  const campaigns = [1, 2, 3, 4, 5, 6].map((seed) => createSeededCampaignScenario({ seed }));
+  const campaigns = [1, 2, 3, 4, 5, 6, 7].map((seed) => createSeededCampaignScenario({ seed }));
   assert.equal(new Set(campaigns.map((campaign) => campaign.task.id)).size >= 2, true);
   for (const campaign of campaigns) {
     assert.equal(campaign.stages.length >= 10 && campaign.stages.length <= 30, true);

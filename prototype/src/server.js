@@ -60,6 +60,7 @@ const host = process.env.AI_COUNCIL_UI_HOST || "127.0.0.1";
 const dataDir = userDataDir(baseDir);
 const allowedWorkspaceRoot = path.resolve(process.env.AI_COUNCIL_WORKSPACE_ROOT || (process.env.AI_COUNCIL_DATA_DIR ? dataDir : baseDir));
 const defaultGroupsRoot = path.join(process.env.AI_COUNCIL_DATA_DIR ? dataDir : baseDir, "workspace-ui");
+const harnessAllowsLocalHttp = process.env.AI_COUNCIL_HARNESS_ALLOW_LOCAL_HTTP === "1";
 const execFileAsync = promisify(execFile);
 const activeCouncilRuns = createCouncilRunRegistry();
 
@@ -697,6 +698,8 @@ async function handleApi(req, res, url) {
       globalRequirement: body.globalRequirement || group.settings?.globalRequirement || "",
       continuationContext: body.continuationContext,
       contextInvalidations: body.contextInvalidations,
+      allowUnsafePrivateNetwork: harnessAllowsLocalHttp,
+      allowHttp: harnessAllowsLocalHttp,
       appSettings: readCurrentAppSettings(),
       attachments: normalizeFileAttachments(body.attachments || [])
     });
@@ -767,6 +770,8 @@ async function handleApi(req, res, url) {
       resumeInstruction: body.resumeInstruction || "",
       continuationContext: body.continuationContext,
       contextInvalidations: body.contextInvalidations,
+      allowUnsafePrivateNetwork: harnessAllowsLocalHttp,
+      allowHttp: harnessAllowsLocalHttp,
       appSettings: readCurrentAppSettings(),
       attachments: normalizeFileAttachments(body.attachments || [])
     });

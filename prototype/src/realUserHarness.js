@@ -6,7 +6,7 @@ import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { once } from "node:events";
 import { readZipArchiveEntries } from "./archiveTools.js";
-import { createSeededCampaignScenario, EXTERNAL_ROOT_TOKEN, publicCampaignScenario } from "./realUserCampaign.js";
+import { CAMPAIGN_API_URL_TOKEN, createSeededCampaignScenario, EXTERNAL_ROOT_TOKEN, publicCampaignScenario } from "./realUserCampaign.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const prototypeRoot = path.resolve(__dirname, "..");
@@ -139,7 +139,8 @@ export async function runSeededRealUserCampaign(options = {}) {
   const runDir = path.join(outputRoot, `${safeId(sourceCampaign.id)}-${Date.now()}`);
   const dataDir = path.join(runDir, "data");
   const groupPath = path.join(dataDir, "workspace-ui", "campaign-group");
-  const campaign = materializeCampaignPaths(sourceCampaign, runDir, options.externalWorkspaceRoot);
+  let campaign = structuredClone(sourceCampaign);
+  let apiFixture;
   const timeline = [];
   const startedAt = new Date().toISOString();
   let server;
@@ -149,10 +150,13 @@ export async function runSeededRealUserCampaign(options = {}) {
 
   fs.mkdirSync(runDir, { recursive: true });
   try {
+    if (campaignNeedsApiFixture(sourceCampaign)) apiFixture = await startCampaignApiFixture(sourceCampaign.apiFixture);
+    campaign = materializeCampaignPaths(sourceCampaign, runDir, options.externalWorkspaceRoot, apiFixture?.url);
     prepareGroupWorkspace(groupPath, group);
     prepareCampaignFixtures(groupPath, campaign.fixtures);
     if (campaign.externalWorkspaceRoot) prepareCampaignFixtures(campaign.externalWorkspaceRoot, campaign.externalFixtures);
-    server = await startHarnessServer({ dataDir, workspaceRoot: dataDir, environment: options.environment });
+    const environment = harnessEnvironment(options.environment, Boolean(apiFixture));
+    server = await startHarnessServer({ dataDir, workspaceRoot: dataDir, environment });
     for (const stage of campaign.stages || []) {
       if (stage.kind === "user" || stage.kind === "initial" || stage.kind === "followup" || stage.kind === "reopen") {
         const run = await postCouncilEvents({
@@ -185,7 +189,7 @@ export async function runSeededRealUserCampaign(options = {}) {
         ));
         interruptedSessions.push(interruptedSession);
         await stopHarnessServer(server);
-        server = await startHarnessServer({ dataDir, workspaceRoot: dataDir, environment: options.environment });
+        server = await startHarnessServer({ dataDir, workspaceRoot: dataDir, environment });
         timeline.push({ stageId: stage.id, kind: stage.kind, interruptAt: stage.interruptAt, result: "interrupted", sessionId: interruptedSession.id });
         continue;
       }
@@ -198,59 +202,82 @@ export async function runSeededRealUserCampaign(options = {}) {
     if (server) await stopHarnessServer(server);
   }
 
-  const delivery = await verifyCampaignDeliverable(campaign.hiddenVerifier, groupPath);
-  const sessions = listPersistedSessions(groupPath);
-  const modelCalls = sessions.reduce((total, session) => total + Number(session.modelCallCount || 0), 0);
-  const persistence = verifyCampaignPersistence(groupPath, sessions, group);
-  const recovery = verifyNoDuplicateVerifiedWork(interruptedSessions, sessions);
-  const resumedSources = new Set(sessions
-    .filter((session) => session.question === "continue")
-    .map((session) => session.continuationContext?.previousSessionId)
-    .filter(Boolean));
-  const resumed = interruptedSessions.length > 0 && interruptedSessions.every((session) => resumedSources.has(session.id));
-  const report = {
-    schema: "ai-council.real-user-campaign-run.v1",
-    startedAt,
-    completedAt: new Date().toISOString(),
-    status: failure ? failureKind : delivery.passed && interruptedSessions.length === 2 && resumed && persistence.passed && recovery.passed ? "passed" : "failed",
-    error: failure ? String(failure.message || failure).slice(0, 1600) : "",
-    seed: campaign.seed,
-    providerAcceptance: {
-      mode: options.allowMockProvider === true ? "local_fake_provider_plumbing" : "real_provider",
-      realProvider: options.allowMockProvider !== true,
-      maxCostUsd: Number(options.maxCostUsd || 0),
-      maxModelCalls: Number(options.maxModelCalls || 0),
-      observedModelCalls: modelCalls
-    },
-    scenario: publicCampaignScenario(campaign),
-    group: redactGroup(group),
-    workspacePath: groupPath,
-    externalWorkspacePath: campaign.externalWorkspaceRoot || "",
-    autonomousExecution: {
-      campaignStagesExecuted: timeline.filter((item) => item.result === "completed").length,
-      materialActionsObserved: timeline.filter((item) => isMaterialActionType(item.type)).length,
-      resumedAfterInterruption: resumed,
-      noDuplicateVerifiedWork: recovery.passed,
-      passed: !failure && resumed && persistence.passed && recovery.passed
-    },
-    minimumUsableDelivery: delivery,
-    subjectiveQuality: { status: "not_scored" },
-    sessions: { interrupted: interruptedSessions.map(summarizeSession), total: sessions.length, modelCalls },
-    persistence,
-    recovery,
-    timeline
-  };
-  fs.writeFileSync(path.join(runDir, "report.json"), JSON.stringify(report, null, 2), "utf8");
-  return { runDir, groupPath, report };
+  try {
+    const artifactDelivery = await verifyCampaignDeliverable(campaign.hiddenVerifier, groupPath);
+    const sessions = listPersistedSessions(groupPath);
+    const toolEvidence = verifyCampaignToolEvidence(campaign.hiddenVerifier, sessions);
+    const delivery = {
+      passed: artifactDelivery.passed && toolEvidence.passed,
+      checks: [...artifactDelivery.checks, ...toolEvidence.checks]
+    };
+    const modelCalls = sessions.reduce((total, session) => total + Number(session.modelCallCount || 0), 0);
+    const persistence = verifyCampaignPersistence(groupPath, sessions, group);
+    const recovery = verifyNoDuplicateVerifiedWork(interruptedSessions, sessions);
+    const resumedSources = new Set(sessions
+      .filter((session) => session.question === "continue")
+      .map((session) => session.continuationContext?.previousSessionId)
+      .filter(Boolean));
+    const resumed = interruptedSessions.length > 0 && interruptedSessions.every((session) => resumedSources.has(session.id));
+    const report = {
+      schema: "ai-council.real-user-campaign-run.v1",
+      startedAt,
+      completedAt: new Date().toISOString(),
+      status: failure ? failureKind : delivery.passed && interruptedSessions.length === 2 && resumed && persistence.passed && recovery.passed ? "passed" : "failed",
+      error: failure ? String(failure.message || failure).slice(0, 1600) : "",
+      seed: campaign.seed,
+      providerAcceptance: {
+        mode: options.allowMockProvider === true ? "local_fake_provider_plumbing" : "real_provider",
+        realProvider: options.allowMockProvider !== true,
+        maxCostUsd: Number(options.maxCostUsd || 0),
+        maxModelCalls: Number(options.maxModelCalls || 0),
+        observedModelCalls: modelCalls
+      },
+      scenario: publicCampaignScenario(campaign),
+      group: redactGroup(group),
+      workspacePath: groupPath,
+      externalWorkspacePath: campaign.externalWorkspaceRoot || "",
+      networkExercise: apiFixture
+        ? {
+          mode: "controlled_local_api",
+          endpoint: apiFixture.url,
+          requestsObserved: apiFixture.requests.length,
+          limitation: "This verifies the real API tool path against a bounded harness service. It does not prove public-network reachability or real-provider autonomy."
+        }
+        : { mode: "not_required" },
+      autonomousExecution: {
+        campaignStagesExecuted: timeline.filter((item) => item.result === "completed").length,
+        materialActionsObserved: timeline.filter((item) => isMaterialActionType(item.type)).length,
+        resumedAfterInterruption: resumed,
+        noDuplicateVerifiedWork: recovery.passed,
+        passed: !failure && resumed && persistence.passed && recovery.passed
+      },
+      minimumUsableDelivery: delivery,
+      subjectiveQuality: { status: "not_scored" },
+      sessions: { interrupted: interruptedSessions.map(summarizeSession), total: sessions.length, modelCalls },
+      persistence,
+      recovery,
+      timeline
+    };
+    fs.writeFileSync(path.join(runDir, "report.json"), JSON.stringify(report, null, 2), "utf8");
+    return { runDir, groupPath, report };
+  } finally {
+    if (apiFixture) await stopCampaignApiFixture(apiFixture);
+  }
 }
 
-function materializeCampaignPaths(sourceCampaign, runDir, externalWorkspaceRoot) {
+function materializeCampaignPaths(sourceCampaign, runDir, externalWorkspaceRoot, apiUrl) {
   const requiresExternalWorkspace = JSON.stringify(sourceCampaign).includes(EXTERNAL_ROOT_TOKEN);
-  if (!requiresExternalWorkspace) return structuredClone(sourceCampaign);
-  const externalRoot = path.resolve(externalWorkspaceRoot || path.join(runDir, "external-user-project"));
-  fs.mkdirSync(externalRoot, { recursive: true });
-  const campaign = JSON.parse(JSON.stringify(sourceCampaign).replaceAll(EXTERNAL_ROOT_TOKEN, externalRoot.replaceAll("\\", "/")));
-  return { ...campaign, externalWorkspaceRoot: externalRoot };
+  const requiresApi = JSON.stringify(sourceCampaign).includes(CAMPAIGN_API_URL_TOKEN);
+  if (requiresApi && !apiUrl) throw harnessFailure("campaign_api_fixture_missing", "API campaign needs a bounded harness API endpoint.", true);
+  const externalRoot = requiresExternalWorkspace
+    ? path.resolve(externalWorkspaceRoot || path.join(runDir, "external-user-project"))
+    : "";
+  if (externalRoot) fs.mkdirSync(externalRoot, { recursive: true });
+  const serialized = JSON.stringify(sourceCampaign)
+    .replaceAll(EXTERNAL_ROOT_TOKEN, externalRoot.replaceAll("\\", "/"))
+    .replaceAll(CAMPAIGN_API_URL_TOKEN, String(apiUrl || ""));
+  const campaign = JSON.parse(serialized);
+  return externalRoot ? { ...campaign, externalWorkspaceRoot: externalRoot } : campaign;
 }
 
 export function createMinimumBaselineScenario(seed = Date.now()) {
@@ -498,6 +525,21 @@ export function verifyNoDuplicateVerifiedWork(interruptedSessions = [], sessions
   return { passed: checks.every((item) => item.passed), checks };
 }
 
+export function verifyCampaignToolEvidence(verifier = {}, sessions = []) {
+  if (verifier.kind !== "api_collection") {
+    return { passed: true, checks: [check("required_tool_evidence", true, "not_required")] };
+  }
+  const expectedUrl = normalizeComparableUrl(verifier.apiUrl);
+  const apiResults = (sessions || []).flatMap((session) => session.toolExecutionResults || [])
+    .filter((item) => item.tool === "api_request" && item.status === "completed" && item.result?.ok);
+  const matched = apiResults.filter((item) => normalizeComparableUrl(item.result?.url || item.url) === expectedUrl);
+  const checks = [
+    check("api_request_recorded", apiResults.length > 0, `${apiResults.length} successful API requests persisted`),
+    check("required_api_endpoint_requested", Boolean(expectedUrl) && matched.length > 0, `${matched.length}/${apiResults.length} successful requests matched the required endpoint`)
+  ];
+  return { passed: checks.every((item) => item.passed), checks };
+}
+
 function isSuccessfulCommand(item = {}) {
   return item.tool === "execute_command"
     && item.status === "completed"
@@ -574,6 +616,11 @@ export async function verifyCampaignDeliverable(verifier = {}, groupPath) {
       const value = JSON.parse(fs.readFileSync(filePath, "utf8"));
       checks.push(check("json_expected", Object.entries(verifier.expected || {}).every(([key, expected]) => value[key] === expected), JSON.stringify(value)));
     } catch (error) { checks.push(check("json_parses", false, error.message)); }
+  } else if (verifier.kind === "api_collection" && fs.existsSync(filePath)) {
+    try {
+      const value = JSON.parse(fs.readFileSync(filePath, "utf8"));
+      checks.push(check("api_collection_exact", stableJson(value) === stableJson(verifier.expected || {}), JSON.stringify({ keys: Object.keys(value || {}), itemCount: Array.isArray(value?.items) ? value.items.length : -1 })));
+    } catch (error) { checks.push(check("api_collection_parses", false, error.message)); }
   } else if (verifier.kind === "csv" && fs.existsSync(filePath)) {
     try {
       const rows = parseCsv(fs.readFileSync(filePath, "utf8"));
@@ -668,6 +715,58 @@ function prepareGroupWorkspace(groupPath, group) {
     permissions: { defaultTier: "full", seatTiers: {} },
     seats
   }, null, 2), "utf8");
+}
+
+function campaignNeedsApiFixture(campaign = {}) {
+  return JSON.stringify(campaign).includes(CAMPAIGN_API_URL_TOKEN);
+}
+
+function harnessEnvironment(environment = {}, allowLocalHttp = false) {
+  return {
+    ...(environment || {}),
+    ...(allowLocalHttp ? { AI_COUNCIL_HARNESS_ALLOW_LOCAL_HTTP: "1" } : {})
+  };
+}
+
+async function startCampaignApiFixture(fixture = {}) {
+  const pathname = String(fixture.path || "").trim();
+  if (!/^\/[A-Za-z0-9._~!$&'()*+,;=:@%/-]*$/.test(pathname)) {
+    throw harnessFailure("invalid_campaign_api_fixture", "Campaign API fixture path must be a bounded absolute HTTP path.", true);
+  }
+  const body = JSON.stringify(fixture.body || {});
+  if (Buffer.byteLength(body, "utf8") > 64 * 1024) {
+    throw harnessFailure("campaign_api_fixture_too_large", "Campaign API fixture exceeds the bounded 64KB response budget.", true);
+  }
+  const requests = [];
+  const listener = http.createServer((req, res) => {
+    requests.push({ method: req.method || "", pathname: new URL(req.url || "/", "http://fixture.invalid").pathname });
+    if (req.method !== "GET" || new URL(req.url || "/", "http://fixture.invalid").pathname !== pathname) {
+      res.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ error: "not_found" }));
+      return;
+    }
+    res.writeHead(200, {
+      "Content-Type": "application/json; charset=utf-8",
+      "Cache-Control": "no-store"
+    });
+    res.end(body);
+  });
+  await new Promise((resolve, reject) => {
+    listener.once("error", reject);
+    listener.listen(0, "127.0.0.1", resolve);
+  });
+  const address = listener.address();
+  const port = typeof address === "object" && address ? address.port : 0;
+  if (!port) {
+    await new Promise((resolve) => listener.close(resolve));
+    throw harnessFailure("campaign_api_fixture_start_failed", "Campaign API fixture did not receive a local TCP port.", true);
+  }
+  return { listener, url: `http://127.0.0.1:${port}${pathname}`, requests };
+}
+
+async function stopCampaignApiFixture(fixture) {
+  if (!fixture?.listener || !fixture.listener.listening) return;
+  await new Promise((resolve, reject) => fixture.listener.close((error) => error ? reject(error) : resolve()));
 }
 
 export function prepareCampaignFixtures(groupPath, fixtures = []) {
@@ -870,6 +969,24 @@ function summarizeSession(session) {
     toolResults: (session.toolExecutionResults || []).length,
     finalState: session.finalDecision?.final_state || ""
   };
+}
+
+function normalizeComparableUrl(value) {
+  try {
+    const url = new URL(String(value || "").trim());
+    url.hash = "";
+    return url.toString().replace(/\/$/, "");
+  } catch {
+    return "";
+  }
+}
+
+function stableJson(value) {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
 }
 
 function normalizeSeed(value) {

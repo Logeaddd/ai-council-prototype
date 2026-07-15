@@ -372,6 +372,8 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
             : importedProjectRoots,
           appSettings: options.appSettings,
           searchApiKey: options.searchApiKey,
+          allowUnsafePrivateNetwork: Boolean(options.allowUnsafePrivateNetwork),
+          allowHttp: Boolean(options.allowHttp),
           maxReadBytes: group.settings.maxToolReadBytes,
           maxGrepResults: group.settings.maxToolGrepResults,
           maxGrepFileBytes: group.settings.maxToolGrepFileBytes,

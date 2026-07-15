@@ -1,5 +1,6 @@
 const CAMPAIGN_SCHEMA = "ai-council.real-user-campaign.v1";
 export const EXTERNAL_ROOT_TOKEN = "{{EXTERNAL_ROOT}}";
+export const CAMPAIGN_API_URL_TOKEN = "{{CAMPAIGN_API_URL}}";
 
 export function createSeededCampaignScenario(options = {}) {
   const seed = normalizeSeed(options.seed);
@@ -35,6 +36,7 @@ export function createSeededCampaignScenario(options = {}) {
     },
     stages: stages.map((stage, index) => ({ id: `stage_${String(index + 1).padStart(2, "0")}`, ...stage })),
     fixtures: task.fixtures || [],
+    apiFixture: task.apiFixture,
     hiddenVerifier: task.hiddenVerifier
   };
 }
@@ -225,7 +227,42 @@ function zipArchiveTemplate(seed, random) {
   };
 }
 
-const TASK_TEMPLATES = [nodeCliTemplate, pythonCliTemplate, jsonDocumentTemplate, externalNodeCliTemplate, jsonToCsvTemplate, zipArchiveTemplate];
+function apiCollectionTemplate(seed, random) {
+  const file = `deliverables/catalog-${seed}.json`;
+  const items = [
+    { id: `atlas-${seed % 17}`, title: `Atlas ${seed % 10}`, priority: "high", active: true },
+    { id: `beacon-${seed % 13}`, title: `Beacon ${seed % 8}`, priority: "medium", active: true },
+    { id: `cedar-${seed % 11}`, title: `Cedar ${seed % 6}`, priority: "low", active: false }
+  ];
+  return {
+    id: "api-collection",
+    domain: "network_api_collection_and_structured_output",
+    deliverable: file,
+    initialQuestion: `Use a direct HTTP API request to collect the bounded catalog at ${CAMPAIGN_API_URL_TOKEN}. Create ${file} as valid JSON with an items array containing every returned item in response order. Include each item's id and title, then validate the artifact.`,
+    edits: [
+      { prompt: "Update the existing catalog JSON to preserve every collected item and include its priority field. Validate the artifact." },
+      { prompt: "Update the same catalog JSON so every collected item also includes its active field. Preserve response order and validate it." },
+      { prompt: "Use the latest requirements only: the final JSON must have source set to api_collection and an items array with id, title, priority and active for every collected item. Validate it." },
+      { prompt: "Make the final requested catalog update without inventing or dropping API records. Preserve response order and validate the current JSON artifact." }
+    ],
+    reversalPrompt: "Use only the current catalog requirements. Do not restore an obsolete partial record layout from retained discussion.",
+    recallPrompt: `Inspect the retained API task context and current ${file}, then continue from the newest requirement without creating a replacement artifact.`,
+    finalPrompt: "Apply the final catalog requirement and validate the current JSON artifact one more time.",
+    recoveryVerificationPrompt: `Validate ${file} once more after recovery and run a real command that confirms the JSON still parses.`,
+    apiFixture: {
+      path: `/v1/catalog/${seed}`,
+      body: { items }
+    },
+    hiddenVerifier: {
+      kind: "api_collection",
+      file,
+      expected: { source: "api_collection", items },
+      apiUrl: CAMPAIGN_API_URL_TOKEN
+    }
+  };
+}
+
+const TASK_TEMPLATES = [nodeCliTemplate, pythonCliTemplate, jsonDocumentTemplate, externalNodeCliTemplate, jsonToCsvTemplate, zipArchiveTemplate, apiCollectionTemplate];
 
 function seededRandom(seed) {
   let state = (seed >>> 0) || 1;
