@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { advanceExecutionState, createExecutionState, executionInstruction, isDeliveryTask, selectExecutionAgents } from "../src/executionState.js";
 
 const agents = [
@@ -106,6 +109,39 @@ test("successful verification enters review and a clean reviewer closes the chec
   advanceExecutionState({ state, session, agent: agents[2], response: { status: "skip", objection_items: [] } });
   assert.equal(state.phase, "complete");
   assert.equal(state.reviewedCheckpointVersion, state.checkpointVersion);
+});
+
+test("an explicit generic validation command is a real verification checkpoint", () => {
+  const groupPath = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-generic-validation-"));
+  fs.mkdirSync(path.join(groupPath, "deliverables"), { recursive: true });
+  fs.writeFileSync(path.join(groupPath, "deliverables", "catalog.json"), '{"items":[]}\n', "utf8");
+  const state = createExecutionState({ question: "Create deliverables/catalog.json and validate the JSON.", agents, workspaceGroup });
+  const session = {
+    toolExecutionResults: [
+      {
+        id: "catalog-observation",
+        tool: "read_file",
+        path: "deliverables/catalog.json",
+        status: "completed",
+        result: { ok: true, path: "deliverables/catalog.json", content: '{"items":[]}' }
+      },
+      {
+        id: "catalog-parse",
+        tool: "execute_command",
+        command: "node -e \"JSON.parse(require('node:fs').readFileSync('deliverables/catalog.json', 'utf8'))\"",
+        reason: "Validate the generated catalog JSON parses.",
+        status: "completed",
+        result: { ok: true, exitCode: 0 }
+      }
+    ],
+    fileOperationExecutionResults: [],
+    groupSnapshot: { agents }
+  };
+
+  advanceExecutionState({ state, session, agent: agents[1], groupPath, question: state.taskQuestion });
+  assert.equal(state.phase, "review");
+  assert.equal(state.artifactStatus, "verified");
+  assert.equal(state.lastAction, "verification_passed:catalog-parse");
 });
 
 test("reviewer blocking evidence sends the same executor back to repair", () => {

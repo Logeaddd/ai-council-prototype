@@ -200,7 +200,15 @@ function permissionRank(value) {
 function isVerificationResult(item = {}) {
   if (item.tool === "run_tests") return true;
   if (item.tool !== "execute_command") return false;
-  return /\b(?:gradle|gradlew|mvn|mvnw|npm|pnpm|yarn|cargo|go|dotnet)\b[^\r\n]*(?:build|test|package|assemble|check)|\bjar\s+(?:c|--create)|\bcompress-archive\b/i.test(String(item.command || item.result?.command || ""));
+  const command = String(item.command || item.result?.command || "");
+  const reason = String(item.reason || "");
+  if (/\b(?:gradle|gradlew|mvn|mvnw|npm|pnpm|yarn|cargo|go|dotnet)\b[^\r\n]*(?:build|test|package|assemble|check)|\bjar\s+(?:c|--create)|\bcompress-archive\b/i.test(command)) return true;
+
+  // A successful project check is not limited to one build ecosystem. Agents
+  // regularly validate JSON, documents, scripts, and generated data with a
+  // small explicit command such as `node -e "JSON.parse(...)"`.
+  return /\b(?:verify|validate|test|check|parse|lint|smoke)\b|验证|校验|检查|解析|测试/i.test(reason)
+    || /JSON\.parse\s*\(|python(?:3)?\s+-m\s+json\.tool\b|\b(?:jq|xmllint)\b/i.test(command);
 }
 
 function verificationError(item = {}) {

@@ -235,10 +235,15 @@ function readHead(filePath, bytes) {
 
 function workspaceArtifactPaths(record = {}) {
   const changes = record.result?.workspaceChanges || {};
-  return [changes.created, changes.modified, changes.observedArtifacts]
+  const changedPaths = [changes.created, changes.modified, changes.observedArtifacts]
     .flatMap((items) => Array.isArray(items) ? items : [])
     .map((item) => String(typeof item === "string" ? item : item?.path || "").trim())
     .filter(Boolean);
+  if (INSPECTION_TOOL_NAMES.has(String(record.tool || ""))) {
+    const observedPath = String(record.path || record.result?.path || "").trim();
+    if (observedPath) changedPaths.push(observedPath);
+  }
+  return [...new Set(changedPaths)];
 }
 
 function extractDeliverableClaims(answer) {

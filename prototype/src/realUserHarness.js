@@ -188,7 +188,13 @@ export async function runSeededRealUserCampaign(options = {}) {
           onEvent(event) { timeline.push(compactCampaignEvent(stage, event)); },
           abortWhen: stage.interruptAt === "during_model_streaming" ? isStreamingActivityEvent : isVerifiedToolActivityEvent
         });
-        if (!run.aborted) throw harnessFailure("campaign_interrupt_did_not_reach_action", "Campaign interruption did not reach the requested activity boundary.");
+        if (!run.aborted) {
+          const budgetStop = latestSessionGuardStopReason(groupPath, stage.prompt || "continue");
+          if (budgetStop === "model_call_budget_exhausted") {
+            throw harnessFailure("campaign_budget_exhausted_before_interrupt", "The campaign payment guard was exhausted before the requested interruption boundary was reached.");
+          }
+          throw harnessFailure("campaign_interrupt_did_not_reach_action", "Campaign interruption did not reach the requested activity boundary.");
+        }
         const interruptedSession = await waitForSession(server.port, groupPath, (session) => (
           session.status === "interrupted" && !interruptedSessions.some((item) => item.id === session.id)
         ));
@@ -215,8 +221,13 @@ export async function runSeededRealUserCampaign(options = {}) {
       passed: artifactDelivery.passed && toolEvidence.passed,
       checks: [...artifactDelivery.checks, ...toolEvidence.checks]
     };
-    const modelCalls = sessions.reduce((total, session) => total + Number(session.modelCallCount || 0), 0);
+    const attemptedModelCalls = sessions.reduce((total, session) => total + Number(session.modelCallCount || 0), 0);
     const budgetLedger = readCampaignBudgetLedger(groupPath);
+    const providerCalls = providerCallMetrics({
+      attemptedModelCalls,
+      budgetLedger,
+      realProvider: options.allowMockProvider !== true
+    });
     const persistence = verifyCampaignPersistence(groupPath, sessions, group);
     const recovery = verifyNoDuplicateVerifiedWork(interruptedSessions, sessions);
     const resumedSources = new Set(sessions
@@ -236,7 +247,9 @@ export async function runSeededRealUserCampaign(options = {}) {
         realProvider: options.allowMockProvider !== true,
         maxCostUsd: Number(options.maxCostUsd || 0),
         maxModelCalls: Number(options.maxModelCalls || 0),
-        observedModelCalls: modelCalls,
+        observedModelCalls: providerCalls.observedModelCalls,
+        attemptedModelCalls: providerCalls.attemptedModelCalls,
+        blockedBeforeSendModelCalls: providerCalls.blockedBeforeSendModelCalls,
         budgetLedger: budgetLedger || null
       },
       scenario: publicCampaignScenario(campaign),
@@ -260,7 +273,7 @@ export async function runSeededRealUserCampaign(options = {}) {
       },
       minimumUsableDelivery: delivery,
       subjectiveQuality: { status: "not_scored" },
-      sessions: { interrupted: interruptedSessions.map(summarizeSession), total: sessions.length, modelCalls },
+      sessions: { interrupted: interruptedSessions.map(summarizeSession), total: sessions.length, modelCalls: attemptedModelCalls },
       persistence,
       recovery,
       timeline
@@ -270,6 +283,17 @@ export async function runSeededRealUserCampaign(options = {}) {
   } finally {
     if (apiFixture) await stopCampaignApiFixture(apiFixture);
   }
+}
+
+export function providerCallMetrics({ attemptedModelCalls = 0, budgetLedger, realProvider = false } = {}) {
+  const attempted = Math.max(0, Number(attemptedModelCalls) || 0);
+  const ledgerCalls = Number(budgetLedger?.modelCalls);
+  const observed = realProvider && Number.isFinite(ledgerCalls) ? Math.max(0, ledgerCalls) : attempted;
+  return {
+    observedModelCalls: observed,
+    attemptedModelCalls: attempted,
+    blockedBeforeSendModelCalls: Math.max(0, attempted - observed)
+  };
 }
 
 function materializeCampaignPaths(sourceCampaign, runDir, externalWorkspaceRoot, apiUrl) {
@@ -487,6 +511,13 @@ function listPersistedSessions(groupPath) {
   return fs.readdirSync(root).filter((name) => name.endsWith(".json")).map((name) => {
     try { return JSON.parse(fs.readFileSync(path.join(root, name), "utf8")); } catch { return null; }
   }).filter(Boolean);
+}
+
+function latestSessionGuardStopReason(groupPath, question) {
+  return listPersistedSessions(groupPath)
+    .filter((session) => session.question === question)
+    .sort((left, right) => Date.parse(right.createdAt || "") - Date.parse(left.createdAt || ""))[0]
+    ?.guardStopReason || "";
 }
 
 export function verifyCampaignPersistence(groupPath, sessions, runtimeGroup) {

@@ -5,7 +5,7 @@ import path from "node:path";
 import zlib from "node:zlib";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { prepareCampaignFixtures, runSeededRealUserBaseline, runSeededRealUserCampaign, verifyCampaignDeliverable, verifyCampaignPersistence, verifyCampaignToolEvidence } from "../src/realUserHarness.js";
+import { prepareCampaignFixtures, providerCallMetrics, runSeededRealUserBaseline, runSeededRealUserCampaign, verifyCampaignDeliverable, verifyCampaignPersistence, verifyCampaignToolEvidence } from "../src/realUserHarness.js";
 import { createSeededCampaignScenario, EXTERNAL_ROOT_TOKEN } from "../src/realUserCampaign.js";
 
 test("seeded real-user baseline uses the HTTP/SSE route, persists interruption, continues after restart, and verifies an edited artifact", async () => {
@@ -80,6 +80,24 @@ test("seeded real-user baseline uses the HTTP/SSE route, persists interruption, 
     await close(provider);
     fs.rmSync(outputDir, { recursive: true, force: true });
   }
+});
+
+test("real-provider campaign reporting uses the durable budget ledger for sent-call counts", () => {
+  const metrics = providerCallMetrics({
+    realProvider: true,
+    attemptedModelCalls: 124,
+    budgetLedger: { modelCalls: 120 }
+  });
+  assert.deepEqual(metrics, {
+    observedModelCalls: 120,
+    attemptedModelCalls: 124,
+    blockedBeforeSendModelCalls: 4
+  });
+  assert.deepEqual(providerCallMetrics({ realProvider: false, attemptedModelCalls: 7 }), {
+    observedModelCalls: 7,
+    attemptedModelCalls: 7,
+    blockedBeforeSendModelCalls: 0
+  });
 });
 
 test("real-user baseline rejects mock providers outside its plumbing test mode", async () => {
