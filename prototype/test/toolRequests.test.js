@@ -1143,9 +1143,30 @@ test("run_code executes real snippets for full permission only", async () => {
   assert.equal(String(allowed.accepted[0].code).includes("const value"), false);
   assert.equal(allowed.results[0].status, "completed");
   assert.equal(allowed.results[0].result.language, "javascript");
+  assert.equal(allowed.results[0].result.verificationIntent, false);
   assert.match(allowed.results[0].result.stdout, /RUN_CODE_FACT:42/);
   assert.equal(fs.existsSync(path.join(tmp, allowed.results[0].result.codePath)), true);
   assert.equal(fs.existsSync(path.join(tmp, "shared", "logs", "code-runs.jsonl")), true);
+});
+
+test("run_code records a source-free verification intent for assertion checks", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-run-code-verification-"));
+  const result = await executeToolRequests({
+    permissionTier: "full",
+    groupPath: tmp,
+    agent: { id: "full", name: "Full" },
+    round: 1,
+    requests: [{
+      tool: "run_code",
+      language: "javascript",
+      code: "import assert from 'node:assert/strict'; assert.equal(6 * 7, 42); console.log('verified');",
+      reason: "Run an assertion."
+    }]
+  });
+
+  assert.equal(result.results[0].status, "completed");
+  assert.equal(result.results[0].result.verificationIntent, true);
+  assert.equal(String(result.results[0].code).includes("assert.equal"), false);
 });
 
 test("run_code reports timeout and unsupported languages honestly", async () => {

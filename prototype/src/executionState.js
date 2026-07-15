@@ -199,10 +199,13 @@ function permissionRank(value) {
 
 function isVerificationResult(item = {}) {
   if (item.tool === "run_tests") return true;
+  if (item.tool === "run_code") return Boolean(item.result?.verificationIntent);
   if (item.tool !== "execute_command") return false;
   const command = String(item.command || item.result?.command || "");
   const reason = String(item.reason || "");
   if (/\b(?:gradle|gradlew|mvn|mvnw|npm|pnpm|yarn|cargo|go|dotnet)\b[^\r\n]*(?:build|test|package|assemble|check)|\bjar\s+(?:c|--create)|\bcompress-archive\b/i.test(command)) return true;
+  if (/\b(?:verify|verification|validat(?:e|ion)?|test|check|parse|lint|smoke|assert(?:ion)?)/i.test(reason)) return true;
+  if (/\b(?:verify|verification|validat(?:e|ion)?|test|check|parse|lint|smoke|assert(?:ion)?)/i.test(command)) return true;
 
   // A successful project check is not limited to one build ecosystem. Agents
   // regularly validate JSON, documents, scripts, and generated data with a

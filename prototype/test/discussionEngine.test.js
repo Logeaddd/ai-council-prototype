@@ -928,7 +928,7 @@ test("successful current-session command verifies a claimed deliverable before s
     const verification = result.session.finalDecision.deliverable_verification;
     const saved = JSON.parse(fs.readFileSync(result.sessionPath, "utf8"));
 
-    assert.equal(requestBodies.length, 3);
+    assert.equal(requestBodies.length, 2);
     assert.equal(result.session.toolExecutionResults[0].id, "tool-build");
     assert.equal(result.session.toolExecutionResults[0].status, "completed");
     assert.equal(verification.status, "verified");
@@ -4541,7 +4541,8 @@ test("primary executor completes a deterministic project through real writes tes
     assert.equal(session.executionState.reviewedCheckpointVersion, session.executionState.checkpointVersion);
     assert.equal(session.guardStopReason, "");
     assert.match(calls[1], /Current phase: verify/);
-    assert.ok(calls.length <= 6);
+    assert.equal(executorStep, 2);
+    assert.equal(calls.length, 4);
   } finally {
     await close(server);
   }

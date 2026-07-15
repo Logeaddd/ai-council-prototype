@@ -425,6 +425,13 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
           yield event;
         }
 
+        if (hasReachedVerificationCheckpoint(session.executionState, agent)) {
+          response = buildVerificationCheckpointHandoff(session.executionState);
+          rawTextForMessage = "";
+          errorForMessage = "";
+          break;
+        }
+
         if (!toolResult.results.length && !toolResult.rejected.length) break;
 
         const toolLoopStagnated = updateStagnantToolLoopCount({
@@ -1108,6 +1115,28 @@ function hasWorkspaceMutationRequest(response = {}) {
     && ["write", "append", "replace", "move"].includes(String(request.action || ""))
     && (String(request.code || "").length > 0 || String(request.content || "").length > 0 || String(request.newText || "").length > 0 || String(request.destination || "").length > 0)
   ));
+}
+
+function hasReachedVerificationCheckpoint(state, agent) {
+  return Boolean(
+    state?.active
+    && agent?.id === state.executorId
+    && /^verification_passed:/.test(String(state.lastAction || ""))
+    && ["review", "complete"].includes(String(state.phase || ""))
+  );
+}
+
+function buildVerificationCheckpointHandoff(state = {}) {
+  const nextPhase = state.phase === "complete" ? "final synthesis" : "checkpoint review";
+  return {
+    status: "speak",
+    position: "verification_checkpoint_recorded",
+    argument: `A real verification checkpoint was recorded (${state.lastAction}). The executor is handing the task to ${nextPhase}; no additional tool request is needed in this turn.`,
+    objections: [],
+    objection_items: [],
+    confidence: 1,
+    memory_candidates: []
+  };
 }
 
 function abortReasonCode(signal) {

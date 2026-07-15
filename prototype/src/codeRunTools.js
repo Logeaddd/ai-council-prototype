@@ -56,9 +56,14 @@ export async function runCodeTool(request, options = {}) {
     stderr: result.stderr,
     stdoutTruncated: result.stdoutTruncated,
     stderrTruncated: result.stderrTruncated,
+    verificationIntent: looksLikeVerificationCode(code),
     code: result.code,
     error: result.error
   };
+}
+
+function looksLikeVerificationCode(code) {
+  return /\b(?:assert|expect|verify|verification|validate|validation|test|check|lint|smoke)\b/i.test(String(code || ""));
 }
 
 function commandForLanguage(language, fileName) {

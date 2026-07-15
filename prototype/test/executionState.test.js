@@ -144,6 +144,57 @@ test("an explicit generic validation command is a real verification checkpoint",
   assert.equal(state.lastAction, "verification_passed:catalog-parse");
 });
 
+test("a successful validation script is a checkpoint even when the model omits a reason", () => {
+  const groupPath = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-script-validation-"));
+  fs.mkdirSync(path.join(groupPath, "deliverables"), { recursive: true });
+  fs.writeFileSync(path.join(groupPath, "deliverables", "catalog.json"), '{"items":[]}\n', "utf8");
+  const state = createExecutionState({ question: "Create deliverables/catalog.json and validate the JSON.", agents, workspaceGroup });
+  const session = {
+    toolExecutionResults: [
+      {
+        id: "catalog-observation",
+        tool: "read_file",
+        path: "deliverables/catalog.json",
+        status: "completed",
+        result: { ok: true, path: "deliverables/catalog.json", content: '{"items":[]}' }
+      },
+      {
+        id: "catalog-validation-script",
+        tool: "execute_command",
+        command: "python deliverables/validate_catalog.py",
+        reason: "",
+        status: "completed",
+        result: { ok: true, exitCode: 0 }
+      }
+    ],
+    fileOperationExecutionResults: [],
+    groupSnapshot: { agents }
+  };
+
+  advanceExecutionState({ state, session, agent: agents[1], groupPath, question: state.taskQuestion });
+  assert.equal(state.phase, "review");
+  assert.equal(state.artifactStatus, "verified");
+  assert.equal(state.lastAction, "verification_passed:catalog-validation-script");
+});
+
+test("assertion-bearing run_code results create a verification checkpoint without retaining source code", () => {
+  const state = createExecutionState({ question: "Create and validate a source project.", agents, workspaceGroup });
+  const session = {
+    toolExecutionResults: [{
+      id: "inline-assertion",
+      tool: "run_code",
+      status: "completed",
+      result: { ok: true, exitCode: 0, verificationIntent: true }
+    }],
+    fileOperationExecutionResults: [],
+    groupSnapshot: { agents }
+  };
+
+  advanceExecutionState({ state, session, agent: agents[1], question: state.taskQuestion });
+  assert.equal(state.phase, "review");
+  assert.equal(state.lastAction, "verification_passed:inline-assertion");
+});
+
 test("reviewer blocking evidence sends the same executor back to repair", () => {
   const state = createExecutionState({ question: "Create and test a source project.", agents, workspaceGroup });
   state.phase = "review";
