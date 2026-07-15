@@ -2,6 +2,7 @@ import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
+import zlib from "node:zlib";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { prepareCampaignFixtures, runSeededRealUserBaseline, runSeededRealUserCampaign, verifyCampaignDeliverable, verifyCampaignPersistence } from "../src/realUserHarness.js";
@@ -195,6 +196,22 @@ test("campaign CSV fixtures stay hidden from prompts and have a mechanical deliv
   }
 });
 
+test("campaign ZIP verifier checks extracted entry names and content", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-campaign-zip-"));
+  const campaign = createSeededCampaignScenario({ seed: 5 });
+  try {
+    const archive = path.join(root, campaign.hiddenVerifier.file);
+    fs.mkdirSync(path.dirname(archive), { recursive: true });
+    fs.writeFileSync(archive, makeZip(campaign.hiddenVerifier.entries));
+    assert.equal((await verifyCampaignDeliverable(campaign.hiddenVerifier, root)).passed, true);
+
+    fs.writeFileSync(archive, makeZip([{ ...campaign.hiddenVerifier.entries[0], content: "wrong\n" }]));
+    assert.equal((await verifyCampaignDeliverable(campaign.hiddenVerifier, root)).passed, false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 function roundResponse(greeting) {
   const code = `const index = process.argv.indexOf('--name');\nconst name = index >= 0 ? process.argv[index + 1] : '';\nconsole.log(${JSON.stringify(greeting)} + ', ' + name + '.');\n`;
   return JSON.stringify({
@@ -205,6 +222,45 @@ function roundResponse(greeting) {
     memory_candidates: [],
     tool_requests: [{ tool: "workspace_edit", action: "write", path: "deliverables/greeting.js", code, reason: "Create or update the requested program." }]
   });
+}
+
+function makeZip(entries) {
+  const localParts = [];
+  const centralParts = [];
+  let offset = 0;
+  for (const entry of entries) {
+    const name = Buffer.from(entry.name, "utf8");
+    const data = Buffer.from(entry.content, "utf8");
+    const compressed = zlib.deflateRawSync(data);
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0);
+    local.writeUInt16LE(20, 4);
+    local.writeUInt16LE(8, 8);
+    local.writeUInt32LE(compressed.length, 18);
+    local.writeUInt32LE(data.length, 22);
+    local.writeUInt16LE(name.length, 26);
+    localParts.push(local, name, compressed);
+
+    const central = Buffer.alloc(46);
+    central.writeUInt32LE(0x02014b50, 0);
+    central.writeUInt16LE(20, 4);
+    central.writeUInt16LE(20, 6);
+    central.writeUInt16LE(8, 10);
+    central.writeUInt32LE(compressed.length, 20);
+    central.writeUInt32LE(data.length, 24);
+    central.writeUInt16LE(name.length, 28);
+    central.writeUInt32LE(offset, 42);
+    centralParts.push(central, name);
+    offset += local.length + name.length + compressed.length;
+  }
+  const centralDirectory = Buffer.concat(centralParts);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(entries.length, 8);
+  end.writeUInt16LE(entries.length, 10);
+  end.writeUInt32LE(centralDirectory.length, 12);
+  end.writeUInt32LE(offset, 16);
+  return Buffer.concat([...localParts, centralDirectory, end]);
 }
 
 function writeOpenAiStream(res, text) {

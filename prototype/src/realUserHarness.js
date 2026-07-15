@@ -5,6 +5,7 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { once } from "node:events";
+import { readZipArchiveEntries } from "./archiveTools.js";
 import { createSeededCampaignScenario, EXTERNAL_ROOT_TOKEN, publicCampaignScenario } from "./realUserCampaign.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -583,6 +584,13 @@ export async function verifyCampaignDeliverable(verifier = {}, groupPath) {
       checks.push(check("csv_headers", JSON.stringify(headers) === JSON.stringify(expectedHeaders), JSON.stringify(headers)));
       checks.push(check("csv_rows", JSON.stringify(records) === JSON.stringify(expectedRows), JSON.stringify(records)));
     } catch (error) { checks.push(check("csv_parses", false, error.message)); }
+  } else if (verifier.kind === "zip" && fs.existsSync(filePath)) {
+    try {
+      const entries = readZipArchiveEntries(filePath).map((entry) => ({ name: entry.name, content: entry.content.toString("utf8") }));
+      const expected = (verifier.entries || []).map((entry) => ({ name: String(entry.name), content: String(entry.content) }));
+      checks.push(check("zip_entries", JSON.stringify(entries.map((entry) => entry.name)) === JSON.stringify(expected.map((entry) => entry.name)), JSON.stringify(entries.map((entry) => entry.name))));
+      checks.push(check("zip_contents", JSON.stringify(entries) === JSON.stringify(expected), `${entries.length} extracted entries`));
+    } catch (error) { checks.push(check("zip_parses", false, error.message)); }
   } else if (["node_cli", "python_cli"].includes(verifier.kind)) {
     const command = verifier.kind === "python_cli" ? "python" : process.execPath;
     const result = await runProcess(command, [filePath, ...(verifier.args || [])]);

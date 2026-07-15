@@ -41,6 +41,15 @@ test("external-workspace campaigns keep a runtime path placeholder out of the de
   assert.equal(JSON.stringify(publicCampaignScenario(campaign)).includes("{{EXTERNAL_ROOT}}"), true);
 });
 
+test("archive campaigns retain source files and expected ZIP contents outside the public script", () => {
+  const campaign = createSeededCampaignScenario({ seed: 5 });
+  const publicScenario = publicCampaignScenario(campaign);
+  assert.equal(campaign.task.id, "zip-archive");
+  assert.equal(campaign.fixtures.length, 3);
+  assert.equal(campaign.hiddenVerifier.kind, "zip");
+  assert.equal(JSON.stringify(publicScenario).includes(campaign.hiddenVerifier.entries[0].content), false);
+});
+
 test("different seeds select deterministic task variants while preserving the campaign contract", () => {
   const campaigns = [1, 2, 3, 4, 5, 6].map((seed) => createSeededCampaignScenario({ seed }));
   assert.equal(new Set(campaigns.map((campaign) => campaign.task.id)).size >= 2, true);

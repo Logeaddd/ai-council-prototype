@@ -107,6 +107,14 @@ export function inspectZipArchive(filePath) {
   };
 }
 
+export function readZipArchiveEntries(filePath) {
+  const buffer = fs.readFileSync(filePath);
+  return readZipCentralDirectory(buffer).filter((entry) => !entry.directory).map((entry) => ({
+    name: entry.name,
+    content: readZipEntry(buffer, entry)
+  }));
+}
+
 function readZipCentralDirectory(buffer) {
   const eocdOffset = findEndOfCentralDirectory(buffer);
   const entryCount = buffer.readUInt16LE(eocdOffset + 10);

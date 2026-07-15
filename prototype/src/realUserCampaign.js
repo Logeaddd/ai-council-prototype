@@ -197,7 +197,35 @@ function externalNodeCliTemplate(seed, random) {
   };
 }
 
-const TASK_TEMPLATES = [nodeCliTemplate, pythonCliTemplate, jsonDocumentTemplate, externalNodeCliTemplate, jsonToCsvTemplate];
+function zipArchiveTemplate(seed, random) {
+  const sourceRoot = `inputs/archive-${seed}`;
+  const file = `deliverables/archive-${seed}.zip`;
+  const entries = [
+    { name: "notes.txt", content: `release notes ${seed}\n` },
+    { name: "manifest.json", content: JSON.stringify({ artifact: `archive-${seed}`, version: 1 }, null, 2) + "\n" },
+    { name: "checklist.txt", content: "review\npackage\nverify\n" }
+  ];
+  return {
+    id: "zip-archive",
+    domain: "archive_packaging",
+    deliverable: file,
+    initialQuestion: `Read the source files in ${sourceRoot} and create ${file} as a ZIP archive containing notes.txt. Verify that the archive opens and includes the requested file.`,
+    edits: [
+      { prompt: `Update the existing ZIP so it also contains manifest.json from ${sourceRoot}. Verify the archive structure.` },
+      { prompt: `Update the existing ZIP so it also contains checklist.txt from ${sourceRoot}. Preserve existing requested entries and verify it.` },
+      { prompt: "Use the latest requirements only: keep the requested files at the archive root, without an extra parent directory. Verify the ZIP contents." },
+      { prompt: "Make the final requested archive update, preserve every required source file, and verify the finished ZIP." }
+    ],
+    reversalPrompt: "Use only the latest archive requirements. Do not restore an obsolete directory layout from retained discussion.",
+    recallPrompt: `Inspect ${sourceRoot} and the current ZIP, then continue from the newest packaging requirement.`,
+    finalPrompt: "Apply the final archive requirement and validate the current ZIP one more time.",
+    recoveryVerificationPrompt: `Validate ${file} once more after recovery.`,
+    fixtures: entries.map((entry) => ({ path: `${sourceRoot}/${entry.name}`, content: entry.content })),
+    hiddenVerifier: { kind: "zip", file, entries }
+  };
+}
+
+const TASK_TEMPLATES = [nodeCliTemplate, pythonCliTemplate, jsonDocumentTemplate, externalNodeCliTemplate, jsonToCsvTemplate, zipArchiveTemplate];
 
 function seededRandom(seed) {
   let state = (seed >>> 0) || 1;
