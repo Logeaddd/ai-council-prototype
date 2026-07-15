@@ -462,6 +462,43 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
         response = applyRoundResponseRules(callOutcome.response, agent, round);
         rawTextForMessage = callOutcome.rawTextForMessage;
         errorForMessage = callOutcome.errorForMessage;
+        if (toolLoopStagnated.recoveryRequired && requiresStagnationWorkspaceEdit(agent, question, fileOperationPermissionTier) && !hasWorkspaceMutationRequest(response)) {
+          callOutcome = yield* callRoundModel({
+            options,
+            session,
+            phase: "tool_stagnation_action_recovery",
+            round,
+            agent,
+            memberContext: followupContext,
+            messages: [...followupMessages, {
+              role: "user",
+              content: "Your stagnation recovery did not include a workspace_edit write, append, replace, or move action. Do not call execute_command, API, search, read, Git, test, or browser tools. Call workspace_edit now to make the required concrete file change."
+            }],
+            timeoutMs: group.settings.agentTimeoutMs,
+            toolIteration: toolIterations,
+            nativeToolPermissionTier: fileOperationPermissionTier,
+            nativeToolChoice: "required"
+          });
+          response = applyRoundResponseRules(callOutcome.response, agent, round);
+          rawTextForMessage = callOutcome.rawTextForMessage;
+          errorForMessage = callOutcome.errorForMessage;
+          if (!hasWorkspaceMutationRequest(response)) {
+            session.toolContinuation = {
+              agentId: agent.id,
+              round,
+              completedIterations: toolIterations,
+              reason: "stagnation_recovery_missing_workspace_mutation",
+              pendingRequests: response.tool_requests || []
+            };
+            response = {
+              status: "speak",
+              argument: "Stagnation recovery did not produce the required concrete workspace action.",
+              objections: ["stagnation_recovery_missing_workspace_mutation"],
+              confidence: 0,
+              memory_candidates: []
+            };
+          }
+        }
         processResponseFileOperations(response);
       }
 
@@ -1000,6 +1037,18 @@ function buildStagnantToolLoopRecoveryInstruction(agent, question, toolFollowupI
       ? "You are delivering a file task. Stop repeating inspection, search, API, Git or verification calls. Use the evidence already returned and make the concrete workspace edit or repair needed for the current requirement. Do not return another investigation plan."
       : "Stop repeating inspection, search, API, Git or verification calls. Use the evidence already returned and take a materially different next action, or state the concrete blocker with its evidence.";
   return `${toolFollowupInstruction}\n\n[Stagnation recovery]\nSeveral consecutive tool turns produced no material workspace progress. ${roleDirective}`;
+}
+
+function requiresStagnationWorkspaceEdit(agent, question, permissionTier) {
+  return permissionTier === "full" && !isReviewerLike(agent) && isFileDeliveryTask(question);
+}
+
+function hasWorkspaceMutationRequest(response = {}) {
+  return (response.tool_requests || []).some((request) => (
+    request.tool === "workspace_edit"
+    && ["write", "append", "replace", "move"].includes(String(request.action || ""))
+    && (String(request.code || "").length > 0 || String(request.content || "").length > 0 || String(request.newText || "").length > 0 || String(request.destination || "").length > 0)
+  ));
 }
 
 function abortReasonCode(signal) {

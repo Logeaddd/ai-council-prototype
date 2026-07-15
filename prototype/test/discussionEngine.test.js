@@ -1866,10 +1866,11 @@ test("an explicit user tool-iteration limit pauses with continuation instead of 
 test("repeated non-progress inspection recovers without imposing a limit on distinct useful tool work", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-tool-stagnation-"));
   fs.writeFileSync(path.join(tmp, "group.json"), JSON.stringify({
-    permissions: { defaultTier: "tool", seatTiers: { worker: "tool" } }
+    permissions: { defaultTier: "full", seatTiers: { worker: "full" } }
   }), "utf8");
   fs.writeFileSync(path.join(tmp, "brief.md"), "STAGNATION_FACT", "utf8");
   let recoveryPromptSeen = false;
+  let forcedWriteSent = false;
   const server = http.createServer(async (req, res) => {
     const body = JSON.parse(await readRequestBody(req));
     const prompt = JSON.stringify(body.messages || []);
@@ -1877,9 +1878,25 @@ test("repeated non-progress inspection recovers without imposing a limit on dist
       writeOpenAiStream(res, JSON.stringify({ answer: "Stopped repeated inspection and reported the evidence.", consensus_score: 1, supporting_agents: ["Worker"], dissenting_agents: [], minority_report: "", risks: [], next_actions: [], selected_file_operation_ids: [], memory_candidates: [] }));
       return;
     }
+    if (prompt.includes("did not include a workspace_edit")) {
+      forcedWriteSent = true;
+      writeOpenAiStream(res, JSON.stringify({
+        status: "speak",
+        argument: "Applying the required concrete correction.",
+        tool_requests: [{ tool: "workspace_edit", action: "write", path: "brief.md", code: "RECOVERED_FACT\n", reason: "Apply the required concrete recovery edit." }],
+        objections: [],
+        confidence: 1,
+        memory_candidates: []
+      }));
+      return;
+    }
     if (prompt.includes("[Stagnation recovery]")) {
       recoveryPromptSeen = true;
       writeOpenAiStream(res, JSON.stringify({ status: "speak", argument: "The same file has already been inspected repeatedly; no further tool call is useful.", objections: [], confidence: 1, memory_candidates: [] }));
+      return;
+    }
+    if (forcedWriteSent && prompt.includes("Tool results from your previous request are now available")) {
+      writeOpenAiStream(res, JSON.stringify({ status: "speak", argument: "The concrete recovery edit completed.", objections: [], confidence: 1, memory_candidates: [] }));
       return;
     }
     writeOpenAiStream(res, JSON.stringify({
@@ -1902,7 +1919,9 @@ test("repeated non-progress inspection recovers without imposing a limit on dist
     const result = await runCouncil("Inspect the supplied file and report the result.", group, tmp, { groupPath: tmp });
 
     assert.equal(recoveryPromptSeen, true);
-    assert.equal(result.session.toolExecutionResults.length, 4);
+    assert.equal(forcedWriteSent, true);
+    assert.equal(result.session.toolExecutionResults.length, 5);
+    assert.equal(fs.readFileSync(path.join(tmp, "brief.md"), "utf8"), "RECOVERED_FACT\n");
     assert.equal(result.session.messages[0].response.tool_requests?.length || 0, 0);
     assert.equal(result.session.toolContinuation, undefined);
   } finally {
