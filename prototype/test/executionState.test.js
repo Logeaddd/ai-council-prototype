@@ -264,6 +264,13 @@ test("review directive is not overridden by delivery words inside the supplied p
   assert.equal(isDeliveryTask(question), false);
 });
 
+test("inspect-then-continue instructions for a current artifact remain delivery work", () => {
+  assert.equal(isDeliveryTask("Inspect the retained API task context and current deliverables/catalog-6.json, then continue from the newest requirement without creating a replacement artifact."), true);
+  assert.equal(isDeliveryTask("Inspect current output.json only; do not modify or change the file."), false);
+  assert.equal(isDeliveryTask("检查现有 output.json，然后继续处理最新要求，不要创建替代文件。"), true);
+  assert.equal(isDeliveryTask("只检查现有 output.json，不要修改文件。"), false);
+});
+
 test("delivery classification requires an explicit delivery action", () => {
   assert.equal(isDeliveryTask("Fix the code and build the JAR."), true);
   assert.equal(isDeliveryTask("Update the existing catalog JSON to preserve every collected item."), true);
