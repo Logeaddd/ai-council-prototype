@@ -94,6 +94,50 @@ export function extractArchiveTool(request = {}, options = {}) {
   };
 }
 
+export function createArchiveTool(request = {}, options = {}) {
+  const groupRoot = requireGroupRoot(options.groupPath);
+  const output = resolveOutputArchive(groupRoot, request.path || request.outputPath || request.archivePath);
+  const inputs = Array.isArray(request.files) && request.files.length
+    ? request.files
+    : Array.isArray(request.paths) && request.paths.length
+      ? request.paths
+      : [request.source || request.inputPath];
+  const entries = [];
+  for (const input of inputs) {
+    const item = resolveWorkspaceFileOrDirectory(groupRoot, input, "archive input");
+    collectArchiveEntries(groupRoot, item.path, item.relativePath, entries, output.path);
+  }
+  if (!entries.length) throw toolError("empty_archive", "At least one workspace file is required to create an archive.");
+  fs.mkdirSync(path.dirname(output.path), { recursive: true });
+  const chunks = [];
+  const central = [];
+  let offset = 0;
+  for (const entry of entries) {
+    const name = Buffer.from(entry.name, "utf8");
+    const data = fs.readFileSync(entry.path);
+    const compressed = zlib.deflateRawSync(data);
+    const method = compressed.length < data.length ? 8 : 0;
+    const payload = method === 8 ? compressed : data;
+    const crc = crc32(data);
+    const local = Buffer.alloc(30 + name.length);
+    local.writeUInt32LE(LOCAL_SIGNATURE, 0); local.writeUInt16LE(20, 4); local.writeUInt16LE(0, 6);
+    local.writeUInt16LE(method, 8); local.writeUInt16LE(0, 10); local.writeUInt16LE(0, 12);
+    local.writeUInt32LE(crc, 14); local.writeUInt32LE(payload.length, 18); local.writeUInt32LE(data.length, 22);
+    local.writeUInt16LE(name.length, 26); local.writeUInt16LE(0, 28); name.copy(local, 30);
+    chunks.push(local, payload);
+    const header = Buffer.alloc(46 + name.length);
+    header.writeUInt32LE(CENTRAL_SIGNATURE, 0); header.writeUInt16LE(20, 4); header.writeUInt16LE(20, 6);
+    header.writeUInt16LE(0, 8); header.writeUInt16LE(method, 10); header.writeUInt32LE(crc, 16);
+    header.writeUInt32LE(payload.length, 20); header.writeUInt32LE(data.length, 24); header.writeUInt16LE(name.length, 28);
+    header.writeUInt32LE(offset, 42); name.copy(header, 46); central.push(header); offset += local.length + payload.length;
+  }
+  const centralBuffer = Buffer.concat(central);
+  const eocd = Buffer.alloc(22); eocd.writeUInt32LE(EOCD_SIGNATURE, 0); eocd.writeUInt16LE(entries.length, 8);
+  eocd.writeUInt16LE(entries.length, 10); eocd.writeUInt32LE(centralBuffer.length, 12); eocd.writeUInt32LE(offset, 16);
+  fs.writeFileSync(output.path, Buffer.concat([...chunks, centralBuffer, eocd]));
+  return { ok: true, source: "local_archive_tool", archivePath: output.relativePath, entries: entries.length, totalBytes: safeFileSize(output.path) };
+}
+
 export function inspectZipArchive(filePath) {
   const buffer = fs.readFileSync(filePath);
   const entries = readZipCentralDirectory(buffer);
@@ -184,6 +228,48 @@ function resolveWorkspaceFile(groupRoot, relativePath, label) {
     path: fs.realpathSync.native(candidate),
     relativePath: normalizeRelative(groupRoot, candidate)
   };
+}
+
+function resolveWorkspaceFileOrDirectory(groupRoot, relativePath, label) {
+  const raw = requireRelativePath(relativePath, label);
+  const candidate = path.resolve(groupRoot, raw);
+  if (!isInsidePath(groupRoot, candidate) || !fs.existsSync(candidate)) throw toolError("archive_input_not_found", `${label} was not found.`);
+  assertSafeWorkspacePath(groupRoot, candidate);
+  return { path: fs.realpathSync.native(candidate), relativePath: normalizeRelative(groupRoot, candidate) };
+}
+
+function resolveOutputArchive(groupRoot, relativePath) {
+  const raw = requireRelativePath(relativePath, "archive output");
+  if (path.extname(raw).toLowerCase() !== ".zip") throw toolError("unsupported_archive_type", "Created archives must use the .zip extension.");
+  const candidate = path.resolve(groupRoot, raw);
+  if (!isInsidePath(groupRoot, candidate)) throw toolError("path_escape_denied", "Archive output must stay inside the group workspace.");
+  assertSafeWorkspacePath(groupRoot, candidate);
+  return { path: candidate, relativePath: normalizeRelative(groupRoot, candidate) };
+}
+
+function collectArchiveEntries(groupRoot, filePath, relativePath, entries, outputPath) {
+  const realPath = fs.realpathSync.native(filePath);
+  if (!isInsidePath(groupRoot, realPath)) throw toolError("path_escape_denied", "Archive inputs must stay inside the group workspace after resolving links.");
+  if (path.resolve(realPath) === path.resolve(outputPath)) return;
+  const stat = fs.statSync(realPath);
+  if (stat.isFile()) { entries.push({ path: realPath, name: relativePath.replaceAll("\\", "/") }); return; }
+  if (!stat.isDirectory()) return;
+  for (const child of fs.readdirSync(realPath).sort()) {
+    const childPath = path.join(realPath, child);
+    const childRelative = normalizeRelative(groupRoot, childPath);
+    assertSafeWorkspacePath(groupRoot, childPath);
+    collectArchiveEntries(groupRoot, childPath, childRelative, entries, outputPath);
+  }
+}
+
+function crc32(buffer) {
+  let crc = 0xffffffff;
+  for (const byte of buffer) { crc ^= byte; for (let bit = 0; bit < 8; bit++) crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1)); }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function safeFileSize(filePath) {
+  try { return fs.statSync(filePath).size; } catch { return 0; }
 }
 
 function resolveDestination(groupRoot, relativePath) {

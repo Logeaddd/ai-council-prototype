@@ -41,9 +41,7 @@ test("general-purpose executor matrix provisions tools and verifies source data 
   });
   assert.deepEqual(edit.results.map((item) => item.status), ["completed", "completed"]);
 
-  const command = process.platform === "win32"
-    ? "docmaker output/report.pdf; Compress-Archive -Path output/result.json,output/tool.py -DestinationPath output/package.zip -Force"
-    : "docmaker output/report.pdf && zip -j output/package.zip output/result.json output/tool.py";
+  const command = process.platform === "win32" ? "docmaker output/report.pdf" : "docmaker output/report.pdf";
   const built = await executeToolRequests({
     permissionTier: "full",
     groupPath,
@@ -52,10 +50,18 @@ test("general-purpose executor matrix provisions tools and verifies source data 
     requests: [{ tool: "execute_command", command, shell: process.platform === "win32" ? "powershell" : "sh", reason: "Generate document and package outputs." }]
   });
   assert.equal(built.results[0].status, "completed");
+  const archive = await executeToolRequests({
+    permissionTier: "full",
+    groupPath,
+    agent: { id: "executor", name: "Executor" },
+    round: 1,
+    requests: [{ tool: "create_archive", path: "output/package.zip", files: ["output/result.json", "output/tool.py"], reason: "Package the generated outputs." }]
+  });
+  assert.equal(archive.results[0].status, "completed", JSON.stringify(archive.results[0]));
 
   const session = {
     finalDecision: { answer: "Created requested outputs.", final_state: "ready_to_execute", blocking_issues: [], risks: [] },
-    toolExecutionResults: [...edit.results, ...built.results],
+    toolExecutionResults: [...edit.results, ...built.results, ...archive.results],
     fileOperationExecutionResults: []
   };
   const report = enforceRequestedArtifactRequirements({

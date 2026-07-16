@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
+import { fileURLToPath } from "node:url";
 import { evaluateProductHarness } from "../src/productHarness.js";
 
 test("product harness cannot complete a real benchmark gate without a passed evidence report", () => {
@@ -84,7 +85,7 @@ test("product harness rejects fake campaign reports and accepts retained real-pr
 });
 
 test("repository product harness keeps T105 incomplete without a paid Forge pass", () => {
-  const root = path.resolve(import.meta.dirname, "..");
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   const manifestPath = path.join(root, "config", "product-harness.json");
   const report = evaluateProductHarness({
     root,

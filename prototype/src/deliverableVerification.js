@@ -11,7 +11,8 @@ const MUTATING_TOOL_NAMES = new Set([
   "install_package",
   "run_tests",
   "git_operation",
-  "extract_archive"
+  "extract_archive",
+  "create_archive"
 ]);
 const INSPECTION_TOOL_NAMES = new Set([
   "read_file",
@@ -243,6 +244,7 @@ function workspaceArtifactPaths(record = {}) {
     const observedPath = String(record.path || record.result?.path || "").trim();
     if (observedPath) changedPaths.push(observedPath);
   }
+  if (record.tool === "create_archive" && record.result?.archivePath) changedPaths.push(String(record.result.archivePath));
   return [...new Set(changedPaths)];
 }
 

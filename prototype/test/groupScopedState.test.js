@@ -45,7 +45,7 @@ test("group-specific member config and API keys go through guarded server endpoi
 });
 
 test("stale reviewer role text is not sent to models after reviewer flags are cleared", async () => {
-  const { workspaceGroupToRuntimeGroup } = await import("../renderer/lib/council-live.ts");
+  const { workspaceGroupToRuntimeGroup } = await import("../renderer/lib/runtime-group.mjs");
   const runtime = workspaceGroupToRuntimeGroup({
     groupFolderName: "bug-repro",
     seats: [

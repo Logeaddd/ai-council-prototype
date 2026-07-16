@@ -12,7 +12,7 @@ export const CAPABILITY_FAMILIES = Object.freeze([
 const FAMILY_IDS = new Set(CAPABILITY_FAMILIES.map((item) => item.id));
 const TOOL_FAMILY = new Map([
   ...mapTools("web", ["web_search", "fetch_url", "api_request"]),
-  ...mapTools("files", ["list_directory", "read_file", "search_files", "grep_content", "extract_archive"]),
+  ...mapTools("files", ["list_directory", "read_file", "search_files", "grep_content", "extract_archive", "create_archive"]),
   ...mapTools("automation", ["execute_command", "process_control", "run_code", "install_package", "run_tests", "git_operation"]),
   ...mapTools("browser", ["browser_control"]),
   ...mapTools("database", ["database_query"]),

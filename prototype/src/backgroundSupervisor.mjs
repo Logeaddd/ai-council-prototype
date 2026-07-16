@@ -5,7 +5,7 @@ import { spawn } from "node:child_process";
 const HEARTBEAT_MS = 1000;
 const STOP_POLL_MS = 200;
 
-process.once("message", (config) => {
+receiveConfig().then((config) => {
   supervise(config).catch((error) => {
     try {
       writeState(config?.statePath, {
@@ -16,10 +16,19 @@ process.once("message", (config) => {
         finishedAt: new Date().toISOString()
       });
     } catch {}
-    sendParent({ type: "failed", error: error.message || "Background supervisor failed." });
     process.exitCode = 1;
   });
 });
+
+async function receiveConfig() {
+  if (process.send) {
+    return new Promise((resolve) => process.once("message", resolve));
+  }
+  let input = "";
+  process.stdin.setEncoding("utf8");
+  for await (const chunk of process.stdin) input += chunk;
+  return JSON.parse(input);
+}
 
 async function supervise(config = {}) {
   validateConfig(config);
@@ -85,7 +94,6 @@ async function supervise(config = {}) {
       finishedAt: new Date().toISOString(),
       heartbeatAt: new Date().toISOString()
     });
-    sendParent({ type: "failed", error: error.message || "Background command failed to start." });
     cleanupAndExit(1);
   });
   child.on("close", (exitCode, signal) => {
@@ -108,14 +116,11 @@ async function supervise(config = {}) {
   });
 
   persist();
-  sendParent({ type: "started", pid: child.pid, supervisorPid: process.pid });
-  process.disconnect?.();
 
   const heartbeat = setInterval(() => {
     if (finished) return;
     persist({ status: stopRequested ? "stopping" : "running", heartbeatAt: new Date().toISOString() });
   }, HEARTBEAT_MS);
-  heartbeat.unref();
 
   const control = setInterval(() => {
     if (finished || !fs.existsSync(config.stopPath)) return;
@@ -127,7 +132,6 @@ async function supervise(config = {}) {
     persist({ status: "stopping", stopRequestedAt: stoppingAt, heartbeatAt: stoppingAt });
     killProcessTree(child);
   }, STOP_POLL_MS);
-  control.unref();
 
   function cleanupAndExit(code) {
     clearInterval(heartbeat);
@@ -286,10 +290,4 @@ function safeFileSize(filePath) {
   } catch {
     return 0;
   }
-}
-
-function sendParent(message) {
-  try {
-    process.send?.(message);
-  } catch {}
 }

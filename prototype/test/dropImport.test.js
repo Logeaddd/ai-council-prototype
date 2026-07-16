@@ -33,7 +33,9 @@ function fileEntry(name, content) {
     isDirectory: false,
     name,
     file(success) {
-      success(new File([content], name, { type: "text/plain" }));
+      const blob = new Blob([content], { type: "text/plain" });
+      Object.defineProperty(blob, "name", { value: name });
+      success(blob);
     },
   };
 }

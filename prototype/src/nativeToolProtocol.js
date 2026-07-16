@@ -7,7 +7,7 @@ const TOOL_TIER_TOOLS = [
 ];
 const FULL_TIER_TOOLS = [
   ...TOOL_TIER_TOOLS, "workspace_edit", "skill_list", "skill_search", "skill_install", "skill_enable",
-  "skill_disable", "skill_remove", "extract_archive", "execute_command", "process_control", "run_code",
+  "skill_disable", "skill_remove", "extract_archive", "create_archive", "execute_command", "process_control", "run_code",
   "install_package", "provision_tool", "run_tests", "git_operation", "browser_control", "mcp_search_npm", "mcp_install_npm",
   "mcp_uninstall", "mcp_list_tools", "mcp_call", "mcp_list_resources", "mcp_read_resource",
   "mcp_list_prompts", "mcp_get_prompt"

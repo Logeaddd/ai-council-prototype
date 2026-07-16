@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { fork } from "node:child_process";
+import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { makeId, nowIso } from "./types.js";
 
@@ -41,20 +41,16 @@ export async function startManagedBackgroundProcess(options = {}) {
 
   return new Promise((resolve) => {
     let settled = false;
-    const supervisor = fork(SUPERVISOR_PATH, [], {
+    const supervisor = spawn(process.execPath, [SUPERVISOR_PATH], {
       detached: true,
       windowsHide: true,
-      execArgv: [],
-      stdio: ["ignore", "ignore", "ignore", "ipc"]
+      stdio: ["pipe", "ignore", "ignore"]
     });
     const finish = (result) => {
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
       supervisor.removeAllListeners();
-      try {
-        supervisor.disconnect();
-      } catch {}
       supervisor.unref();
       resolve({ processId, ...result });
     };
@@ -81,22 +77,24 @@ export async function startManagedBackgroundProcess(options = {}) {
       if (settled) return;
       fail("background_supervisor_exited", `Background process supervisor exited before startup confirmation (code=${code}, signal=${signal || "none"}).`);
     });
-    supervisor.on("message", (message) => {
-      if (message?.type === "failed") {
-        fail("background_command_spawn_failed", message.error || "Background command failed to start.");
+    const poll = setInterval(() => {
+      const state = readJson(paths.statePath) || {};
+      if (state.status === "failed") {
+        clearInterval(poll);
+        fail(state.code || "background_command_spawn_failed", state.error || "Background command failed to start.");
         return;
       }
-      if (message?.type !== "started") return;
-      const state = readJson(paths.statePath) || {};
+      if (state.status !== "running" || !state.pid || !state.supervisorPid) return;
+      clearInterval(poll);
       finish({
         ok: true,
-        pid: message.pid || state.pid,
-        supervisorPid: message.supervisorPid || state.supervisorPid,
+        pid: state.pid,
+        supervisorPid: state.supervisorPid,
         status: state.status || "running",
         process: publicProcessState(state)
       });
-    });
-    supervisor.send({
+    }, 25);
+    supervisor.stdin.end(JSON.stringify({
       processId,
       processDir: paths.processDir,
       statePath: paths.statePath,
@@ -107,7 +105,7 @@ export async function startManagedBackgroundProcess(options = {}) {
       cwd: options.cwd,
       env: options.env,
       maxOutputBytes: clampNumber(options.maxOutputBytes, DEFAULT_OUTPUT_BYTES, 1024, MAX_OUTPUT_BYTES)
-    });
+    }));
   });
 }
 

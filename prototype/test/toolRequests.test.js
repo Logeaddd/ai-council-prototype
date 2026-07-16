@@ -543,6 +543,45 @@ test("extract_archive blocks zip slip entries", async () => {
   assert.equal(fs.readFileSync(path.join(tmp, "out", "safe.txt"), "utf8"), "SAFE_WRITE");
 });
 
+test("create_archive packages workspace directories without self-inclusion", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-create-archive-"));
+  fs.mkdirSync(path.join(tmp, "output"), { recursive: true });
+  fs.writeFileSync(path.join(tmp, "output", "result.txt"), "ARCHIVE_RESULT", "utf8");
+  fs.writeFileSync(path.join(tmp, "output", "package.zip"), "old", "utf8");
+
+  const result = await executeToolRequests({
+    permissionTier: "full",
+    groupPath: tmp,
+    agent: { id: "full", name: "Full" },
+    round: 1,
+    requests: [{ tool: "create_archive", path: "output/package.zip", paths: ["output"], reason: "Package output." }]
+  });
+
+  assert.equal(result.results[0].status, "completed", JSON.stringify(result.results[0]));
+  const extracted = await executeToolRequests({
+    permissionTier: "full", groupPath: tmp, agent: { id: "full", name: "Full" }, round: 1,
+    requests: [{ tool: "extract_archive", path: "output/package.zip", destination: "unpacked", reason: "Verify package." }]
+  });
+  assert.equal(extracted.results[0].status, "completed");
+  assert.equal(fs.readFileSync(path.join(tmp, "unpacked", "output", "result.txt"), "utf8"), "ARCHIVE_RESULT");
+  assert.equal(fs.existsSync(path.join(tmp, "unpacked", "output", "package.zip")), false);
+});
+
+test("create_archive rejects workspace symlinks that resolve outside", { skip: process.platform === "win32" }, async (t) => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-create-archive-link-"));
+  const outside = path.join(os.tmpdir(), `archive-outside-${Date.now()}.txt`);
+  fs.writeFileSync(outside, "PRIVATE", "utf8");
+  fs.symlinkSync(outside, path.join(tmp, "outside-link.txt"));
+  t.after(() => fs.rmSync(outside, { force: true }));
+  const result = await executeToolRequests({
+    permissionTier: "full", groupPath: tmp, agent: { id: "full", name: "Full" }, round: 1,
+    requests: [{ tool: "create_archive", path: "package.zip", paths: ["outside-link.txt"], reason: "Package linked file." }]
+  });
+  assert.equal(result.results[0].status, "failed");
+  assert.equal(result.results[0].code, "path_escape_denied");
+  assert.equal(fs.existsSync(path.join(tmp, "package.zip")), false);
+});
+
 test("execute_command runs real shell commands for full permission only", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-command-tool-"));
   const denied = await executeToolRequests({

@@ -2,7 +2,7 @@ import { makeId, nowIso } from "./types.js";
 import { createHash } from "node:crypto";
 import { fetchPublicUrl, searchWeb } from "./webTools.js";
 import { executeFileTool } from "./fileTools.js";
-import { extractArchiveTool } from "./archiveTools.js";
+import { createArchiveTool, extractArchiveTool } from "./archiveTools.js";
 import { executeCommandTool } from "./commandTools.js";
 import { processControlTool } from "./processTools.js";
 import { runCodeTool } from "./codeRunTools.js";
@@ -53,6 +53,7 @@ const ALLOWED_TOOLS = new Set([
   "search_context",
   "load_context",
   "extract_archive",
+  "create_archive",
   "workspace_edit",
   "execute_command",
   "process_control",
@@ -83,7 +84,7 @@ const ALLOWED_TOOLS = new Set([
 ]);
 const FILE_TOOLS = new Set(["list_directory", "read_file", "search_files", "grep_content"]);
 const CONTEXT_TOOLS = new Set(["search_context", "load_context"]);
-const ARCHIVE_TOOLS = new Set(["extract_archive"]);
+const ARCHIVE_TOOLS = new Set(["extract_archive", "create_archive"]);
 const WORKSPACE_EDIT_TOOLS = new Set(["workspace_edit"]);
 const COMMAND_TOOLS = new Set(["execute_command"]);
 const PROCESS_TOOLS = new Set(["process_control"]);
@@ -97,7 +98,7 @@ const BROWSER_TOOLS = new Set(["browser_control"]);
 const DATABASE_TOOLS = new Set(["database_query"]);
 const MCP_TOOLS = new Set(["mcp_list_tools", "mcp_call", "mcp_list_resources", "mcp_read_resource", "mcp_list_prompts", "mcp_get_prompt", "mcp_search_npm", "mcp_install_npm", "mcp_uninstall"]);
 const SKILL_TOOLS = new Set(["skill_read", "skill_list", "skill_search", "skill_install", "skill_enable", "skill_disable", "skill_remove"]);
-const FULL_PERMISSION_TOOLS = new Set(["extract_archive", "workspace_edit", "execute_command", "process_control", "run_code", "install_package", "provision_tool", "run_tests", "git_operation", "browser_control", "mcp_list_tools", "mcp_call", "mcp_list_resources", "mcp_read_resource", "mcp_list_prompts", "mcp_get_prompt", "mcp_search_npm", "mcp_install_npm", "mcp_uninstall", "skill_list", "skill_search", "skill_install", "skill_enable", "skill_disable", "skill_remove"]);
+const FULL_PERMISSION_TOOLS = new Set(["extract_archive", "create_archive", "workspace_edit", "execute_command", "process_control", "run_code", "install_package", "provision_tool", "run_tests", "git_operation", "browser_control", "mcp_list_tools", "mcp_call", "mcp_list_resources", "mcp_read_resource", "mcp_list_prompts", "mcp_get_prompt", "mcp_search_npm", "mcp_install_npm", "mcp_uninstall", "skill_list", "skill_search", "skill_install", "skill_enable", "skill_disable", "skill_remove"]);
 
 export function normalizeToolRequests(value) {
   if (!Array.isArray(value)) return [];
@@ -553,6 +554,10 @@ async function executeOne(request, options) {
         maxArchiveFileBytes: options.maxArchiveFileBytes,
         maxArchiveTotalBytes: options.maxArchiveTotalBytes
       });
+      return resultRecord(request, { status: "completed", result });
+    }
+    if (request.tool === "create_archive") {
+      const result = createArchiveTool(request, { groupPath: options.groupPath });
       return resultRecord(request, { status: "completed", result });
     }
     if (request.tool === "execute_command") {
