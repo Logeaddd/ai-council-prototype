@@ -216,6 +216,7 @@ test("seeded campaign drives HTTP/SSE stages, member disturbances and interrupti
     assert.equal(run.report.externalWorkspacePath.startsWith(run.groupPath), false);
     assert.equal(run.report.timeline.some((item) => item.mutation === "reorder" && item.result === "completed"), true);
     assert.equal(JSON.stringify(run.report).includes("test-key"), false);
+    assert.deepEqual(findSecretFiles(run.runDir, "test-key"), []);
   } finally {
     await close(provider);
     fs.rmSync(outputDir, { recursive: true, force: true });
@@ -340,6 +341,7 @@ test("API collection campaign uses the real API tool, persists its evidence, and
     assert.equal(verifyCampaignToolEvidence(campaign.hiddenVerifier, sessions).passed, false, "the unmaterialized endpoint token cannot match persisted runtime tool evidence");
     assert.equal(verifyCampaignToolEvidence({ ...campaign.hiddenVerifier, apiUrl: run.report.networkExercise.endpoint }, sessions).passed, true);
     assert.equal(JSON.stringify(run.report).includes("test-key"), false);
+    assert.deepEqual(findSecretFiles(run.runDir, "test-key"), []);
   } finally {
     await close(provider);
     fs.rmSync(outputDir, { recursive: true, force: true });
@@ -356,6 +358,19 @@ function roundResponse(greeting) {
     memory_candidates: [],
     tool_requests: [{ tool: "workspace_edit", action: "write", path: "deliverables/greeting.js", code, reason: "Create or update the requested program." }]
   });
+}
+
+function findSecretFiles(root, secret) {
+  const matches = [];
+  const visit = (directory) => {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const target = path.join(directory, entry.name);
+      if (entry.isDirectory()) visit(target);
+      else if (/\.(?:json|jsonl|log|txt|md)$/i.test(entry.name) && fs.readFileSync(target, "utf8").includes(secret)) matches.push(target);
+    }
+  };
+  visit(root);
+  return matches;
 }
 
 function campaignArtifactResponse(file, artifact, verifyCommand) {

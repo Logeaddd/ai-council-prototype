@@ -18,6 +18,7 @@ export async function runSeededRealUserBaseline(options = {}) {
   const group = structuredClone(options.group || {});
   const scenario = normalizeScenario(options.scenario || createMinimumBaselineScenario(options.seed));
   assertRunnableGroup(group, { allowMockProvider: options.allowMockProvider === true });
+  const providerEnvironment = moveGroupApiKeysToEnvironment(group, options.environment);
   const outputRoot = path.resolve(options.outputDir || path.join(prototypeRoot, "eval", "real-user"));
   const runDir = path.join(outputRoot, `${safeId(scenario.id)}-${Date.now()}`);
   const dataDir = path.join(runDir, "data");
@@ -41,7 +42,7 @@ export async function runSeededRealUserBaseline(options = {}) {
     server = await startHarnessServer({
       dataDir,
       workspaceRoot: dataDir,
-      environment: options.environment
+      environment: providerEnvironment
     });
     firstRun = await postCouncilEvents({
       port: server.port,
@@ -60,7 +61,7 @@ export async function runSeededRealUserBaseline(options = {}) {
     server = await startHarnessServer({
       dataDir,
       workspaceRoot: dataDir,
-      environment: options.environment
+      environment: providerEnvironment
     });
 
     continueRun = await postCouncilEvents({
@@ -137,6 +138,7 @@ export async function runSeededRealUserCampaign(options = {}) {
   assertCampaignBudget(options, { allowMockProvider: options.allowMockProvider === true });
   if (options.allowMockProvider !== true) assertHardCampaignBudgetGroup(group);
   if (Number(options.maxModelCalls) > 0) group.settings.maxModelCalls = Number(options.maxModelCalls);
+  const providerEnvironment = moveGroupApiKeysToEnvironment(group, options.environment);
 
   const outputRoot = path.resolve(options.outputDir || path.join(prototypeRoot, "eval", "real-user-campaign"));
   const runDir = path.join(outputRoot, `${safeId(sourceCampaign.id)}-${Date.now()}`);
@@ -158,7 +160,7 @@ export async function runSeededRealUserCampaign(options = {}) {
     prepareGroupWorkspace(groupPath, group);
     prepareCampaignFixtures(groupPath, campaign.fixtures);
     if (campaign.externalWorkspaceRoot) prepareCampaignFixtures(campaign.externalWorkspaceRoot, campaign.externalFixtures);
-    const environment = harnessEnvironment(options.environment, Boolean(apiFixture), options.allowMockProvider === true ? undefined : {
+    const environment = harnessEnvironment(providerEnvironment, Boolean(apiFixture), options.allowMockProvider === true ? undefined : {
       maxCostUsd: options.maxCostUsd,
       maxModelCalls: options.maxModelCalls
     });
@@ -285,6 +287,19 @@ export async function runSeededRealUserCampaign(options = {}) {
   } finally {
     if (apiFixture) await stopCampaignApiFixture(apiFixture);
   }
+}
+
+function moveGroupApiKeysToEnvironment(group, environment = {}) {
+  const next = { ...(environment || {}) };
+  for (const agent of Array.isArray(group.agents) ? group.agents : []) {
+    const apiKey = String(agent.apiKey || "");
+    if (!apiKey) continue;
+    const envName = String(agent.apiKeyEnv || `AI_COUNCIL_HARNESS_KEY_${createHash("sha256").update(String(agent.id || agent.name || "agent")).digest("hex").slice(0, 16).toUpperCase()}`);
+    next[envName] = apiKey;
+    agent.apiKeyEnv = envName;
+    delete agent.apiKey;
+  }
+  return next;
 }
 
 export function providerCallMetrics({ attemptedModelCalls = 0, budgetLedger, realProvider = false } = {}) {
