@@ -4,7 +4,13 @@ import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
-import { evaluateProductHarness } from "../src/productHarness.js";
+import { evaluateProductHarness, testSuiteTimeoutMs } from "../src/productHarness.js";
+
+test("product harness has no default full-suite timeout but accepts an explicit test guard", () => {
+  assert.equal(testSuiteTimeoutMs(undefined), undefined);
+  assert.equal(testSuiteTimeoutMs(0), undefined);
+  assert.equal(testSuiteTimeoutMs(300000), 300000);
+});
 
 test("product harness cannot complete a real benchmark gate without a passed evidence report", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-product-harness-"));

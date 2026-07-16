@@ -130,11 +130,12 @@ function runTestSuite(root, options) {
     .map((name) => path.join("test", name));
   const env = { ...process.env };
   delete env.NODE_TEST_CONTEXT;
+  const timeout = testSuiteTimeoutMs(options.testTimeoutMs);
   const result = spawnSync(process.execPath, ["--test", ...testFiles], {
     cwd: root,
     encoding: "utf8",
     windowsHide: true,
-    timeout: Number(options.testTimeoutMs || 120000),
+    ...(timeout ? { timeout } : {}),
     maxBuffer: 32 * 1024 * 1024,
     env
   });
@@ -149,6 +150,11 @@ function runTestSuite(root, options) {
     stderr: String(result.stderr || "").slice(-12000),
     error: result.error ? String(result.error.message || result.error) : ""
   };
+}
+
+export function testSuiteTimeoutMs(value) {
+  const timeout = Number(value);
+  return Number.isFinite(timeout) && timeout > 0 ? timeout : undefined;
 }
 
 function summarizeTestEvidence(value = {}) {
