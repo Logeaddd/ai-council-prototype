@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildToolFollowupInstruction, updateStagnantToolLoopCount } from "../src/discussionEngine.js";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { buildToolFollowupInstruction, hasPersistedAcquiredCapability, updateStagnantToolLoopCount } from "../src/discussionEngine.js";
 
 test("tool follow-up moves from successful acquisition to real usage without exposing a benchmark solution", () => {
   const npm = buildToolFollowupInstruction([{
@@ -55,6 +58,15 @@ test("tool follow-up moves from successful acquisition to real usage without exp
   }]);
   assert.match(guessedDirectory, /Do not invent managed environment paths/);
   assert.match(guessedDirectory, /current existing workspace/);
+
+  const placeholderWorkspace = buildToolFollowupInstruction([{
+    tool: "execute_command",
+    status: "failed",
+    command: "cd /workspace && node render.js",
+    result: { ok: false, exitCode: 2, stderr: "cd: can't cd to /workspace" }
+  }]);
+  assert.match(placeholderWorkspace, /Command tools already start in the current group workspace/);
+  assert.match(placeholderWorkspace, /Remove the guessed cd prefix/);
 });
 
 test("acquired capability followed by read-only wandering triggers action recovery without limiting useful pre-acquisition inspection", () => {
@@ -97,4 +109,27 @@ test("acquired capability followed by read-only wandering triggers action recove
     history: [acquisition]
   });
   assert.deepEqual(mutation, { count: 0, recoveryRequired: false });
+
+  const persisted = updateStagnantToolLoopCount({
+    requests: [{ tool: "list_directory", path: "another-new-location" }],
+    results: [{ tool: "list_directory", status: "completed", result: { ok: true } }],
+    current: 2,
+    seenTargets: new Set(),
+    history: [],
+    capabilityReady: true
+  });
+  assert.deepEqual(persisted, { count: 3, recoveryRequired: true });
+});
+
+test("persisted managed packages remain visible as acquired capability across later user stages", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-persisted-capability-"));
+  try {
+    assert.equal(hasPersistedAcquiredCapability(root), false);
+    const packagePath = path.join(root, "shared", "environments", "npm", "node_modules", "chosen-package");
+    fs.mkdirSync(packagePath, { recursive: true });
+    fs.writeFileSync(path.join(packagePath, "package.json"), "{}", "utf8");
+    assert.equal(hasPersistedAcquiredCapability(root), true);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });

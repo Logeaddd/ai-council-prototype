@@ -447,7 +447,8 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
           rejected: toolResult.rejected,
           current: consecutiveStagnantToolLoops,
           seenTargets: seenToolTargets,
-          history: accumulatedToolResults
+          history: accumulatedToolResults,
+          capabilityReady: hasPersistedAcquiredCapability(options.groupPath)
         });
         consecutiveStagnantToolLoops = toolLoopStagnated.count;
 
@@ -1114,14 +1115,14 @@ function hasMaterialWorkspaceProgress(session = {}) {
   });
 }
 
-export function updateStagnantToolLoopCount({ requests = [], results = [], rejected = [], current = 0, seenTargets = new Set(), history = [] } = {}) {
+export function updateStagnantToolLoopCount({ requests = [], results = [], rejected = [], current = 0, seenTargets = new Set(), history = [], capabilityReady = false } = {}) {
   const material = (results || []).some(hasMaterialWorkspaceChange);
   const actionableFailure = (rejected || []).some((item) => ["permission_denied", "capability_disabled", "invalid_tool"].includes(String(item.code || "")))
     || (results || []).some((item) => item.status === "failed" && !isRepeatableInspectionTool(item));
   const targets = (requests || []).map(toolLoopTarget).filter(Boolean);
   const hasNovelTarget = targets.some((target) => !seenTargets.has(target));
   for (const target of targets) seenTargets.add(target);
-  const acquiredCapabilityReady = hasReadyAcquiredCapability(history);
+  const acquiredCapabilityReady = capabilityReady || hasReadyAcquiredCapability(history);
   const inspectionOnly = results.length > 0 && results.every((item) => item.status === "completed" && isRepeatableInspectionTool(item));
   const count = material || actionableFailure
     ? 0
@@ -1129,6 +1130,41 @@ export function updateStagnantToolLoopCount({ requests = [], results = [], rejec
       ? Number(current || 0) + 1
       : hasNovelTarget ? 0 : Number(current || 0) + 1;
   return { count, recoveryRequired: count >= 3 };
+}
+
+export function hasPersistedAcquiredCapability(groupPath) {
+  if (!groupPath) return false;
+  const npmModules = path.join(groupPath, "shared", "environments", "npm", "node_modules");
+  if (directoryHasEntries(npmModules, new Set([".bin", ".package-lock.json"]))) return true;
+  const managedTools = path.join(groupPath, "shared", "tools");
+  if (directoryHasEntries(managedTools)) return true;
+  const gemPackages = path.join(groupPath, "shared", "environments", "gem", "gems");
+  if (directoryHasEntries(gemPackages)) return true;
+  return hasInstalledPythonPackage(path.join(groupPath, "shared", "environments", "pip", ".venv"));
+}
+
+function directoryHasEntries(directory, ignored = new Set()) {
+  try {
+    return fs.readdirSync(directory, { withFileTypes: true }).some((entry) => !ignored.has(entry.name));
+  } catch {
+    return false;
+  }
+}
+
+function hasInstalledPythonPackage(venvRoot) {
+  const stack = [{ directory: venvRoot, depth: 0 }];
+  while (stack.length) {
+    const current = stack.pop();
+    let entries = [];
+    try { entries = fs.readdirSync(current.directory, { withFileTypes: true }); } catch { continue; }
+    if (path.basename(current.directory).toLowerCase() === "site-packages") {
+      return entries.some((entry) => !/^(?:pip|setuptools|pkg_resources)(?:-|$)/i.test(entry.name) && entry.name !== "__pycache__");
+    }
+    if (current.depth < 5) {
+      for (const entry of entries) if (entry.isDirectory()) stack.push({ directory: path.join(current.directory, entry.name), depth: current.depth + 1 });
+    }
+  }
+  return false;
 }
 
 function hasReadyAcquiredCapability(items = []) {
@@ -1988,6 +2024,14 @@ export function buildToolFollowupInstruction(results = [], rejected = []) {
     const output = `${item.result?.stdout || ""}\n${item.result?.stderr || ""}\n${item.result?.error || item.error || ""}`;
     if (/no such file or directory|cannot find the path|path not found|cannot cd/i.test(output) || /\bcd\s+[^;&|]+\s*(?:&&|;)/i.test(String(item.command || item.result?.command || ""))) {
       lines.push("A direct package install failed after changing into a guessed directory. Do not invent managed environment paths or search for them. Run the package manager from the current existing workspace, or use install_package with the selected manager and consume the environmentPath returned by that tool.");
+    }
+  }
+  for (const item of failedCommands) {
+    const command = String(item.command || item.result?.command || "");
+    const output = `${item.result?.stdout || ""}\n${item.result?.stderr || ""}\n${item.result?.error || item.error || ""}`;
+    if (/\bcd\s+(?:['"])?(?:\/workspace|[A-Za-z]:[\\/]workspace)(?:['"])?\b/i.test(command)
+      || (/\bcd\s+[^;&|]+\s*(?:&&|;)/i.test(command) && /no such file or directory|cannot find the path|path not found|cannot cd|can't cd/i.test(output))) {
+      lines.push("The command failed after changing into a nonexistent or placeholder workspace path. Command tools already start in the current group workspace. Remove the guessed cd prefix and retry the materially necessary command with cwd set only to a real directory returned by file tools.");
     }
   }
   const missingCommands = missingCommandNames(failedCommands);
