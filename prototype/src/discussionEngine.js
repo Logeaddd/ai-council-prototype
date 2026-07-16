@@ -1120,16 +1120,16 @@ export function updateStagnantToolLoopCount({ requests = [], results = [], rejec
   const actionableFailure = (rejected || []).some((item) => ["permission_denied", "capability_disabled", "invalid_tool"].includes(String(item.code || "")))
     || (results || []).some((item) => item.status === "failed" && !isRepeatableInspectionTool(item));
   const targets = (requests || []).map(toolLoopTarget).filter(Boolean);
-  const hasNovelTarget = targets.some((target) => !seenTargets.has(target));
+  const allTargetsNovel = targets.length > 0 && targets.every((target) => !seenTargets.has(target));
   for (const target of targets) seenTargets.add(target);
   const acquiredCapabilityReady = capabilityReady || hasReadyAcquiredCapability(history);
-  const inspectionOnly = results.length > 0 && results.every((item) => item.status === "completed" && isRepeatableInspectionTool(item));
-  const count = material || actionableFailure
+  const inspectionOnly = results.length > 0 && results.every(isRepeatableInspectionTool);
+  const repeatedInspection = inspectionOnly && !allTargetsNovel;
+  const scoreIncrement = acquiredCapabilityReady || repeatedInspection ? 3 : 1;
+  const count = material || actionableFailure || !inspectionOnly
     ? 0
-    : acquiredCapabilityReady && inspectionOnly
-      ? Number(current || 0) + 1
-      : hasNovelTarget ? 0 : Number(current || 0) + 1;
-  return { count, recoveryRequired: count >= 3 };
+    : Number(current || 0) + scoreIncrement;
+  return { count, recoveryRequired: count >= 9 };
 }
 
 export function hasPersistedAcquiredCapability(groupPath) {

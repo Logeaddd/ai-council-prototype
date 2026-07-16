@@ -86,16 +86,16 @@ test("acquired capability followed by read-only wandering triggers action recove
       history: [acquisition]
     });
   }
-  assert.deepEqual(state, { count: 3, recoveryRequired: true });
+  assert.deepEqual(state, { count: 9, recoveryRequired: true });
 
   const preAcquisition = updateStagnantToolLoopCount({
     requests: [{ tool: "read_file", path: "new-source.js" }],
     results: [{ tool: "read_file", status: "completed", result: { ok: true } }],
-    current: 2,
+    current: 0,
     seenTargets: new Set(),
     history: []
   });
-  assert.deepEqual(preAcquisition, { count: 0, recoveryRequired: false });
+  assert.deepEqual(preAcquisition, { count: 1, recoveryRequired: false });
 
   const mutation = updateStagnantToolLoopCount({
     requests: [{ tool: "workspace_edit", action: "write", path: "render.js" }],
@@ -104,7 +104,7 @@ test("acquired capability followed by read-only wandering triggers action recove
       status: "completed",
       result: { ok: true, workspaceChanges: { totalChanges: 1, created: [{ path: "render.js" }] } }
     }],
-    current: 3,
+    current: 9,
     seenTargets,
     history: [acquisition]
   });
@@ -113,12 +113,43 @@ test("acquired capability followed by read-only wandering triggers action recove
   const persisted = updateStagnantToolLoopCount({
     requests: [{ tool: "list_directory", path: "another-new-location" }],
     results: [{ tool: "list_directory", status: "completed", result: { ok: true } }],
-    current: 2,
+    current: 6,
     seenTargets: new Set(),
     history: [],
     capabilityReady: true
   });
-  assert.deepEqual(persisted, { count: 3, recoveryRequired: true });
+  assert.deepEqual(persisted, { count: 9, recoveryRequired: true });
+});
+
+test("mixed repeated inspection cannot hide behind one novel target", () => {
+  const seenTargets = new Set(["read_file:path:known.json"]);
+  const state = updateStagnantToolLoopCount({
+    requests: [
+      { tool: "read_file", path: "known.json" },
+      { tool: "read_file", path: "new.json" }
+    ],
+    results: [
+      { tool: "read_file", status: "completed", result: { ok: true } },
+      { tool: "read_file", status: "completed", result: { ok: true } }
+    ],
+    current: 6,
+    seenTargets
+  });
+  assert.deepEqual(state, { count: 9, recoveryRequired: true });
+});
+
+test("endlessly novel inspection eventually requires action without imposing a tool-call ceiling", () => {
+  const seenTargets = new Set();
+  let state = { count: 0, recoveryRequired: false };
+  for (let index = 0; index < 9; index += 1) {
+    state = updateStagnantToolLoopCount({
+      requests: [{ tool: "read_file", path: `source-${index}.json` }],
+      results: [{ tool: "read_file", status: "completed", result: { ok: true } }],
+      current: state.count,
+      seenTargets
+    });
+  }
+  assert.deepEqual(state, { count: 9, recoveryRequired: true });
 });
 
 test("persisted managed packages remain visible as acquired capability across later user stages", () => {
