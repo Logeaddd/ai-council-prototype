@@ -62,6 +62,20 @@ test("API collection campaigns expose only the endpoint and requirements, never 
   assert.equal(JSON.stringify(publicScenario).includes("hiddenVerifier"), false);
 });
 
+test("capability-acquisition campaigns require an unnamed third-party choice and keep exact image pixels hidden", () => {
+  const campaign = createSeededCampaignScenario({ seed: 7 });
+  const publicScenario = publicCampaignScenario(campaign);
+
+  assert.equal(campaign.task.id, "image-tool-acquisition");
+  assert.equal(campaign.task.capabilityAcquisitionRequired, true);
+  assert.equal(campaign.hiddenVerifier.kind, "png_rgba");
+  assert.equal(campaign.hiddenVerifier.requiresAcquisition, true);
+  assert.equal(campaign.fixtures.length, 1);
+  assert.match(campaign.task.initialQuestion, /choose and acquire a suitable third-party package or CLI yourself/i);
+  assert.doesNotMatch(JSON.stringify(publicScenario), /pngjs|pillow|imagemagick/i);
+  assert.equal(JSON.stringify(publicScenario).includes(JSON.stringify(campaign.hiddenVerifier.pixels)), false);
+});
+
 test("different seeds select deterministic task variants while preserving the campaign contract", () => {
   const campaigns = [1, 2, 3, 4, 5, 6, 7].map((seed) => createSeededCampaignScenario({ seed }));
   assert.equal(new Set(campaigns.map((campaign) => campaign.task.id)).size >= 2, true);

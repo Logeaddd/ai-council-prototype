@@ -5,6 +5,7 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { once } from "node:events";
+import zlib from "node:zlib";
 import { readZipArchiveEntries } from "./archiveTools.js";
 import { CAMPAIGN_API_URL_TOKEN, createSeededCampaignScenario, EXTERNAL_ROOT_TOKEN, publicCampaignScenario } from "./realUserCampaign.js";
 import { assertHardCampaignBudgetGroup, readCampaignBudgetLedger } from "./harnessCostGuard.js";
@@ -268,6 +269,7 @@ export async function runSeededRealUserCampaign(options = {}) {
           limitation: "This verifies the real API tool path against a bounded harness service. It does not prove public-network reachability or real-provider autonomy."
         }
         : { mode: "not_required" },
+      capabilityAcquisition: toolEvidence.acquisition,
       autonomousExecution: {
         campaignStagesExecuted: timeline.filter((item) => item.result === "completed").length,
         materialActionsObserved: timeline.filter((item) => isMaterialActionType(item.type)).length,
@@ -602,18 +604,79 @@ export function verifyCampaignResumption(interruptedSessions = [], sessions = []
 }
 
 export function verifyCampaignToolEvidence(verifier = {}, sessions = []) {
-  if (verifier.kind !== "api_collection") {
-    return { passed: true, checks: [check("required_tool_evidence", true, "not_required")] };
+  const results = (sessions || []).flatMap((session) => session.toolExecutionResults || []);
+  const checks = [];
+  if (verifier.kind === "api_collection") {
+    const expectedUrl = normalizeComparableUrl(verifier.apiUrl);
+    const apiResults = results.filter((item) => item.tool === "api_request" && item.status === "completed" && item.result?.ok);
+    const matched = apiResults.filter((item) => normalizeComparableUrl(item.result?.url || item.url) === expectedUrl);
+    checks.push(
+      check("api_request_recorded", apiResults.length > 0, `${apiResults.length} successful API requests persisted`),
+      check("required_api_endpoint_requested", Boolean(expectedUrl) && matched.length > 0, `${matched.length}/${apiResults.length} successful requests matched the required endpoint`)
+    );
   }
-  const expectedUrl = normalizeComparableUrl(verifier.apiUrl);
-  const apiResults = (sessions || []).flatMap((session) => session.toolExecutionResults || [])
-    .filter((item) => item.tool === "api_request" && item.status === "completed" && item.result?.ok);
-  const matched = apiResults.filter((item) => normalizeComparableUrl(item.result?.url || item.url) === expectedUrl);
-  const checks = [
-    check("api_request_recorded", apiResults.length > 0, `${apiResults.length} successful API requests persisted`),
-    check("required_api_endpoint_requested", Boolean(expectedUrl) && matched.length > 0, `${matched.length}/${apiResults.length} successful requests matched the required endpoint`)
-  ];
-  return { passed: checks.every((item) => item.passed), checks };
+  const acquisitionTools = new Set(["install_package", "provision_tool", "skill_install", "mcp_install_npm"]);
+  const acquisitionResults = results.map((item, index) => ({ item, index })).filter(({ item }) => (
+    acquisitionTools.has(item.tool) && item.status === "completed" && item.result?.ok !== false
+  ));
+  const usedAcquisitions = acquisitionResults.filter(({ item, index }) => results.slice(index + 1).some((later) => acquisitionUsedByLaterTool(item, later)));
+  const acquisition = {
+    required: verifier.requiresAcquisition === true,
+    passed: verifier.requiresAcquisition !== true || usedAcquisitions.length > 0,
+    tools: [...new Set(usedAcquisitions.map(({ item }) => item.tool))],
+    acquiredTools: [...new Set(acquisitionResults.map(({ item }) => item.tool))]
+  };
+  if (acquisition.required) {
+    checks.push(check("capability_acquired_in_current_campaign", acquisitionResults.length > 0, acquisition.acquiredTools.join(", ") || "no successful acquisition tool result"));
+    checks.push(check("acquired_capability_used_by_later_work", acquisition.passed, acquisition.tools.join(", ") || "no later successful tool referenced the acquired package, environment, skill, server or command"));
+  }
+  if (!checks.length) checks.push(check("required_tool_evidence", true, "not_required"));
+  return { passed: checks.every((item) => item.passed), checks, acquisition };
+}
+
+function acquisitionUsedByLaterTool(acquisition, later) {
+  if (later.status !== "completed" || later.result?.ok === false) return false;
+  const allowedLaterTools = acquisition.tool === "skill_install"
+    ? new Set(["skill_read", "skill_enable", "execute_command", "run_code", "run_tests"])
+    : acquisition.tool === "mcp_install_npm"
+      ? new Set(["mcp_call", "mcp_list_tools", "execute_command", "run_code", "run_tests"])
+      : new Set(["execute_command", "run_code", "run_tests"]);
+  if (!allowedLaterTools.has(later.tool)) return false;
+  const evidence = JSON.stringify({
+    tool: later.tool,
+    command: later.command,
+    code: later.code,
+    cwd: later.cwd,
+    skillId: later.skillId,
+    serverId: later.serverId,
+    mcpToolName: later.mcpToolName,
+    result: {
+      command: later.result?.command,
+      cwd: later.result?.cwd,
+      skillId: later.result?.skillId,
+      serverId: later.result?.serverId,
+      source: later.result?.source
+    }
+  }).toLowerCase().replaceAll("\\", "/");
+  return acquisitionReferenceTokens(acquisition).some((token) => evidence.includes(token));
+}
+
+function acquisitionReferenceTokens(item) {
+  const result = item.result || {};
+  const packageName = String(result.packageName || item.packageName || item.package || "").replace(/@[^/@]+$/, "");
+  return [
+    packageName,
+    result.environmentPath,
+    result.name,
+    result.command,
+    result.skillId,
+    result.serverId,
+    item.skillId,
+    item.serverId,
+    item.commandName,
+    item.toolName
+  ].map((value) => String(value || "").trim().toLowerCase().replaceAll("\\", "/"))
+    .filter((value) => value.length >= 3);
 }
 
 function isSuccessfulVerifiedWork(item = {}) {
@@ -734,6 +797,12 @@ export async function verifyCampaignDeliverable(verifier = {}, groupPath) {
       checks.push(check("zip_entries", JSON.stringify(entries.map((entry) => entry.name)) === JSON.stringify(expected.map((entry) => entry.name)), JSON.stringify(entries.map((entry) => entry.name))));
       checks.push(check("zip_contents", JSON.stringify(entries) === JSON.stringify(expected), `${entries.length} extracted entries`));
     } catch (error) { checks.push(check("zip_parses", false, error.message)); }
+  } else if (verifier.kind === "png_rgba" && fs.existsSync(filePath)) {
+    try {
+      const image = decodeRgbaPng(fs.readFileSync(filePath));
+      checks.push(check("png_dimensions", image.width === verifier.width && image.height === verifier.height, `${image.width}x${image.height}`));
+      checks.push(check("png_rgba_pixels", Buffer.from(verifier.pixels || []).equals(image.pixels), `${image.pixels.length} decoded bytes`));
+    } catch (error) { checks.push(check("png_rgba_parses", false, error.message)); }
   } else if (["node_cli", "python_cli"].includes(verifier.kind)) {
     const command = verifier.kind === "python_cli" ? "python" : process.execPath;
     const result = await runProcess(command, [filePath, ...(verifier.args || [])]);
@@ -741,6 +810,79 @@ export async function verifyCampaignDeliverable(verifier = {}, groupPath) {
     checks.push(check("final_requirement", result.stdout.trim() === verifier.expectedOutput, result.stdout.trim()));
   }
   return { passed: checks.every((item) => item.passed), checks };
+}
+
+function decodeRgbaPng(buffer) {
+  const signature = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+  if (!Buffer.isBuffer(buffer) || buffer.length < 33 || !buffer.subarray(0, 8).equals(signature)) throw new Error("invalid_png_signature");
+  let offset = 8;
+  let width = 0;
+  let height = 0;
+  let ended = false;
+  const compressed = [];
+  while (offset + 12 <= buffer.length) {
+    const length = buffer.readUInt32BE(offset);
+    const type = buffer.subarray(offset + 4, offset + 8).toString("ascii");
+    const dataStart = offset + 8;
+    const dataEnd = dataStart + length;
+    if (dataEnd + 4 > buffer.length) throw new Error("truncated_png_chunk");
+    const data = buffer.subarray(dataStart, dataEnd);
+    const expectedCrc = buffer.readUInt32BE(dataEnd);
+    const actualCrc = pngCrc32(buffer.subarray(offset + 4, dataEnd));
+    if (actualCrc !== expectedCrc) throw new Error(`invalid_png_crc:${type}`);
+    if (type === "IHDR") {
+      width = data.readUInt32BE(0);
+      height = data.readUInt32BE(4);
+      if (data[8] !== 8 || data[9] !== 6 || data[12] !== 0) throw new Error("png_must_be_non_interlaced_8bit_rgba");
+    } else if (type === "IDAT") compressed.push(data);
+    else if (type === "IEND") {
+      ended = true;
+      break;
+    }
+    offset = dataEnd + 4;
+  }
+  if (!(width > 0) || !(height > 0) || !compressed.length || !ended) throw new Error("png_missing_image_data");
+  if (width * height > 16 * 1024 * 1024) throw new Error("png_pixel_limit_exceeded");
+  const stride = width * 4;
+  const expectedRawLength = height * (stride + 1);
+  const raw = zlib.inflateSync(Buffer.concat(compressed), { maxOutputLength: expectedRawLength });
+  if (raw.length !== expectedRawLength) throw new Error("unexpected_png_scanline_length");
+  const pixels = Buffer.alloc(width * height * 4);
+  for (let y = 0; y < height; y += 1) {
+    const filter = raw[y * (stride + 1)];
+    const source = raw.subarray(y * (stride + 1) + 1, (y + 1) * (stride + 1));
+    const target = pixels.subarray(y * stride, (y + 1) * stride);
+    const prior = y > 0 ? pixels.subarray((y - 1) * stride, y * stride) : undefined;
+    for (let x = 0; x < stride; x += 1) {
+      const left = x >= 4 ? target[x - 4] : 0;
+      const up = prior ? prior[x] : 0;
+      const upLeft = prior && x >= 4 ? prior[x - 4] : 0;
+      if (filter === 0) target[x] = source[x];
+      else if (filter === 1) target[x] = (source[x] + left) & 255;
+      else if (filter === 2) target[x] = (source[x] + up) & 255;
+      else if (filter === 3) target[x] = (source[x] + Math.floor((left + up) / 2)) & 255;
+      else if (filter === 4) target[x] = (source[x] + paeth(left, up, upLeft)) & 255;
+      else throw new Error(`unsupported_png_filter:${filter}`);
+    }
+  }
+  return { width, height, pixels };
+}
+
+function pngCrc32(buffer) {
+  let crc = 0xffffffff;
+  for (const byte of buffer) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function paeth(left, up, upLeft) {
+  const prediction = left + up - upLeft;
+  const leftDistance = Math.abs(prediction - left);
+  const upDistance = Math.abs(prediction - up);
+  const upLeftDistance = Math.abs(prediction - upLeft);
+  return leftDistance <= upDistance && leftDistance <= upLeftDistance ? left : upDistance <= upLeftDistance ? up : upLeft;
 }
 
 function parseCsv(text) {

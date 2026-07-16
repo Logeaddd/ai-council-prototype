@@ -15,7 +15,17 @@
         {
           "id": "universal_real_provider_survival_pass",
           "type": "real_user_campaign",
-          "reportsRoot": "eval/real-user-campaign"
+          "reportsRoot": "eval/real-user-campaign",
+          "minimumPassedReports": 5,
+          "minimumDistinctTaskIds": 5,
+          "minimumDistinctSeeds": 5,
+          "requiredFamilies": [
+            { "id": "coding_runtime", "taskIds": ["node-cli", "python-cli"] },
+            { "id": "network_collection", "taskIds": ["api-collection"] },
+            { "id": "external_workspace", "taskIds": ["external-node-cli"] },
+            { "id": "archive_packaging", "taskIds": ["zip-archive"] },
+            { "id": "capability_acquisition", "taskIds": ["image-tool-acquisition"], "requireAcquisitionEvidence": true }
+          ]
         }
       ]
     },
@@ -59,7 +69,17 @@
         {
           "id": "real_provider_campaign",
           "type": "real_user_campaign",
-          "reportsRoot": "eval/real-user-campaign"
+          "reportsRoot": "eval/real-user-campaign",
+          "minimumPassedReports": 5,
+          "minimumDistinctTaskIds": 5,
+          "minimumDistinctSeeds": 5,
+          "requiredFamilies": [
+            { "id": "coding_runtime", "taskIds": ["node-cli", "python-cli"] },
+            { "id": "network_collection", "taskIds": ["api-collection"] },
+            { "id": "external_workspace", "taskIds": ["external-node-cli"] },
+            { "id": "archive_packaging", "taskIds": ["zip-archive"] },
+            { "id": "capability_acquisition", "taskIds": ["image-tool-acquisition"], "requireAcquisitionEvidence": true }
+          ]
         }
       ]
     }

@@ -32,7 +32,8 @@ export function createSeededCampaignScenario(options = {}) {
       id: task.id,
       domain: task.domain,
       initialQuestion: task.initialQuestion,
-      deliverable: task.deliverable
+      deliverable: task.deliverable,
+      capabilityAcquisitionRequired: task.capabilityAcquisitionRequired === true
     },
     stages: stages.map((stage, index) => ({ id: `stage_${String(index + 1).padStart(2, "0")}`, ...stage })),
     fixtures: task.fixtures || [],
@@ -262,7 +263,80 @@ function apiCollectionTemplate(seed, random) {
   };
 }
 
-const TASK_TEMPLATES = [nodeCliTemplate, pythonCliTemplate, jsonDocumentTemplate, externalNodeCliTemplate, jsonToCsvTemplate, zipArchiveTemplate, apiCollectionTemplate];
+function imageToolAcquisitionTemplate(seed, random) {
+  const file = `deliverables/generated-image-${seed}.png`;
+  const source = `inputs/image-spec-${seed}.json`;
+  const width = randomInteger(random, 7, 11);
+  const height = randomInteger(random, 6, 10);
+  const colors = shuffled(random, ["#173F5F", "#20639B", "#3CAEA3", "#F6D55C", "#ED553B", "#7A5195"]);
+  const spec = {
+    width,
+    height,
+    background: colors[0],
+    initialStripe: colors[1],
+    finalStripe: colors[2],
+    border: colors[3]
+  };
+  return {
+    id: "image-tool-acquisition",
+    domain: "capability_acquisition_and_binary_artifact",
+    deliverable: file,
+    capabilityAcquisitionRequired: true,
+    initialQuestion: `Read ${source} and create ${file} as an RGBA PNG with the specified width, height and solid background color. The workspace has no task-specific image generator: choose and acquire a suitable third-party package or CLI yourself, without asking which product to use. Do not hand-encode PNG bytes. Verify the generated image.`,
+    edits: [
+      { prompt: `Update the existing PNG so its center column uses initialStripe from ${source}. Keep every other pixel as the specified background and verify the image.` },
+      { prompt: `Update the same PNG with a one-pixel border using border from ${source}. Preserve the center stripe and verify the RGBA image.` },
+      { prompt: `Change only the center stripe to finalStripe from ${source}. Keep the current border, dimensions and background, then verify the PNG.` },
+      { prompt: `Make the final image update in ${file}: use the exact dimensions from ${source}, a one-pixel border, the finalStripe center column and background everywhere else. Verify the finished RGBA PNG without replacing it with a text or SVG file.` }
+    ],
+    reversalPrompt: "Use only the newest image requirements. Do not restore the initial stripe color or remove the current border.",
+    recallPrompt: `Inspect the retained image task context, ${source} and the current ${file}, then continue from the newest requirement with the acquired capability.`,
+    finalPrompt: "Apply the final requested PNG edit with the acquired third-party capability and verify the current binary artifact again.",
+    recoveryVerificationPrompt: `Use the acquired image capability to inspect ${file} after recovery and run a real validation of its dimensions and RGBA data.`,
+    fixtures: [{ path: source, content: JSON.stringify(spec, null, 2) + "\n" }],
+    hiddenVerifier: {
+      kind: "png_rgba",
+      file,
+      width,
+      height,
+      pixels: expectedImagePixels(spec),
+      requiresAcquisition: true
+    }
+  };
+}
+
+const TASK_TEMPLATES = [nodeCliTemplate, pythonCliTemplate, jsonDocumentTemplate, externalNodeCliTemplate, jsonToCsvTemplate, zipArchiveTemplate, apiCollectionTemplate, imageToolAcquisitionTemplate];
+
+function expectedImagePixels(spec) {
+  const background = hexRgba(spec.background);
+  const stripe = hexRgba(spec.finalStripe);
+  const border = hexRgba(spec.border);
+  const center = Math.floor(spec.width / 2);
+  const pixels = [];
+  for (let y = 0; y < spec.height; y += 1) {
+    for (let x = 0; x < spec.width; x += 1) {
+      const color = x === 0 || y === 0 || x === spec.width - 1 || y === spec.height - 1
+        ? border
+        : x === center ? stripe : background;
+      pixels.push(...color);
+    }
+  }
+  return pixels;
+}
+
+function hexRgba(value) {
+  const hex = String(value || "").replace(/^#/, "");
+  return [0, 2, 4].map((offset) => Number.parseInt(hex.slice(offset, offset + 2), 16)).concat(255);
+}
+
+function shuffled(random, values) {
+  const result = [...values];
+  for (let index = result.length - 1; index > 0; index -= 1) {
+    const next = Math.floor(random() * (index + 1));
+    [result[index], result[next]] = [result[next], result[index]];
+  }
+  return result;
+}
 
 function seededRandom(seed) {
   let state = (seed >>> 0) || 1;

@@ -81,9 +81,12 @@ test("product harness rejects fake campaign reports and accepts retained real-pr
   const report = {
     schema: "ai-council.real-user-campaign-run.v1",
     status: "passed",
-    providerAcceptance: { realProvider: false, observedModelCalls: 12 },
+    providerAcceptance: { realProvider: false, observedModelCalls: 12, blockedBeforeSendModelCalls: 0 },
     autonomousExecution: { passed: true, resumedAfterInterruption: true },
-    minimumUsableDelivery: { passed: true }
+    minimumUsableDelivery: { passed: true },
+    persistence: { passed: true },
+    recovery: { passed: true, checks: [{ id: "continuation_completed_visible_work", passed: true }] },
+    sessions: { interrupted: [{ id: "interrupted-1" }] }
   };
   fs.writeFileSync(path.join(reportDir, "report.json"), JSON.stringify(report), "utf8");
   assert.equal(evaluateProductHarness({ root, manifest, testEvidence: { status: "passed" } }).status, "incomplete");
@@ -92,13 +95,65 @@ test("product harness rejects fake campaign reports and accepts retained real-pr
   assert.equal(evaluateProductHarness({ root, manifest, testEvidence: { status: "passed" } }).status, "complete");
 });
 
-test("repository product harness uses the universal real-user campaign instead of a Forge-only release gate", () => {
+test("product harness requires a real multi-family matrix and cannot count repeated seeds or fabricated acquisition", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-product-campaign-matrix-"));
+  const reportsRoot = path.join(root, "eval", "campaign");
+  const manifest = { tasks: [{ id: "T118", gates: [{
+    id: "matrix",
+    type: "real_user_campaign",
+    reportsRoot: "eval/campaign",
+    minimumPassedReports: 3,
+    minimumDistinctTaskIds: 3,
+    minimumDistinctSeeds: 3,
+    requiredFamilies: [
+      { id: "coding", taskIds: ["node-cli"] },
+      { id: "archive", taskIds: ["zip-archive"] },
+      { id: "acquisition", taskIds: ["image-tool-acquisition"], requireAcquisitionEvidence: true }
+    ]
+  }] }] };
+  const writeReport = (name, { taskId, seed, acquisition = false }) => {
+    const dir = path.join(reportsRoot, name);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "report.json"), JSON.stringify({
+      schema: "ai-council.real-user-campaign-run.v1",
+      status: "passed",
+      seed,
+      providerAcceptance: { realProvider: true, observedModelCalls: 2, blockedBeforeSendModelCalls: 0 },
+      scenario: { task: { id: taskId } },
+      autonomousExecution: { passed: true, resumedAfterInterruption: true },
+      minimumUsableDelivery: { passed: true },
+      capabilityAcquisition: { passed: acquisition },
+      persistence: { passed: true },
+      recovery: { passed: true, checks: [{ id: "continuation_completed_visible_work", passed: true }] },
+      sessions: { interrupted: [{ id: `interrupted-${seed}` }] }
+    }), "utf8");
+  };
+
+  writeReport("node-1", { taskId: "node-cli", seed: 1 });
+  writeReport("node-2", { taskId: "node-cli", seed: 1 });
+  writeReport("fake-acquisition", { taskId: "image-tool-acquisition", seed: 2, acquisition: false });
+  assert.equal(evaluateProductHarness({ root, manifest, testEvidence: { status: "passed" } }).status, "incomplete");
+
+  writeReport("archive", { taskId: "zip-archive", seed: 3 });
+  writeReport("real-acquisition", { taskId: "image-tool-acquisition", seed: 4, acquisition: true });
+  const passed = evaluateProductHarness({ root, manifest, testEvidence: { status: "passed" } });
+  assert.equal(passed.status, "complete");
+  const evidence = passed.tasks[0].gates[0].evidence;
+  assert.deepEqual(new Set(evidence.distinctTaskIds), new Set(["node-cli", "image-tool-acquisition", "zip-archive"]));
+  assert.deepEqual(new Set(evidence.distinctSeeds), new Set(["1", "2", "3", "4"]));
+  assert.equal(evidence.requiredFamilies.every((family) => family.passed), true);
+});
+
+test("repository product harness requires a multi-family real-user matrix instead of a Forge-only or single-report release gate", () => {
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   const manifestPath = path.join(root, "config", "product-harness.json");
   const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
   const configured = manifest.tasks.find((task) => task.id === "T105");
   assert.equal(configured.gates.some((gate) => gate.id === "real_forge_provider_pass"), false);
-  assert.equal(configured.gates.some((gate) => gate.id === "universal_real_provider_survival_pass" && gate.type === "real_user_campaign"), true);
+  const matrixGate = configured.gates.find((gate) => gate.id === "universal_real_provider_survival_pass" && gate.type === "real_user_campaign");
+  assert.equal(Boolean(matrixGate), true);
+  assert.equal(matrixGate.minimumPassedReports >= 5, true);
+  assert.equal(matrixGate.requiredFamilies.some((family) => family.requireAcquisitionEvidence), true);
   const report = evaluateProductHarness({
     root,
     manifestPath,
@@ -106,6 +161,6 @@ test("repository product harness uses the universal real-user campaign instead o
     testEvidence: { status: "passed", exitCode: 0 }
   });
   const t105 = report.tasks.find((task) => task.id === "T105");
-  assert.equal(t105.status, "complete");
-  assert.equal(t105.gates.find((gate) => gate.id === "universal_real_provider_survival_pass").status, "passed");
+  assert.equal(t105.status, "incomplete");
+  assert.equal(t105.gates.find((gate) => gate.id === "universal_real_provider_survival_pass").status, "failed");
 });

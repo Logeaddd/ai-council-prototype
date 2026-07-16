@@ -74,23 +74,74 @@ function evaluateRealUserCampaignGate(root, gate, base) {
   const reports = findReports(reportsRoot).map((filePath) => {
     try { return { filePath, report: JSON.parse(fs.readFileSync(filePath, "utf8")) }; } catch { return null; }
   }).filter(Boolean).filter(({ report }) => report?.schema === "ai-council.real-user-campaign-run.v1");
-  const passed = reports.find(({ report }) => (
+  const passedReports = reports.filter(({ report }) => (
     report.status === "passed"
     && report.providerAcceptance?.realProvider === true
+    && Number(report.providerAcceptance?.blockedBeforeSendModelCalls || 0) === 0
     && report.autonomousExecution?.passed === true
     && report.minimumUsableDelivery?.passed === true
     && report.autonomousExecution?.resumedAfterInterruption === true
+    && report.persistence?.passed === true
+    && report.recovery?.passed === true
+    && hasCompleteContinuationEvidence(report)
     && Number(report.providerAcceptance?.observedModelCalls || report.sessions?.modelCalls || 0) > 0
   ));
+  const requiredFamilies = Array.isArray(gate.requiredFamilies) ? gate.requiredFamilies : [];
+  const familyEvidence = requiredFamilies.map((family) => {
+    const taskIds = new Set((Array.isArray(family.taskIds) ? family.taskIds : []).map(String));
+    const matches = passedReports.filter(({ report }) => {
+      const taskId = String(report.scenario?.task?.id || "");
+      if (taskIds.size > 0 && !taskIds.has(taskId)) return false;
+      if (family.requireAcquisitionEvidence && report.capabilityAcquisition?.passed !== true) return false;
+      return true;
+    });
+    return {
+      id: String(family.id || ""),
+      passed: matches.length > 0,
+      taskIds: [...new Set(matches.map(({ report }) => String(report.scenario?.task?.id || "")).filter(Boolean))],
+      reports: matches.map(({ filePath }) => path.relative(root, filePath).replaceAll("\\", "/"))
+    };
+  });
+  const distinctTaskIds = new Set(passedReports.map(({ report }) => String(report.scenario?.task?.id || "")).filter(Boolean));
+  const distinctSeeds = new Set(passedReports.map(({ report }) => String(report.seed ?? "")).filter(Boolean));
+  const minimumPassedReports = positiveInteger(gate.minimumPassedReports, 1);
+  const minimumDistinctTaskIds = positiveInteger(gate.minimumDistinctTaskIds, requiredFamilies.length > 0 ? requiredFamilies.length : 1);
+  const minimumDistinctSeeds = positiveInteger(gate.minimumDistinctSeeds, 1);
+  const matrixPassed = passedReports.length >= minimumPassedReports
+    && distinctTaskIds.size >= minimumDistinctTaskIds
+    && distinctSeeds.size >= minimumDistinctSeeds
+    && familyEvidence.every((family) => family.passed);
+  const passed = requiredFamilies.length > 0 || minimumPassedReports > 1 || minimumDistinctTaskIds > 1 || minimumDistinctSeeds > 1
+    ? matrixPassed
+    : passedReports.length > 0;
   return {
     ...base,
     status: passed ? "passed" : "failed",
     evidence: {
       reportsRoot: path.relative(root, reportsRoot).replaceAll("\\", "/"),
       matchingReports: reports.length,
-      passedReport: passed ? path.relative(root, passed.filePath).replaceAll("\\", "/") : ""
+      passedReports: passedReports.map(({ filePath }) => path.relative(root, filePath).replaceAll("\\", "/")),
+      minimumPassedReports,
+      minimumDistinctTaskIds,
+      minimumDistinctSeeds,
+      distinctTaskIds: [...distinctTaskIds],
+      distinctSeeds: [...distinctSeeds],
+      requiredFamilies: familyEvidence,
+      passedReport: passed && passedReports.length === 1 ? path.relative(root, passedReports[0].filePath).replaceAll("\\", "/") : ""
     }
   };
+}
+
+function hasCompleteContinuationEvidence(report) {
+  const interruptionCount = Array.isArray(report.sessions?.interrupted) ? report.sessions.interrupted.length : 0;
+  const continuationChecks = (Array.isArray(report.recovery?.checks) ? report.recovery.checks : [])
+    .filter((item) => item?.id === "continuation_completed_visible_work" && item.passed === true);
+  return interruptionCount > 0 && continuationChecks.length >= interruptionCount;
+}
+
+function positiveInteger(value, fallback) {
+  const number = Number(value);
+  return Number.isInteger(number) && number > 0 ? number : fallback;
 }
 
 function evaluateRealBenchmarkGate(root, gate, base) {

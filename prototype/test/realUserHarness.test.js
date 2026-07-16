@@ -264,6 +264,56 @@ test("campaign CSV fixtures stay hidden from prompts and have a mechanical deliv
   }
 });
 
+test("capability acquisition evidence must come from a successful current-campaign tool result", () => {
+  const verifier = { kind: "png_rgba", requiresAcquisition: true };
+  assert.equal(verifyCampaignToolEvidence(verifier, []).passed, false);
+  assert.equal(verifyCampaignToolEvidence(verifier, [{ toolExecutionResults: [{ tool: "install_package", status: "failed", result: { ok: false } }] }]).passed, false);
+  const installedButUnused = verifyCampaignToolEvidence(verifier, [{ toolExecutionResults: [{
+    tool: "install_package",
+    status: "completed",
+    result: { ok: true, packageName: "chosen-image-package", environmentPath: "shared/environments/npm" }
+  }] }]);
+  assert.equal(installedButUnused.passed, false);
+  const passed = verifyCampaignToolEvidence(verifier, [{ toolExecutionResults: [
+    {
+      tool: "install_package",
+      status: "completed",
+      result: { ok: true, packageName: "chosen-image-package", environmentPath: "shared/environments/npm" }
+    },
+    {
+      tool: "execute_command",
+      status: "completed",
+      command: "node shared/environments/npm/render-image.js",
+      result: { ok: true, exitCode: 0 }
+    }
+  ] }]);
+  assert.equal(passed.passed, true);
+  assert.equal(passed.acquisition.passed, true);
+  assert.deepEqual(passed.acquisition.tools, ["install_package"]);
+});
+
+test("capability-acquisition PNG verifier checks the real binary structure, dimensions and every RGBA pixel", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-acquired-image-"));
+  try {
+    const campaign = createSeededCampaignScenario({ seed: 7 });
+    const target = path.join(root, campaign.hiddenVerifier.file);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    const correct = Buffer.from(campaign.hiddenVerifier.pixels);
+    fs.writeFileSync(target, makeRgbaPng(campaign.hiddenVerifier.width, campaign.hiddenVerifier.height, correct));
+    assert.equal((await verifyCampaignDeliverable(campaign.hiddenVerifier, root)).passed, true);
+
+    const wrong = Buffer.from(correct);
+    wrong[0] ^= 0xff;
+    fs.writeFileSync(target, makeRgbaPng(campaign.hiddenVerifier.width, campaign.hiddenVerifier.height, wrong));
+    assert.equal((await verifyCampaignDeliverable(campaign.hiddenVerifier, root)).passed, false);
+
+    fs.writeFileSync(target, "not a png", "utf8");
+    assert.equal((await verifyCampaignDeliverable(campaign.hiddenVerifier, root)).passed, false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("campaign ZIP verifier checks extracted entry names and content", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-campaign-zip-"));
   const campaign = createSeededCampaignScenario({ seed: 5 });
@@ -424,6 +474,38 @@ function makeZip(entries) {
   end.writeUInt32LE(centralDirectory.length, 12);
   end.writeUInt32LE(offset, 16);
   return Buffer.concat([...localParts, centralDirectory, end]);
+}
+
+function makeRgbaPng(width, height, pixels) {
+  const signature = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8;
+  ihdr[9] = 6;
+  const stride = width * 4;
+  const raw = Buffer.alloc(height * (stride + 1));
+  for (let y = 0; y < height; y += 1) pixels.copy(raw, y * (stride + 1) + 1, y * stride, (y + 1) * stride);
+  return Buffer.concat([signature, pngChunk("IHDR", ihdr), pngChunk("IDAT", zlib.deflateSync(raw)), pngChunk("IEND", Buffer.alloc(0))]);
+}
+
+function pngChunk(type, data) {
+  const name = Buffer.from(type, "ascii");
+  const chunk = Buffer.alloc(12 + data.length);
+  chunk.writeUInt32BE(data.length, 0);
+  name.copy(chunk, 4);
+  data.copy(chunk, 8);
+  chunk.writeUInt32BE(testCrc32(Buffer.concat([name, data])), 8 + data.length);
+  return chunk;
+}
+
+function testCrc32(buffer) {
+  let crc = 0xffffffff;
+  for (const byte of buffer) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
 }
 
 function writeOpenAiStream(res, text) {
