@@ -106,11 +106,15 @@ function extractAbsolutePathCandidates(value) {
   const candidates = [];
   const patterns = [
     /\]\(([A-Za-z]:[\\/][^)\r\n]+)\)/g,
+    /\]\((\/[^)\r\n]+)\)/g,
     /`([^`\r\n]*[A-Za-z]:[\\/][^`\r\n]+)`/g,
+    /`(\/[^`\r\n]+)`/g,
     /"([A-Za-z]:[\\/][^"\r\n]+)"/g,
+    /"(\/[^"\r\n]+)"/g,
     /'([A-Za-z]:[\\/][^'\r\n]+)'/g,
     /(?:^|\r?\n)\s*([A-Za-z]:[\\/][^\r\n]+?)\s*(?=\r?\n|$)/g,
-    /(?:^|\s)([A-Za-z]:[\\/][^\s<>{}|"`]+)(?=\s|$)/g
+    /(?:^|\s)([A-Za-z]:[\\/][^\s<>{}|"`]+)(?=\s|$)/g,
+    /(?:^|\s)(\/[^\s<>{}|"`]+)(?=\s|$)/g
   ];
   for (const pattern of patterns) {
     for (const match of text.matchAll(pattern)) {
@@ -135,8 +139,13 @@ function existingLocalPath(value) {
   while (candidate && path.isAbsolute(candidate)) {
     if (fs.existsSync(candidate)) return fs.realpathSync.native(candidate);
     const trimmed = candidate.replace(/[\s),.;，。；：！？]+$/u, "").trim();
-    if (trimmed === candidate) break;
-    candidate = trimmed;
+    if (trimmed !== candidate) {
+      candidate = trimmed;
+      continue;
+    }
+    const parent = path.dirname(candidate);
+    if (!parent || parent === candidate || parent === path.parse(candidate).root) break;
+    candidate = parent;
   }
   return "";
 }

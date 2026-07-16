@@ -190,7 +190,7 @@ test("seeded campaign drives HTTP/SSE stages, member disturbances and interrupti
       memory_candidates: [],
       tool_requests: [
         { tool: "workspace_edit", action: "write", path: campaignFile, code, reason: "Write the current requested CLI." },
-        { tool: "execute_command", command: `node ${campaignFile} --name Ada`, shell: "system", reason: "Verify the current deliverable." }
+        { tool: "execute_command", command: `node ${JSON.stringify(campaignFile)} --name Ada`, shell: "system", reason: "Verify the current deliverable." }
       ]
     }));
   });

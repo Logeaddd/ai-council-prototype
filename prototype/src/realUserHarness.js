@@ -12,6 +12,7 @@ import { assertHardCampaignBudgetGroup, readCampaignBudgetLedger } from "./harne
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const prototypeRoot = path.resolve(__dirname, "..");
 const serverEntry = path.join(__dirname, "server.js");
+const campaignSeatIdentities = new WeakMap();
 
 export async function runSeededRealUserBaseline(options = {}) {
   const group = structuredClone(options.group || {});
@@ -447,7 +448,9 @@ function assertCampaignBudget(options = {}, { allowMockProvider }) {
 
 async function applyCampaignMutation(port, groupPath, group, mutation = {}) {
   const agents = group.agents || [];
-  const agentAt = (value) => agents[seatIndex(value)].id;
+  const stableSeatIds = campaignSeatIdentities.get(group) || agents.map((agent) => agent.id);
+  if (!campaignSeatIdentities.has(group)) campaignSeatIdentities.set(group, stableSeatIds);
+  const agentAt = (value) => stableSeatIds[seatIndex(value)];
   if (mutation.type === "reorder") {
     const seatIds = mutation.seatIds.map(agentAt);
     const response = await postJson(port, "/api/group/seats/reorder", { groupPath, seatIds });

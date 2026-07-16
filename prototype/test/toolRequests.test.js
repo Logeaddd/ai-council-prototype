@@ -1885,6 +1885,19 @@ test("user-referenced Windows paths remain authorized when a path segment contai
   }
 });
 
+test("user-referenced POSIX paths authorize an external project root from ordinary task text", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-posix-project-"));
+  try {
+    const deliverable = path.join(root, "deliverables", "result.json");
+    const roots = extractUserReferencedRoots({
+      text: `Create ${deliverable} inside the user-authorized project and verify it.`
+    });
+    assert.deepEqual(roots, [fs.realpathSync.native(root)]);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 function executeFileToolResult(request, groupPath) {
   try {
     return executeFileTool(request, { groupPath });
