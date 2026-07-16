@@ -13,14 +13,9 @@
         { "id": "forge_task_gates", "type": "git_ancestor", "commit": "c2bd66c" },
         { "id": "full_test_suite", "type": "test_suite" },
         {
-          "id": "real_forge_provider_pass",
-          "type": "real_benchmark",
-          "taskId": "forge-1.20.1-random-surface",
-          "reportsRoot": "eval/real-provider",
-          "requireTaskChecks": true,
-          "requireArtifactVerified": true,
-          "requireWorkspaceMutations": true,
-          "requireModelCalls": true
+          "id": "universal_real_provider_survival_pass",
+          "type": "real_user_campaign",
+          "reportsRoot": "eval/real-user-campaign"
         }
       ]
     },

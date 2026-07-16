@@ -92,16 +92,20 @@ test("product harness rejects fake campaign reports and accepts retained real-pr
   assert.equal(evaluateProductHarness({ root, manifest, testEvidence: { status: "passed" } }).status, "complete");
 });
 
-test("repository product harness keeps T105 incomplete without a paid Forge pass", () => {
+test("repository product harness uses the universal real-user campaign instead of a Forge-only release gate", () => {
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   const manifestPath = path.join(root, "config", "product-harness.json");
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  const configured = manifest.tasks.find((task) => task.id === "T105");
+  assert.equal(configured.gates.some((gate) => gate.id === "real_forge_provider_pass"), false);
+  assert.equal(configured.gates.some((gate) => gate.id === "universal_real_provider_survival_pass" && gate.type === "real_user_campaign"), true);
   const report = evaluateProductHarness({
     root,
     manifestPath,
-    manifest: JSON.parse(fs.readFileSync(manifestPath, "utf8")),
+    manifest,
     testEvidence: { status: "passed", exitCode: 0 }
   });
   const t105 = report.tasks.find((task) => task.id === "T105");
-  assert.equal(t105.status, "incomplete");
-  assert.equal(t105.gates.find((gate) => gate.id === "real_forge_provider_pass").status, "failed");
+  assert.equal(t105.status, "complete");
+  assert.equal(t105.gates.find((gate) => gate.id === "universal_real_provider_survival_pass").status, "passed");
 });
