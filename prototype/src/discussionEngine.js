@@ -539,7 +539,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
             };
           }
         }
-        if (toolLoopStagnated.recoveryRequired && requiresStagnationWorkspaceEdit(agent, question, fileOperationPermissionTier, session.executionState) && !hasWorkspaceMutationRequest(response)) {
+        if (toolLoopStagnated.recoveryRequired && requiresStagnationWorkspaceEdit(agent, question, fileOperationPermissionTier, session.executionState) && !hasMaterialExecutionRequest(response)) {
           callOutcome = yield* callRoundModel({
             options,
             session,
@@ -549,7 +549,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
             memberContext: followupContext,
             messages: [...followupMessages, {
               role: "user",
-              content: "Your stagnation recovery did not include a workspace_edit write, append, replace, or move action. Do not call execute_command, API, search, read, Git, test, or browser tools. Call workspace_edit now to make the required concrete file change."
+              content: "Your stagnation recovery did not include a workspace_edit or another material execution action. Stop reading, searching, listing, or planning. Call a real tool now to write or repair the artifact, acquire and use a missing capability, run the required build or generator, or verify an already-correct deliverable."
             }],
             timeoutMs: group.settings.agentTimeoutMs,
             toolIteration: toolIterations,
@@ -559,18 +559,18 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
           response = applyRoundResponseRules(callOutcome.response, agent, round);
           rawTextForMessage = callOutcome.rawTextForMessage;
           errorForMessage = callOutcome.errorForMessage;
-          if (!hasWorkspaceMutationRequest(response)) {
+          if (!hasMaterialExecutionRequest(response)) {
             session.toolContinuation = {
               agentId: agent.id,
               round,
               completedIterations: toolIterations,
-              reason: "stagnation_recovery_missing_workspace_mutation",
+              reason: "stagnation_recovery_missing_material_action",
               pendingRequests: response.tool_requests || []
             };
             response = {
               status: "speak",
-              argument: "Stagnation recovery did not produce the required concrete workspace action.",
-              objections: ["stagnation_recovery_missing_workspace_mutation"],
+              argument: "Stagnation recovery did not produce a real material execution action.",
+              objections: ["stagnation_recovery_missing_material_action"],
               confidence: 0,
               memory_candidates: []
             };
@@ -1226,6 +1226,20 @@ function hasWorkspaceMutationRequest(response = {}) {
     && ["write", "append", "replace", "move"].includes(String(request.action || ""))
     && (String(request.code || "").length > 0 || String(request.content || "").length > 0 || String(request.newText || "").length > 0 || String(request.destination || "").length > 0)
   ));
+}
+
+export function hasMaterialExecutionRequest(response = {}) {
+  if (hasWorkspaceMutationRequest(response)) return true;
+  return (response.tool_requests || []).some((request) => {
+    const tool = String(request.tool || "");
+    if (["install_package", "provision_tool", "skill_install", "mcp_install_npm", "create_archive", "extract_archive", "process_control"].includes(tool)) return true;
+    if (tool === "execute_command") return Boolean(String(request.command || "").trim());
+    if (tool === "run_code") return Boolean(String(request.code || "").trim() || String(request.inputText || "").trim());
+    if (tool === "run_tests") return true;
+    if (tool === "git_operation") return !["status", "log", "show", "diff"].includes(String(request.action || "").toLowerCase());
+    if (tool === "database_query") return !/^\s*(?:select|pragma|explain)\b/i.test(String(request.sql || ""));
+    return false;
+  });
 }
 
 function hasVerificationRequest(response = {}) {

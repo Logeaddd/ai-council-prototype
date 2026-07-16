@@ -5,7 +5,7 @@ import path from "node:path";
 import zlib from "node:zlib";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { prepareCampaignFixtures, prepareGroupWorkspace, providerCallMetrics, runSeededRealUserBaseline, runSeededRealUserCampaign, verifyCampaignDeliverable, verifyCampaignPersistence, verifyCampaignResumption, verifyCampaignToolEvidence, verifyNoDuplicateVerifiedWork } from "../src/realUserHarness.js";
+import { postCouncilEvents, prepareCampaignFixtures, prepareGroupWorkspace, providerCallMetrics, runSeededRealUserBaseline, runSeededRealUserCampaign, verifyCampaignDeliverable, verifyCampaignPersistence, verifyCampaignResumption, verifyCampaignToolEvidence, verifyNoDuplicateVerifiedWork } from "../src/realUserHarness.js";
 import { createSeededCampaignScenario, EXTERNAL_ROOT_TOKEN } from "../src/realUserCampaign.js";
 
 test("seeded real-user baseline uses the HTTP/SSE route, persists interruption, continues after restart, and verifies an edited artifact", async () => {
@@ -98,6 +98,26 @@ test("real-provider campaign reporting uses the durable budget ledger for sent-c
     attemptedModelCalls: 7,
     blockedBeforeSendModelCalls: 0
   });
+});
+
+test("real HTTP/SSE campaign requests fail as infrastructure when no event or heartbeat arrives", async () => {
+  const server = http.createServer((req, res) => {
+    req.resume();
+    res.writeHead(200, { "Content-Type": "text/event-stream; charset=utf-8" });
+    res.flushHeaders();
+  });
+  await listen(server);
+  try {
+    await assert.rejects(() => postCouncilEvents({
+      port: server.address().port,
+      group: { id: "stalled-group", agents: [] },
+      groupPath: "/tmp/stalled-group",
+      question: "continue",
+      noProgressTimeoutMs: 50
+    }), (error) => error.code === "campaign_sse_no_progress_timeout" && error.harnessInfrastructure === true);
+  } finally {
+    await close(server);
+  }
 });
 
 test("campaign recovery requires completed visible work after every interruption", () => {

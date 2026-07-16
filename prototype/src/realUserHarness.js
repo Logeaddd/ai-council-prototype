@@ -354,24 +354,35 @@ export function createMinimumBaselineScenario(seed = Date.now()) {
 
 export async function postCouncilEvents(options = {}) {
   const controller = new AbortController();
-  const response = await fetch(`http://127.0.0.1:${options.port}/api/council/events`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    signal: controller.signal,
-    body: JSON.stringify({
-      question: options.question,
-      workspaceGroupPath: options.groupPath,
-      runtimeGroup: options.group
-    })
-  });
-  if (!response.ok || !response.body) {
-    throw harnessFailure("council_sse_request_failed", `Council SSE request failed with HTTP ${response.status}.`, true);
-  }
-
+  const noProgressTimeoutMs = positiveNumber(options.noProgressTimeoutMs, 120000);
   const events = [];
   let aborted = false;
+  let stalled = false;
+  let watchdog;
+  const armWatchdog = () => {
+    clearTimeout(watchdog);
+    watchdog = setTimeout(() => {
+      stalled = true;
+      controller.abort();
+    }, noProgressTimeoutMs);
+  };
+  armWatchdog();
   try {
+    const response = await fetch(`http://127.0.0.1:${options.port}/api/council/events`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      signal: controller.signal,
+      body: JSON.stringify({
+        question: options.question,
+        workspaceGroupPath: options.groupPath,
+        runtimeGroup: options.group
+      })
+    });
+    if (!response.ok || !response.body) {
+      throw harnessFailure("council_sse_request_failed", `Council SSE request failed with HTTP ${response.status}.`, true);
+    }
     for await (const event of readSseEvents(response.body)) {
+      armWatchdog();
       events.push(event);
       options.onEvent?.(event);
       if (options.abortWhen?.(event)) {
@@ -381,7 +392,12 @@ export async function postCouncilEvents(options = {}) {
       }
     }
   } catch (error) {
+    if (stalled) {
+      throw harnessFailure("campaign_sse_no_progress_timeout", `Council SSE produced no event or heartbeat for ${noProgressTimeoutMs}ms.`, true);
+    }
     if (!controller.signal.aborted) throw error;
+  } finally {
+    clearTimeout(watchdog);
   }
   return { events, aborted };
 }
@@ -1042,6 +1058,13 @@ async function stopHarnessServer(server) {
     once(server.child, "exit"),
     new Promise((resolve) => setTimeout(resolve, 3000))
   ]);
+  if (server.child.exitCode === null) {
+    server.child.kill("SIGKILL");
+    await Promise.race([
+      once(server.child, "exit"),
+      new Promise((resolve) => setTimeout(resolve, 3000))
+    ]);
+  }
 }
 
 async function waitForHealth(port, child, output) {
@@ -1240,4 +1263,9 @@ function harnessFailure(code, message, harnessInfrastructure = false) {
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function positiveNumber(value, fallback) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : fallback;
 }
