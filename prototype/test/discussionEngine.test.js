@@ -1929,6 +1929,72 @@ test("repeated non-progress inspection recovers without imposing a limit on dist
   }
 });
 
+test("a stalled delivery executor in verify phase is redirected to real verification instead of another write", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-verify-stagnation-"));
+  fs.writeFileSync(path.join(tmp, "group.json"), JSON.stringify({
+    permissions: { defaultTier: "full", seatTiers: { worker: "full" } }
+  }), "utf8");
+  let wroteArtifact = false;
+  let verificationRecoverySeen = false;
+  let forcedVerificationSent = false;
+  const server = http.createServer(async (req, res) => {
+    const body = JSON.parse(await readRequestBody(req));
+    const prompt = JSON.stringify(body.messages || []);
+    if (prompt.includes("FinalDecision JSON object")) {
+      writeOpenAiStream(res, JSON.stringify({ answer: "The JSON artifact was validated.", consensus_score: 1, supporting_agents: ["Worker"], dissenting_agents: [], minority_report: "", risks: [], next_actions: [], selected_file_operation_ids: [], memory_candidates: [] }));
+      return;
+    }
+    if (prompt.includes("did not request a real verification tool")) {
+      verificationRecoverySeen = true;
+      forcedVerificationSent = true;
+      writeOpenAiStream(res, JSON.stringify({
+        status: "speak",
+        argument: "Running the required JSON validation now.",
+        tool_requests: [{ tool: "execute_command", command: "node -e \"JSON.parse(require('node:fs').readFileSync('deliverables/verified.json', 'utf8'))\"", cwd: ".", reason: "Validate the current JSON deliverable." }],
+        objections: [],
+        confidence: 1,
+        memory_candidates: []
+      }));
+      return;
+    }
+    if (prompt.includes("[Stagnation recovery]")) {
+      writeOpenAiStream(res, JSON.stringify({ status: "speak", argument: "I will inspect the file once more.", tool_requests: [{ tool: "read_file", path: "deliverables/verified.json", reason: "Repeat inspection." }], objections: [], confidence: 0.5, memory_candidates: [] }));
+      return;
+    }
+    if (!wroteArtifact) {
+      wroteArtifact = true;
+      writeOpenAiStream(res, JSON.stringify({
+        status: "speak",
+        argument: "Creating the requested JSON artifact.",
+        tool_requests: [{ tool: "workspace_edit", action: "write", path: "deliverables/verified.json", code: '{"ok":true}\n', reason: "Create the JSON deliverable." }],
+        objections: [],
+        confidence: 1,
+        memory_candidates: []
+      }));
+      return;
+    }
+    writeOpenAiStream(res, JSON.stringify({ status: "speak", argument: "Checking the current artifact.", tool_requests: [{ tool: "read_file", path: "deliverables/verified.json", reason: "Repeated inspection." }], objections: [], confidence: 0.5, memory_candidates: [] }));
+  });
+  await listen(server);
+  try {
+    const group = validateGroupConfig({
+      id: "verify-stagnation",
+      name: "Verify Stagnation",
+      settings: { maxRounds: 1, minConsensusWeight: 1, stopWhenAllSkip: true, agentTimeoutMs: 3000, allowSoloCouncil: true },
+      agents: [{ id: "worker", name: "Worker", role: "Builder", provider: "openai-compatible", apiBaseUrl: `http://127.0.0.1:${server.address().port}/v1`, allowUnsafePrivateNetwork: true, apiKey: "secret-runtime-key", model: "verify-stagnation-model", weight: 1, enabled: true }]
+    });
+    const result = await runCouncil("Create deliverables/verified.json and validate the current JSON artifact.", group, tmp, { groupPath: tmp });
+
+    assert.equal(verificationRecoverySeen, true);
+    assert.equal(forcedVerificationSent, true);
+    assert.equal(result.session.toolExecutionResults.some((item) => item.tool === "execute_command" && item.result?.exitCode === 0), true);
+    assert.equal(result.session.executionState.phase, "complete");
+    assert.equal(result.session.toolContinuation, undefined);
+  } finally {
+    await close(server);
+  }
+});
+
 test("a stalled reviewer is required to conclude instead of issuing another repeated tool request", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-review-stagnation-"));
   fs.writeFileSync(path.join(tmp, "group.json"), JSON.stringify({

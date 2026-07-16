@@ -452,7 +452,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
 
         const toolFollowupInstruction = buildToolFollowupInstruction(accumulatedToolResults, accumulatedRejectedToolRequests);
         const recoveryInstruction = toolLoopStagnated.recoveryRequired
-          ? buildStagnantToolLoopRecoveryInstruction(agent, question, toolFollowupInstruction)
+          ? buildStagnantToolLoopRecoveryInstruction(agent, question, toolFollowupInstruction, session.executionState)
           : toolFollowupInstruction;
         const followupContext = buildMemberContext(agent, session, {
           question,
@@ -535,7 +535,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
             };
           }
         }
-        if (toolLoopStagnated.recoveryRequired && requiresStagnationWorkspaceEdit(agent, question, fileOperationPermissionTier) && !hasWorkspaceMutationRequest(response)) {
+        if (toolLoopStagnated.recoveryRequired && requiresStagnationWorkspaceEdit(agent, question, fileOperationPermissionTier, session.executionState) && !hasWorkspaceMutationRequest(response)) {
           callOutcome = yield* callRoundModel({
             options,
             session,
@@ -567,6 +567,43 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
               status: "speak",
               argument: "Stagnation recovery did not produce the required concrete workspace action.",
               objections: ["stagnation_recovery_missing_workspace_mutation"],
+              confidence: 0,
+              memory_candidates: []
+            };
+          }
+        }
+        if (toolLoopStagnated.recoveryRequired && requiresStagnationVerification(agent, fileOperationPermissionTier, session.executionState) && !hasVerificationRequest(response)) {
+          callOutcome = yield* callRoundModel({
+            options,
+            session,
+            phase: "tool_stagnation_verification_recovery",
+            round,
+            agent,
+            memberContext: followupContext,
+            messages: [...followupMessages, {
+              role: "user",
+              content: "The task is already in verification. Your recovery did not request a real verification tool. Do not read, search, fetch, edit, install, or plan. Call run_tests, run_code, or execute_command now to validate the current deliverable or project state."
+            }],
+            timeoutMs: group.settings.agentTimeoutMs,
+            toolIteration: toolIterations,
+            nativeToolPermissionTier: fileOperationPermissionTier,
+            nativeToolChoice: "required"
+          });
+          response = applyRoundResponseRules(callOutcome.response, agent, round);
+          rawTextForMessage = callOutcome.rawTextForMessage;
+          errorForMessage = callOutcome.errorForMessage;
+          if (!hasVerificationRequest(response)) {
+            session.toolContinuation = {
+              agentId: agent.id,
+              round,
+              completedIterations: toolIterations,
+              reason: "stagnation_recovery_missing_verification",
+              pendingRequests: response.tool_requests || []
+            };
+            response = {
+              status: "speak",
+              argument: "Stagnation recovery did not produce a real verification action.",
+              objections: ["stagnation_recovery_missing_verification"],
               confidence: 0,
               memory_candidates: []
             };
@@ -1102,18 +1139,32 @@ function isRepeatableInspectionTool(item = {}) {
   return ["list_directory", "read_file", "search_files", "grep_content", "web_search", "fetch_url", "api_request", "execute_command", "git_operation", "run_tests"].includes(item.tool);
 }
 
-function buildStagnantToolLoopRecoveryInstruction(agent, question, toolFollowupInstruction) {
+function buildStagnantToolLoopRecoveryInstruction(agent, question, toolFollowupInstruction, executionState) {
   const reviewer = isReviewerLike(agent);
   const roleDirective = reviewer
     ? "You are reviewing. Stop issuing more inspection, search, API, Git or verification calls unless there is one distinct unresolved evidence gap. Use the evidence already returned and give a concrete review conclusion, objection, or skip."
-    : isFileDeliveryTask(question)
+    : requiresStagnationVerification(agent, "full", executionState)
+      ? "The execution state is verify. Stop repeating inspection, search, API, Git or file-edit calls. Use the evidence already returned and run a real validation, test, build, parser, assertion, or smoke command for the current deliverable."
+      : requiresStagnationWorkspaceEdit(agent, question, "full", executionState)
       ? "You are delivering a file task. Stop repeating inspection, search, API, Git or verification calls. Use the evidence already returned and make the concrete workspace edit or repair needed for the current requirement. Do not return another investigation plan."
       : "Stop repeating inspection, search, API, Git or verification calls. Use the evidence already returned and take a materially different next action, or state the concrete blocker with its evidence.";
   return `${toolFollowupInstruction}\n\n[Stagnation recovery]\nSeveral consecutive tool turns produced no material workspace progress. ${roleDirective}`;
 }
 
-function requiresStagnationWorkspaceEdit(agent, question, permissionTier) {
-  return permissionTier === "full" && !isReviewerLike(agent) && isFileDeliveryTask(question);
+function requiresStagnationWorkspaceEdit(agent, question, permissionTier, executionState) {
+  return permissionTier === "full"
+    && !isReviewerLike(agent)
+    && isFileDeliveryTask(question)
+    && executionState?.phase !== "verify"
+    && executionState?.phase !== "review"
+    && executionState?.phase !== "complete";
+}
+
+function requiresStagnationVerification(agent, permissionTier, executionState) {
+  return permissionTier === "full"
+    && !isReviewerLike(agent)
+    && executionState?.active
+    && executionState?.phase === "verify";
 }
 
 function hasWorkspaceMutationRequest(response = {}) {
@@ -1121,6 +1172,14 @@ function hasWorkspaceMutationRequest(response = {}) {
     request.tool === "workspace_edit"
     && ["write", "append", "replace", "move"].includes(String(request.action || ""))
     && (String(request.code || "").length > 0 || String(request.content || "").length > 0 || String(request.newText || "").length > 0 || String(request.destination || "").length > 0)
+  ));
+}
+
+function hasVerificationRequest(response = {}) {
+  return (response.tool_requests || []).some((request) => (
+    request.tool === "run_tests"
+    || (request.tool === "run_code" && (String(request.code || "").trim() || String(request.inputText || "").trim()))
+    || (request.tool === "execute_command" && String(request.command || "").trim())
   ));
 }
 
