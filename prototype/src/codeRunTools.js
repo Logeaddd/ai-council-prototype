@@ -19,7 +19,7 @@ export async function runCodeTool(request, options = {}) {
   const runId = safeRunId(request.runId || request.id || makeId("run"));
   const runDir = path.join(groupRoot, "shared", "runs", runId);
   fs.mkdirSync(runDir, { recursive: true });
-  const fileName = fileNameForLanguage(language);
+  const fileName = fileNameForLanguage(language, code);
   const filePath = path.join(runDir, fileName);
   fs.writeFileSync(filePath, code, "utf8");
 
@@ -85,8 +85,8 @@ function shellForLanguage(language) {
   return process.platform === "win32" ? "cmd" : "sh";
 }
 
-function fileNameForLanguage(language) {
-  if (language === "javascript") return "main.js";
+function fileNameForLanguage(language, code = "") {
+  if (language === "javascript") return /(?:^|\n)\s*(?:import|export)\b/m.test(String(code)) ? "main.mjs" : "main.cjs";
   if (language === "python") return "main.py";
   if (language === "powershell") return "main.ps1";
   if (language === "shell") return process.platform === "win32" ? "main.cmd" : "main.sh";

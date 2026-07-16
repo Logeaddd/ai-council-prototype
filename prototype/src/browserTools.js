@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -51,9 +52,18 @@ async function runWithElectronBinary(input, options) {
   const electronPath = await resolveElectronPath();
   const inputPath = path.join(options.outputDir, "input.json");
   const outputPath = path.join(options.outputDir, "output.json");
-  fs.writeFileSync(inputPath, JSON.stringify(input, null, 2), "utf8");
+  const childInput = windowsElectronFromWsl(electronPath)
+    ? { ...input, outputDir: wslWindowsPath(input.outputDir) }
+    : input;
+  fs.writeFileSync(inputPath, JSON.stringify(childInput, null, 2), "utf8");
   const runnerPath = path.join(__dirname, "browserRunner.mjs");
-  const childResult = await spawnElectron(electronPath, [runnerPath, inputPath, outputPath], options);
+  const childPaths = windowsElectronFromWsl(electronPath)
+    ? [runnerPath, inputPath, outputPath].map(wslWindowsPath)
+    : [runnerPath, inputPath, outputPath];
+  const runtimeArgs = process.platform === "linux" && !windowsElectronFromWsl(electronPath)
+    ? ["--no-sandbox", "--headless", "--disable-gpu", ...childPaths]
+    : childPaths;
+  const childResult = await spawnElectron(electronPath, runtimeArgs, options);
   if (!fs.existsSync(outputPath)) {
     return {
       ok: false,
@@ -74,6 +84,23 @@ async function runWithElectronBinary(input, options) {
     exitCode: childResult.exitCode,
     timedOut: childResult.timedOut
   };
+}
+
+function windowsElectronFromWsl(electronPath) {
+  return process.platform === "linux" && /\.exe$/i.test(String(electronPath || ""));
+}
+
+function wslWindowsPath(value) {
+  try {
+    if (fs.existsSync(value)) return execFileSync("wslpath", ["-w", value], { encoding: "utf8" }).trim();
+    let ancestor = path.dirname(value);
+    while (ancestor !== path.dirname(ancestor) && !fs.existsSync(ancestor)) ancestor = path.dirname(ancestor);
+    const windowsAncestor = execFileSync("wslpath", ["-w", ancestor], { encoding: "utf8" }).trim();
+    const suffix = path.relative(ancestor, value).replaceAll("/", "\\");
+    return suffix ? `${windowsAncestor}\\${suffix}` : windowsAncestor;
+  } catch {
+    return value;
+  }
 }
 
 function spawnElectron(file, args, options = {}) {

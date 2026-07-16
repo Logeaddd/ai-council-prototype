@@ -1,12 +1,12 @@
 import fs from "node:fs";
 import path from "node:path";
+import { spawn } from "node:child_process";
 import { isInsidePath, normalizeWorkspacePathAlias } from "./pathGuards.js";
 
 const DEFAULT_MAX_ROWS = 100;
 const MAX_ROWS = 1000;
 
 export async function databaseQueryTool(request, options = {}) {
-  const { DatabaseSync } = await loadSqlite();
   const groupRoot = resolveGroupRoot(options.groupPath);
   const dbPath = resolveDatabasePath(groupRoot, request.databasePath || request.path);
   const sql = requiredText(request.sql || request.query || request.command, "sql");
@@ -24,6 +24,12 @@ export async function databaseQueryTool(request, options = {}) {
     }
     fs.mkdirSync(path.dirname(dbPath), { recursive: true });
   }
+
+  const sqlite = await loadSqlite();
+  if (!sqlite) {
+    return databaseQueryWithPython({ dbPath, sql, params, writeMode, maxRows, groupRoot });
+  }
+  const { DatabaseSync } = sqlite;
 
   const startedAtMs = Date.now();
   const db = new DatabaseSync(dbPath, { readOnly: !writeMode });
@@ -66,8 +72,90 @@ async function loadSqlite() {
   try {
     return await import("node:sqlite");
   } catch {
-    throw toolError("sqlite_unavailable", "This Node runtime does not provide node:sqlite.");
+    return null;
   }
+}
+
+async function databaseQueryWithPython({ dbPath, sql, params, writeMode, maxRows, groupRoot }) {
+  const payload = { path: dbPath, sql, params, mode: writeMode ? "execute" : "query", maxRows };
+  const result = await runPythonSqlite(payload);
+  if (!result.ok) throw toolError(result.code || "sqlite_unavailable", result.error || "SQLite fallback failed.");
+  return {
+    ok: true,
+    source: "local_sqlite_database_python",
+    engine: "sqlite",
+    mode: writeMode ? "execute" : "query",
+    databasePath: relativePath(groupRoot, dbPath),
+    readOnly: !writeMode,
+    ...(writeMode
+      ? { changes: Number(result.value.changes || 0), lastInsertRowid: result.value.lastInsertRowid ?? undefined }
+      : { rowCount: result.value.rows.length, truncated: Boolean(result.value.truncated), rows: result.value.rows })
+  };
+}
+
+function runPythonSqlite(payload) {
+  const script = [
+    "import json, sqlite3, sys",
+    "p = json.load(sys.stdin)",
+    "db = sqlite3.connect(p['path'])",
+    "db.row_factory = sqlite3.Row",
+    "try:",
+    "  if p['mode'] == 'query':",
+    "    cur = db.execute(p['sql'], p.get('params', []))",
+    "    rows = [dict(row) for row in cur.fetchmany(p['maxRows'] + 1)]",
+    "    print(json.dumps({'rows': rows[:p['maxRows']], 'truncated': len(rows) > p['maxRows']}))",
+    "  else:",
+    "    if p.get('params'):",
+    "      cur = db.execute(p['sql'], p['params'])",
+    "    else:",
+    "      cur = db.executescript(p['sql'])",
+    "    db.commit()",
+    "    print(json.dumps({'changes': db.total_changes, 'lastInsertRowid': getattr(cur, 'lastrowid', None)}))",
+    "finally:",
+    "  db.close()"
+  ].join("\n");
+  return runPythonCandidates(["python3", "python"], script, payload);
+}
+
+function runPythonCandidates(commands, script, payload) {
+  return new Promise((resolve) => {
+    const tryNext = (index) => {
+      if (index >= commands.length) {
+        resolve({ ok: false, code: "sqlite_unavailable", error: "Neither node:sqlite nor Python sqlite3 is available." });
+        return;
+      }
+      const child = spawn(commands[index], ["-c", script], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+      const stdout = [];
+      const stderr = [];
+      let handedOff = false;
+      const timer = setTimeout(() => child.kill(), 30_000);
+      child.stdout.on("data", (chunk) => stdout.push(Buffer.from(chunk)));
+      child.stderr.on("data", (chunk) => stderr.push(Buffer.from(chunk)));
+      child.on("error", (error) => {
+        clearTimeout(timer);
+        if (error.code === "ENOENT") {
+          handedOff = true;
+          tryNext(index + 1);
+        }
+        else resolve({ ok: false, code: "sqlite_fallback_failed", error: error.message });
+      });
+      child.on("close", (exitCode) => {
+        clearTimeout(timer);
+        if (handedOff) return;
+        if (exitCode !== 0) {
+          resolve({ ok: false, code: "sqlite_query_failed", error: Buffer.concat(stderr).toString("utf8").trim() || `Python sqlite exited with ${exitCode}.` });
+          return;
+        }
+        try {
+          resolve({ ok: true, value: JSON.parse(Buffer.concat(stdout).toString("utf8")) });
+        } catch (error) {
+          resolve({ ok: false, code: "sqlite_invalid_output", error: error.message });
+        }
+      });
+      child.stdin.end(JSON.stringify(payload));
+    };
+    tryNext(0);
+  });
 }
 
 function executeWrite(db, sql, params) {

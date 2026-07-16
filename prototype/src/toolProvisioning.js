@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { executeCommandTool } from "./commandTools.js";
+import { extractArchiveTool } from "./archiveTools.js";
 
 const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000;
 const KNOWN_TOOLS = {
@@ -48,6 +49,24 @@ export async function provisionTool(request, options = {}) {
   if (!installed.ok) {
     return provisionResult({ name, command, status: "install_failed", strategy, install: installed, ok: false });
   }
+  if (strategy.archivePath) {
+    try {
+      extractArchiveTool({
+        path: strategy.archivePath,
+        destination: strategy.destinationPath,
+        overwrite: true
+      }, { groupPath: groupRoot });
+    } catch (error) {
+      return provisionResult({
+        name,
+        command,
+        status: "install_failed",
+        strategy,
+        install: { ...installed, ok: false, code: error.code || "archive_extract_failed", error: error.message },
+        ok: false
+      });
+    }
+  }
 
   const after = await probeCommand(command, request.verifyCommand, commandOptions, request.executablePath, installRoot);
   return provisionResult({
@@ -77,6 +96,9 @@ function downloadStrategy(request, installRoot) {
   const archiveName = safeSegment(request.fileName || path.basename(new URL(url).pathname) || "tool-download");
   const relativeRoot = relativeForShell(installRoot);
   const relativeArchive = relativeForShell(path.join(installRoot, archiveName));
+  const workspaceRoot = path.resolve(installRoot, "../../..");
+  const archiveWorkspacePath = path.relative(workspaceRoot, path.join(installRoot, archiveName)).replaceAll("\\", "/");
+  const destinationWorkspacePath = path.relative(workspaceRoot, installRoot).replaceAll("\\", "/");
   if (process.platform === "win32") {
     const download = `Invoke-WebRequest -UseBasicParsing -Uri '${psQuote(url)}' -OutFile '${psQuote(relativeArchive)}'`;
     const unpack = /\.zip$/i.test(archiveName)
@@ -84,12 +106,18 @@ function downloadStrategy(request, installRoot) {
       : "";
     return { type: "download", url, command: `${download}${unpack}`, shell: "powershell" };
   }
+  const isZip = /\.zip$/i.test(archiveName);
   const unpack = /\.(?:tar\.gz|tgz)$/i.test(archiveName)
     ? ` && tar -xzf '${shQuote(relativeArchive)}' -C '${shQuote(relativeRoot)}'`
-    : /\.zip$/i.test(archiveName)
-      ? ` && unzip -o '${shQuote(relativeArchive)}' -d '${shQuote(relativeRoot)}'`
-      : "";
-  return { type: "download", url, command: `curl -fL '${shQuote(url)}' -o '${shQuote(relativeArchive)}'${unpack}`, shell: "sh" };
+    : "";
+  return {
+    type: "download",
+    url,
+    command: `curl -fL '${shQuote(url)}' -o '${shQuote(relativeArchive)}'${unpack}`,
+    shell: "sh",
+    archivePath: isZip ? archiveWorkspacePath : "",
+    destinationPath: isZip ? destinationWorkspacePath : ""
+  };
 }
 
 async function probeCommand(command, verifyCommand, options, executablePath, installRoot) {
