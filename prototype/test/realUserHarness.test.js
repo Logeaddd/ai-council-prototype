@@ -5,7 +5,7 @@ import path from "node:path";
 import zlib from "node:zlib";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { prepareCampaignFixtures, providerCallMetrics, runSeededRealUserBaseline, runSeededRealUserCampaign, verifyCampaignDeliverable, verifyCampaignPersistence, verifyCampaignResumption, verifyCampaignToolEvidence, verifyNoDuplicateVerifiedWork } from "../src/realUserHarness.js";
+import { prepareCampaignFixtures, prepareGroupWorkspace, providerCallMetrics, runSeededRealUserBaseline, runSeededRealUserCampaign, verifyCampaignDeliverable, verifyCampaignPersistence, verifyCampaignResumption, verifyCampaignToolEvidence, verifyNoDuplicateVerifiedWork } from "../src/realUserHarness.js";
 import { createSeededCampaignScenario, EXTERNAL_ROOT_TOKEN } from "../src/realUserCampaign.js";
 
 test("seeded real-user baseline uses the HTTP/SSE route, persists interruption, continues after restart, and verifies an edited artifact", async () => {
@@ -290,6 +290,33 @@ test("capability acquisition evidence must come from a successful current-campai
   assert.equal(passed.passed, true);
   assert.equal(passed.acquisition.passed, true);
   assert.deepEqual(passed.acquisition.tools, ["install_package"]);
+
+  const shellPassed = verifyCampaignToolEvidence(verifier, [{ toolExecutionResults: [
+    { tool: "execute_command", status: "completed", command: "npm install chosen-image-package", result: { ok: true, exitCode: 0, stdout: "added 1 package" } },
+    { tool: "execute_command", status: "completed", command: "node render-image.js", result: { ok: true, exitCode: 0 } }
+  ] }]);
+  assert.equal(shellPassed.passed, true);
+  assert.deepEqual(shellPassed.acquisition.tools, ["execute_command_package_install"]);
+
+  const maskedFailure = verifyCampaignToolEvidence(verifier, [{ toolExecutionResults: [
+    { tool: "execute_command", status: "completed", command: "apt-get install image-tool | tail -5", result: { ok: true, exitCode: 0, stdout: "E: Could not open lock file: Permission denied" } },
+    { tool: "execute_command", status: "completed", command: "node render-image.js", result: { ok: true, exitCode: 0 } }
+  ] }]);
+  assert.equal(maskedFailure.passed, false);
+});
+
+test("campaign workspaces create a local npm boundary instead of installing into an ancestor product", () => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-package-boundary-"));
+  try {
+    fs.writeFileSync(path.join(parent, "package.json"), JSON.stringify({ name: "ancestor-product", private: true }), "utf8");
+    const groupPath = path.join(parent, "nested", "campaign-group");
+    prepareGroupWorkspace(groupPath, { agents: [] });
+    const boundary = JSON.parse(fs.readFileSync(path.join(groupPath, "package.json"), "utf8"));
+    assert.equal(boundary.name, "ai-council-harness-workspace");
+    assert.equal(boundary.private, true);
+  } finally {
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
 });
 
 test("capability-acquisition PNG verifier checks the real binary structure, dimensions and every RGBA pixel", async () => {

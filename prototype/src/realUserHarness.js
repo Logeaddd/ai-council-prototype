@@ -616,15 +616,17 @@ export function verifyCampaignToolEvidence(verifier = {}, sessions = []) {
     );
   }
   const acquisitionTools = new Set(["install_package", "provision_tool", "skill_install", "mcp_install_npm"]);
-  const acquisitionResults = results.map((item, index) => ({ item, index })).filter(({ item }) => (
-    acquisitionTools.has(item.tool) && item.status === "completed" && item.result?.ok !== false
-  ));
-  const usedAcquisitions = acquisitionResults.filter(({ item, index }) => results.slice(index + 1).some((later) => acquisitionUsedByLaterTool(item, later)));
+  const acquisitionResults = results.map((item, index) => {
+    if (acquisitionTools.has(item.tool) && item.status === "completed" && item.result?.ok !== false) return { item, index, kind: item.tool };
+    if (isSuccessfulShellAcquisition(item)) return { item, index, kind: "execute_command_package_install" };
+    return null;
+  }).filter(Boolean);
+  const usedAcquisitions = acquisitionResults.filter(({ item, index }) => results.slice(index + 1).some((later) => acquisitionFollowedByLaterWork(item, later)));
   const acquisition = {
     required: verifier.requiresAcquisition === true,
     passed: verifier.requiresAcquisition !== true || usedAcquisitions.length > 0,
-    tools: [...new Set(usedAcquisitions.map(({ item }) => item.tool))],
-    acquiredTools: [...new Set(acquisitionResults.map(({ item }) => item.tool))]
+    tools: [...new Set(usedAcquisitions.map(({ kind }) => kind))],
+    acquiredTools: [...new Set(acquisitionResults.map(({ kind }) => kind))]
   };
   if (acquisition.required) {
     checks.push(check("capability_acquired_in_current_campaign", acquisitionResults.length > 0, acquisition.acquiredTools.join(", ") || "no successful acquisition tool result"));
@@ -634,49 +636,24 @@ export function verifyCampaignToolEvidence(verifier = {}, sessions = []) {
   return { passed: checks.every((item) => item.passed), checks, acquisition };
 }
 
-function acquisitionUsedByLaterTool(acquisition, later) {
+function acquisitionFollowedByLaterWork(acquisition, later) {
   if (later.status !== "completed" || later.result?.ok === false) return false;
   const allowedLaterTools = acquisition.tool === "skill_install"
     ? new Set(["skill_read", "skill_enable", "execute_command", "run_code", "run_tests"])
     : acquisition.tool === "mcp_install_npm"
       ? new Set(["mcp_call", "mcp_list_tools", "execute_command", "run_code", "run_tests"])
       : new Set(["execute_command", "run_code", "run_tests"]);
-  if (!allowedLaterTools.has(later.tool)) return false;
-  const evidence = JSON.stringify({
-    tool: later.tool,
-    command: later.command,
-    code: later.code,
-    cwd: later.cwd,
-    skillId: later.skillId,
-    serverId: later.serverId,
-    mcpToolName: later.mcpToolName,
-    result: {
-      command: later.result?.command,
-      cwd: later.result?.cwd,
-      skillId: later.result?.skillId,
-      serverId: later.result?.serverId,
-      source: later.result?.source
-    }
-  }).toLowerCase().replaceAll("\\", "/");
-  return acquisitionReferenceTokens(acquisition).some((token) => evidence.includes(token));
+  return allowedLaterTools.has(later.tool)
+    && (later.tool !== "run_tests" || later.result?.passed !== false)
+    && (later.tool !== "execute_command" || Number(later.result?.exitCode) === 0);
 }
 
-function acquisitionReferenceTokens(item) {
-  const result = item.result || {};
-  const packageName = String(result.packageName || item.packageName || item.package || "").replace(/@[^/@]+$/, "");
-  return [
-    packageName,
-    result.environmentPath,
-    result.name,
-    result.command,
-    result.skillId,
-    result.serverId,
-    item.skillId,
-    item.serverId,
-    item.commandName,
-    item.toolName
-  ].map((value) => String(value || "").trim().toLowerCase().replaceAll("\\", "/"))
-    .filter((value) => value.length >= 3);
+function isSuccessfulShellAcquisition(item) {
+  if (item.tool !== "execute_command" || item.status !== "completed" || item.result?.ok === false || Number(item.result?.exitCode) !== 0) return false;
+  const command = String(item.command || item.result?.command || "");
+  if (!/(?:^|[;&|]\s*)(?:npm|pnpm|yarn)\s+(?:add|install)\b|\b(?:python|python3|py)(?:\.exe)?\s+-m\s+pip\s+install\b|(?:^|[;&|]\s*)pip3?\s+install\b|(?:^|[;&|]\s*)cargo\s+(?:add|install)\b|(?:^|[;&|]\s*)go\s+(?:get|install)\b|(?:^|[;&|]\s*)gem\s+install\b|(?:^|[;&|]\s*)(?:winget|choco|scoop|brew)\s+install\b|\bapt(?:-get)?\s+install\b/i.test(command)) return false;
+  const output = `${item.result?.stdout || ""}\n${item.result?.stderr || ""}`;
+  return !/(?:npm ERR!|permission denied|unable to acquire|could not open lock file|no module named ensurepip|command not found|not recognized as an internal or external command)/i.test(output);
 }
 
 function isSuccessfulVerifiedWork(item = {}) {
@@ -934,7 +911,7 @@ function runProcess(command, args) {
   }));
 }
 
-function prepareGroupWorkspace(groupPath, group) {
+export function prepareGroupWorkspace(groupPath, group) {
   for (const relative of ["shared/inbox", "shared/logs", "members", "sessions", "approvals"]) {
     fs.mkdirSync(path.join(groupPath, relative), { recursive: true });
   }
@@ -947,6 +924,14 @@ function prepareGroupWorkspace(groupPath, group) {
     privateFolder: `members/${safeId(agent.id)}`
   }));
   for (const seat of seats) fs.mkdirSync(path.join(groupPath, seat.privateFolder), { recursive: true });
+  const packageBoundary = path.join(groupPath, "package.json");
+  if (!fs.existsSync(packageBoundary)) {
+    fs.writeFileSync(packageBoundary, JSON.stringify({
+      name: "ai-council-harness-workspace",
+      version: "0.0.0",
+      private: true
+    }, null, 2) + "\n", "utf8");
+  }
   fs.writeFileSync(path.join(groupPath, "group.json"), JSON.stringify({
     groupFolderName: "baseline-group",
     groupPath,
