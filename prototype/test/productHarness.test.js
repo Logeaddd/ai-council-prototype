@@ -10,7 +10,7 @@ test("product harness has no default full-suite timeout but accepts an explicit 
   assert.equal(testSuiteTimeoutMs(undefined), undefined);
   assert.equal(testSuiteTimeoutMs(0), undefined);
   assert.equal(testSuiteTimeoutMs(300000), 300000);
-  assert.equal(testSuiteConcurrency(undefined), 4);
+  assert.equal(testSuiteConcurrency(undefined), 1);
   assert.equal(testSuiteConcurrency(2), 2);
 });
 

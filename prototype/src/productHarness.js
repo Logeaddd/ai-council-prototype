@@ -160,7 +160,7 @@ export function testSuiteTimeoutMs(value) {
 
 export function testSuiteConcurrency(value) {
   const concurrency = Number.parseInt(String(value ?? ""), 10);
-  return Number.isFinite(concurrency) && concurrency > 0 ? concurrency : 4;
+  return Number.isFinite(concurrency) && concurrency > 0 ? concurrency : 1;
 }
 
 function summarizeTestEvidence(value = {}) {
