@@ -1960,8 +1960,20 @@ export function buildToolFollowupInstruction(results = [], rejected = []) {
   ];
   const completed = (Array.isArray(results) ? results : []).filter((item) => item?.status === "completed" && item.result?.ok !== false);
   const failedCommands = (Array.isArray(results) ? results : []).filter((item) => item?.tool === "execute_command" && item?.status === "failed");
+  const failedManagedInstalls = (Array.isArray(results) ? results : []).filter((item) => item?.tool === "install_package" && item?.status === "failed");
   if (failedCommands.length) {
     lines.push(`Failed command attempts this round: ${failedCommands.length}. Do not repeat an identical failed command. Read its stdout, stderr, exit code, timeout state, and environment hint before choosing a materially different next action.`);
+  }
+  for (const item of failedManagedInstalls) {
+    const manager = item.manager || item.result?.manager || "the selected package manager";
+    const packageName = item.packageName || item.package || item.result?.packageName || "the selected package";
+    lines.push(`Managed package installation failed for ${manager} package ${JSON.stringify(packageName)}. Use the exact returned error. Do not retry the same manager unchanged; if another already-detected runtime ecosystem can satisfy the task, choose an equivalent package yourself and request install_package with that manager.`);
+  }
+  for (const item of failedCommands.filter((entry) => isPackageInstallCommand(entry))) {
+    const output = `${item.result?.stdout || ""}\n${item.result?.stderr || ""}\n${item.result?.error || item.error || ""}`;
+    if (/no such file or directory|cannot find the path|path not found|cannot cd/i.test(output) || /\bcd\s+[^;&|]+\s*(?:&&|;)/i.test(String(item.command || item.result?.command || ""))) {
+      lines.push("A direct package install failed after changing into a guessed directory. Do not invent managed environment paths or search for them. Run the package manager from the current existing workspace, or use install_package with the selected manager and consume the environmentPath returned by that tool.");
+    }
   }
   const missingCommands = missingCommandNames(failedCommands);
   if (missingCommands.length) {
@@ -2053,10 +2065,14 @@ export function buildToolFollowupInstruction(results = [], rejected = []) {
 }
 
 function isSuccessfulPackageInstallCommand(item) {
-  const command = String(item.command || item.result?.command || "");
-  if (!/(?:^|[;&|]\s*)(?:npm|pnpm|yarn)\s+(?:add|install)\b|\b(?:python|python3|py)(?:\.exe)?\s+-m\s+pip\s+install\b|(?:^|[;&|]\s*)pip3?\s+install\b|(?:^|[;&|]\s*)cargo\s+(?:add|install)\b|(?:^|[;&|]\s*)go\s+(?:get|install)\b|(?:^|[;&|]\s*)gem\s+install\b|(?:^|[;&|]\s*)(?:winget|choco|scoop|brew)\s+install\b|\bapt(?:-get)?\s+install\b/i.test(command)) return false;
+  if (!isPackageInstallCommand(item)) return false;
   const output = `${item.result?.stdout || ""}\n${item.result?.stderr || ""}`;
   return !/(?:npm ERR!|permission denied|unable to acquire|could not open lock file|no module named ensurepip|command not found|not recognized as an internal or external command)/i.test(output);
+}
+
+function isPackageInstallCommand(item) {
+  const command = String(item.command || item.result?.command || "");
+  return /(?:^|[;&|]\s*)(?:npm|pnpm|yarn)\s+(?:add|install)\b|\b(?:python|python3|py)(?:\.exe)?\s+-m\s+pip\s+install\b|(?:^|[;&|]\s*)pip3?\s+install\b|(?:^|[;&|]\s*)cargo\s+(?:add|install)\b|(?:^|[;&|]\s*)go\s+(?:get|install)\b|(?:^|[;&|]\s*)gem\s+install\b|(?:^|[;&|]\s*)(?:winget|choco|scoop|brew)\s+install\b|\bapt(?:-get)?\s+install\b/i.test(command);
 }
 
 function missingCommandNames(items = []) {

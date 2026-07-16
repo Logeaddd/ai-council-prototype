@@ -36,4 +36,23 @@ test("tool follow-up moves from successful acquisition to real usage without exp
     result: { ok: true, exitCode: 0, stdout: "E: Could not open lock file: Permission denied" }
   }]);
   assert.doesNotMatch(maskedFailure, /direct package-manager command completed successfully/);
+
+  const managedFailure = buildToolFollowupInstruction([{
+    tool: "install_package",
+    status: "failed",
+    manager: "first-runtime",
+    packageName: "chosen-package",
+    result: { ok: false, error: "runtime environment unavailable" }
+  }]);
+  assert.match(managedFailure, /Do not retry the same manager unchanged/);
+  assert.match(managedFailure, /another already-detected runtime ecosystem/);
+
+  const guessedDirectory = buildToolFollowupInstruction([{
+    tool: "execute_command",
+    status: "failed",
+    command: "cd shared/environments/guessed && npm install chosen-package",
+    result: { ok: false, exitCode: 2, stderr: "cd: can't cd to shared/environments/guessed: No such file or directory" }
+  }]);
+  assert.match(guessedDirectory, /Do not invent managed environment paths/);
+  assert.match(guessedDirectory, /current existing workspace/);
 });
