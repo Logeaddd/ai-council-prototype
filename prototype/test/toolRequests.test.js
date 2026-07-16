@@ -208,6 +208,8 @@ test("controlled file tools can read common build configuration files", async ()
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-build-files-"));
   fs.writeFileSync(path.join(tmp, "build.gradle"), "plugins { id 'fabric-loom' }\n", "utf8");
   fs.writeFileSync(path.join(tmp, "settings.gradle.kts"), "pluginManagement { repositories { gradlePluginPortal() } }\n", "utf8");
+  fs.writeFileSync(path.join(tmp, "validate.cjs"), "module.exports = { valid: true };\n", "utf8");
+  fs.writeFileSync(path.join(tmp, "Dockerfile"), "FROM node:20\n", "utf8");
 
   const result = await executeToolRequests({
     permissionTier: "tool",
@@ -216,7 +218,9 @@ test("controlled file tools can read common build configuration files", async ()
     round: 1,
     requests: [
       { tool: "read_file", path: "build.gradle", reason: "Read Gradle build file" },
-      { tool: "read_file", path: "settings.gradle.kts", reason: "Read Kotlin Gradle settings" }
+      { tool: "read_file", path: "settings.gradle.kts", reason: "Read Kotlin Gradle settings" },
+      { tool: "read_file", path: "validate.cjs", reason: "Read CommonJS validation script" },
+      { tool: "read_file", path: "Dockerfile", reason: "Read extensionless container build file" }
     ]
   });
 
@@ -224,6 +228,8 @@ test("controlled file tools can read common build configuration files", async ()
   assert.equal(result.results.every((item) => item.status === "completed"), true);
   assert.match(result.results[0].result.content, /fabric-loom/);
   assert.match(result.results[1].result.content, /pluginManagement/);
+  assert.match(result.results[2].result.content, /valid: true/);
+  assert.match(result.results[3].result.content, /FROM node:20/);
 });
 
 test("workspace path aliases work across local agent tools", async () => {

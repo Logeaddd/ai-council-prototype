@@ -49,11 +49,15 @@ const INTERNAL_WORKSPACE_SEGMENTS = new Set(["members", "sessions", "approvals"]
 const INTERNAL_SHARED_SEGMENTS = new Set(["logs", "memory", "memory_pending", "inbox", "file-ops"]);
 
 const TEXT_EXTENSIONS = new Set([
-  ".txt", ".md", ".markdown", ".json", ".jsonl", ".js", ".jsx", ".ts", ".tsx",
-  ".css", ".scss", ".html", ".htm", ".xml", ".yaml", ".yml", ".py", ".java",
+  ".txt", ".md", ".markdown", ".json", ".jsonl", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts",
+  ".css", ".scss", ".less", ".html", ".htm", ".xml", ".yaml", ".yml", ".vue", ".svelte", ".astro", ".py", ".java",
   ".kt", ".kts", ".gradle", ".groovy",
   ".c", ".cpp", ".cs", ".go", ".rs", ".php", ".rb", ".sh", ".ps1", ".sql",
-  ".csv", ".toml", ".properties", ".mcmeta", ".mcfunction", ".lang"
+  ".csv", ".tsv", ".toml", ".ini", ".cfg", ".conf", ".graphql", ".gql", ".proto",
+  ".properties", ".mcmeta", ".mcfunction", ".lang"
+]);
+const TEXT_BASENAMES = new Set([
+  "dockerfile", "makefile", "cmakelists.txt", "gemfile", "rakefile", "procfile", "justfile", "vagrantfile"
 ]);
 
 export function executeFileTool(request, options = {}) {
@@ -504,7 +508,7 @@ function isSecretBasename(base) {
 }
 
 function isTextCandidate(filePath) {
-  return TEXT_EXTENSIONS.has(path.extname(filePath).toLowerCase());
+  return TEXT_EXTENSIONS.has(path.extname(filePath).toLowerCase()) || TEXT_BASENAMES.has(path.basename(filePath).toLowerCase());
 }
 
 function normalizeRelative(root, candidate) {
