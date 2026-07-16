@@ -5,7 +5,7 @@ import path from "node:path";
 import zlib from "node:zlib";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { postCouncilEvents, prepareCampaignFixtures, prepareGroupWorkspace, providerCallMetrics, runSeededRealUserBaseline, runSeededRealUserCampaign, verifyCampaignDeliverable, verifyCampaignPersistence, verifyCampaignResumption, verifyCampaignToolEvidence, verifyNoDuplicateVerifiedWork } from "../src/realUserHarness.js";
+import { isStreamingActivityEvent, postCouncilEvents, prepareCampaignFixtures, prepareGroupWorkspace, providerCallMetrics, runSeededRealUserBaseline, runSeededRealUserCampaign, verifyCampaignDeliverable, verifyCampaignPersistence, verifyCampaignResumption, verifyCampaignToolEvidence, verifyNoDuplicateVerifiedWork } from "../src/realUserHarness.js";
 import { createSeededCampaignScenario, EXTERNAL_ROOT_TOKEN } from "../src/realUserCampaign.js";
 
 test("seeded real-user baseline uses the HTTP/SSE route, persists interruption, continues after restart, and verifies an edited artifact", async () => {
@@ -118,6 +118,12 @@ test("real HTTP/SSE campaign requests fail as infrastructure when no event or he
   } finally {
     await close(server);
   }
+});
+
+test("model-stream interruption can close at real agent start before text or tool output", () => {
+  assert.equal(isStreamingActivityEvent({ type: "agent_start" }), true);
+  assert.equal(isStreamingActivityEvent({ type: "agent_delta" }), true);
+  assert.equal(isStreamingActivityEvent({ type: "tool_start" }), false);
 });
 
 test("campaign recovery requires completed visible work after every interruption", () => {

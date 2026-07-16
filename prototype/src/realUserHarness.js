@@ -1160,8 +1160,8 @@ function isMaterialActionEvent(event = {}) {
   return isMaterialActionType(event.type) && event.status !== "rejected";
 }
 
-function isStreamingActivityEvent(event = {}) {
-  return event.type === "agent_delta" || event.type === "model_start";
+export function isStreamingActivityEvent(event = {}) {
+  return ["agent_start", "model_start", "agent_delta"].includes(event.type);
 }
 
 function isVerifiedToolActivityEvent(event = {}) {
