@@ -469,7 +469,9 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
           enabledSkills: loadEnabledSkills(baseDir, options.groupPath, options.appSettings),
           ...loadSummaryContext(options.groupPath, agent, options.appSettings),
           privateBossMessages: loadPrivateBossMessages(options.groupPath, agent, options.appSettings),
-          contextInvalidations
+          contextInvalidations,
+          currentTurnToolResults: toolResult.results,
+          currentTurnRejectedToolRequests: toolResult.rejected
         });
         const followupMessages = buildRoundPrompt(agent, question, session, round, {
           ...promptOptions,

@@ -7078,6 +7078,106 @@ function listen(server) {
   return new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
 }
 
+test("tool follow-up receives exact immediate API and file results before writing the artifact", async () => {
+  const groupPath = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-immediate-evidence-"));
+  fs.mkdirSync(path.join(groupPath, "sessions"), { recursive: true });
+  fs.mkdirSync(path.join(groupPath, "shared", "deliverables"), { recursive: true });
+  fs.writeFileSync(path.join(groupPath, "shared", "deliverables", "catalog.json"), '{"source":"old","items":[]}\n', "utf8");
+  fs.writeFileSync(path.join(groupPath, "group.json"), JSON.stringify({
+    id: "immediate-evidence",
+    name: "Immediate Evidence",
+    permissions: { defaultTier: "text", seatTiers: { executor: "full" } },
+    seats: [
+      { seatId: "executor", displayName: "Executor", enabled: true, privateFolder: "members/Executor" },
+      { seatId: "finalizer", displayName: "Finalizer", enabled: true, judge: true, privateFolder: "members/Finalizer" }
+    ]
+  }), "utf8");
+  const exactBody = '{"items":[{"id":"atlas-6","title":"Atlas 6","priority":"high","active":true},{"id":"cedar-6","title":"Cedar 0","priority":"low","active":false}]}';
+  let executorStep = 0;
+  const followupPrompts = [];
+  const server = http.createServer(async (req, res) => {
+    if (req.url === "/catalog/6") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(exactBody);
+      return;
+    }
+    const body = JSON.parse(await readRequestBody(req));
+    const prompt = JSON.stringify(body.messages || []);
+    const messageText = (body.messages || []).map((message) => String(message.content || "")).join("\n");
+    if (prompt.includes("FinalDecision JSON object")) {
+      writeOpenAiStream(res, JSON.stringify({
+        answer: "The exact API catalog was written and verified.",
+        consensus_score: 1,
+        supporting_agents: ["Executor"],
+        dissenting_agents: [],
+        minority_report: "",
+        risks: [],
+        next_actions: [],
+        selected_file_operation_ids: [],
+        memory_candidates: []
+      }));
+      return;
+    }
+    if (executorStep === 0) {
+      executorStep += 1;
+      writeOpenAiNativeToolStream(res, [
+        { tool: "api_request", method: "GET", url: `http://127.0.0.1:${server.address().port}/catalog/6`, reason: "Read exact catalog" },
+        { tool: "read_file", path: "shared/deliverables/catalog.json", reason: "Inspect current artifact" }
+      ]);
+      return;
+    }
+    followupPrompts.push(prompt);
+    if (executorStep === 1) {
+      assert.match(messageText, /Current-turn tool evidence/);
+      assert.match(messageText, /Atlas 6/);
+      assert.match(messageText, /Cedar 0/);
+      assert.match(messageText, /active\\":true/);
+      assert.match(messageText, /active\\":false/);
+      executorStep += 1;
+      writeOpenAiNativeToolStream(res, [{
+        tool: "workspace_edit",
+        action: "write",
+        path: "shared/deliverables/catalog.json",
+        code: `${exactBody}\n`,
+        reason: "Preserve the exact current API values"
+      }]);
+      return;
+    }
+    if (executorStep === 2) {
+      executorStep += 1;
+      writeOpenAiNativeToolStream(res, [{
+        tool: "run_code",
+        language: "node",
+        code: `const fs=require('fs');const got=fs.readFileSync('shared/deliverables/catalog.json','utf8').trim();const expected=${JSON.stringify(exactBody)};if(got!==expected)throw new Error('mismatch');console.log('exact catalog verified');`,
+        reason: "Verify exact strings and booleans"
+      }]);
+      return;
+    }
+    writeOpenAiStream(res, JSON.stringify({ status: "speak", position: "executor", argument: "Exact catalog values were preserved and verified.", objections: [], objection_items: [], resolved_ids: [], file_operations: [], tool_requests: [], memory_candidates: [] }));
+  });
+  await listen(server);
+
+  try {
+    const apiBaseUrl = `http://127.0.0.1:${server.address().port}/v1`;
+    const group = validateGroupConfig({
+      id: "immediate-evidence",
+      name: "Immediate Evidence",
+      settings: { maxRounds: 2, minConsensusWeight: 1, stopWhenAllSkip: true, agentTimeoutMs: 3000, maxToolIterations: 6 },
+      agents: [
+        { id: "executor", name: "Executor", role: "Builder", provider: "openai-compatible", apiBaseUrl, allowUnsafePrivateNetwork: true, apiKey: "test-key", model: "test-model", weight: 1, enabled: true },
+        { id: "finalizer", name: "Finalizer", role: "Finalizer", provider: "openai-compatible", apiBaseUrl, allowUnsafePrivateNetwork: true, apiKey: "test-key", model: "test-model", weight: 1, enabled: true, judge: true }
+      ]
+    });
+    const { session } = await runCouncil("Fetch the catalog API, update shared/deliverables/catalog.json with every exact field, and validate it.", group, groupPath, { groupPath, allowHttp: true, allowUnsafePrivateNetwork: true });
+    assert.equal(fs.readFileSync(path.join(groupPath, "shared", "deliverables", "catalog.json"), "utf8").trim(), exactBody);
+    assert.equal(session.toolExecutionResults.some((item) => item.tool === "api_request" && item.result?.text === exactBody), true);
+    assert.equal(session.toolExecutionResults.some((item) => item.tool === "run_code" && item.status === "completed"), true);
+    assert.equal(followupPrompts.length >= 2, true);
+  } finally {
+    await close(server);
+  }
+});
+
 function close(server) {
   return new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
 }

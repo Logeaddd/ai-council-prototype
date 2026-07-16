@@ -30,6 +30,11 @@ export function buildMemberContext(agent, session, options = {}) {
   const visibleFileOperationExecutionResults = selectVisibleFileOperationResults(session.fileOperationExecutionResults || [], agent, transcriptVisibility);
   const visibleToolExecutionResults = selectVisibleToolResults(session.toolExecutionResults || [], agent, transcriptVisibility);
   const visibleRejectedToolRequests = selectVisibleToolResults(session.rejectedToolRequests || [], agent, transcriptVisibility);
+  const currentTurnEvidence = buildCurrentTurnEvidencePack({
+    toolExecutionResults: selectVisibleToolResults(options.currentTurnToolResults || [], agent, transcriptVisibility),
+    rejectedToolRequests: selectVisibleToolResults(options.currentTurnRejectedToolRequests || [], agent, transcriptVisibility)
+  });
+  const currentTurnSignatures = new Set(currentTurnEvidence.sourceRecords.map((item) => currentTurnEvidenceIdentity(item.kind, item.item)));
   const attachedFiles = normalizeFileAttachments(options.attachments || []);
   const retrievedSelection = excludeInvalidatedContextItems(options.retrievedContext || [], retrievedContextSource, priorityPolicy);
   const hotCacheSelection = excludeInvalidatedContextItems(options.publicEventHotCache?.events || [], (item) => contextSource("public_event", item?.eventId || item?.sequence, {
@@ -77,16 +82,18 @@ export function buildMemberContext(agent, session, options = {}) {
     enabledSkills: String(options.enabledSkills || "").trim()
   };
   const stableMessages = contextMessagesFromStable(stable);
+  const currentTurnMessages = contextMessagesFromCurrentTurnEvidence(currentTurnEvidence);
   const executionEvidenceBudget = resolveExecutionEvidenceBudget({
     limits,
     stableMessages,
+    currentTurnMessages,
     coreBase,
     summaries
   });
   const executionEvidence = buildExecutionEvidencePack({
     fileOperationExecutionResults: visibleFileOperationExecutionResults,
-    toolExecutionResults: visibleToolExecutionResults,
-    rejectedToolRequests: visibleRejectedToolRequests
+    toolExecutionResults: visibleToolExecutionResults.filter((item) => !currentTurnSignatures.has(currentTurnEvidenceIdentity("tool", item))),
+    rejectedToolRequests: visibleRejectedToolRequests.filter((item) => !currentTurnSignatures.has(currentTurnEvidenceIdentity("rejected", item)))
   }, executionEvidenceBudget);
   const core = {
     ...coreBase,
@@ -100,6 +107,7 @@ export function buildMemberContext(agent, session, options = {}) {
   const requestedRecentTranscript = selectRecentTranscript(visibleMessages, options.recentMessageLimit ?? options.groupSettings?.recentMessageLimit);
   const recentTranscript = fitRecentTranscriptToLimit({
     stableMessages,
+    currentTurnMessages,
     coreMessages,
     summaryMessages,
     recentTranscript: requestedRecentTranscript,
@@ -111,11 +119,12 @@ export function buildMemberContext(agent, session, options = {}) {
   }));
   const tokenEstimate = {
     stable: estimateMessagesTokens(stableMessages),
+    currentTurnEvidence: estimateMessagesTokens(currentTurnMessages),
     core: estimateMessagesTokens(coreMessages),
     summaries: estimateMessagesTokens(summaryMessages),
     recentTranscript: estimateMessagesTokens(recentMessages)
   };
-  const nonCompressibleCoreTokens = tokenEstimate.stable + tokenEstimate.core;
+  const nonCompressibleCoreTokens = tokenEstimate.stable + tokenEstimate.currentTurnEvidence + tokenEstimate.core;
 
   const context = {
     agentId: agent.id,
@@ -126,6 +135,7 @@ export function buildMemberContext(agent, session, options = {}) {
     stable,
     core,
     summaries,
+    currentTurnEvidence,
     recentTranscript,
     compression: {
       applied: recentTranscript.length < requestedRecentTranscript.length,
@@ -139,7 +149,7 @@ export function buildMemberContext(agent, session, options = {}) {
     tokenEstimate: {
       ...tokenEstimate,
       nonCompressibleCore: nonCompressibleCoreTokens,
-      total: tokenEstimate.stable + tokenEstimate.core + tokenEstimate.summaries + tokenEstimate.recentTranscript
+      total: tokenEstimate.stable + tokenEstimate.currentTurnEvidence + tokenEstimate.core + tokenEstimate.summaries + tokenEstimate.recentTranscript
     },
     coreOverflow: hasCoreOverflow(nonCompressibleCoreTokens, limits),
     priorityPolicy,
@@ -154,6 +164,7 @@ export function buildMemberContext(agent, session, options = {}) {
     requestedRecentTranscript,
     recentTranscript,
     executionEvidence,
+    currentTurnEvidence,
     invalidatedSources: [
       ...transcriptSelection.invalidated,
       ...retrievedSelection.invalidated,
@@ -186,7 +197,7 @@ export function materializeContextReceipt(context, details = {}) {
   };
 }
 
-function buildContextReceiptDraft({ agent, session, options, context, visibleMessages, requestedRecentTranscript, recentTranscript, executionEvidence, invalidatedSources = [] }) {
+function buildContextReceiptDraft({ agent, session, options, context, visibleMessages, requestedRecentTranscript, recentTranscript, executionEvidence, currentTurnEvidence, invalidatedSources = [] }) {
   const sections = buildContextPromptSections(context);
   const sourcesBySection = contextSourcesBySection({ agent, session, options, context, recentTranscript, executionEvidence });
   const totalTokens = sections.reduce((total, section) => total + estimateTokens(section.content), 0);
@@ -213,6 +224,7 @@ function buildContextReceiptDraft({ agent, session, options, context, visibleMes
   const decisions = mergeReceiptDecisions(sectionDecisions, [
     ...buildTranscriptReceiptDecisions(session, visibleMessages, requestedRecentTranscript, recentTranscript),
     ...(executionEvidence.receipt?.decisions || []),
+    ...(currentTurnEvidence.receipt?.decisions || []),
     ...(context.summaries.retrievedContext.receipt?.decisions || []),
     ...(context.summaries.summaryContext?.decisions || []),
     ...(context.summaries.continuationContextSelection?.decisions || [])
@@ -562,6 +574,7 @@ function contextSourcesBySection({ agent, session, options, context, recentTrans
   const continuation = context.summaries.continuationContext;
   return {
     stable_context: [contextSource("agent_config", agent?.id || agent?.name || "unknown", { sessionId, sourcePath: "group.agent" })],
+    current_turn_tool_evidence: context.currentTurnEvidence.receipt.sources,
     non_compressible_core: coreSources,
     summaries: [
       ...(context.summaries.summaryContext?.sources || [])
@@ -651,6 +664,17 @@ export function buildContextPromptSections(context) {
       context.stable.harnessSummary ? `Harness summary: ${context.stable.harnessSummary}` : "",
       context.stable.globalRequirement ? `Boss global requirement: ${context.stable.globalRequirement}` : "",
       context.stable.contextPriorityPolicy ? `Context priority: ${context.stable.contextPriorityPolicy}` : ""
+    ]],
+    ["Current-turn tool evidence", [
+      context.currentTurnEvidence.records.length
+        ? "These are the immediately preceding tool results. They are newer and authoritative over task summaries, retained history, and earlier tool evidence. Use these exact values for the next action."
+        : "",
+      context.currentTurnEvidence.toolExecutionResults.length
+        ? `Tool execution results (current turn): ${JSON.stringify(context.currentTurnEvidence.toolExecutionResults)}`
+        : "",
+      context.currentTurnEvidence.rejectedToolRequests.length
+        ? `Rejected tool requests (current turn): ${JSON.stringify(context.currentTurnEvidence.rejectedToolRequests)}`
+        : ""
     ]],
     ["Non-compressible core", [
       `Original question: ${context.core.originalQuestion}`,
@@ -742,10 +766,11 @@ function normalizeExecutionCheckpointEvidence(value) {
   })).filter((item) => item.id && item.tool).slice(-6);
 }
 
-function resolveExecutionEvidenceBudget({ limits, stableMessages, coreBase, summaries }) {
+function resolveExecutionEvidenceBudget({ limits, stableMessages, currentTurnMessages, coreBase, summaries }) {
   const targetTokens = compressionTargetTokens(limits) || limits.effectiveInputLimit;
   const mandatoryTokens = estimateMessagesTokens([
     ...stableMessages,
+    ...currentTurnMessages,
     ...contextMessagesFromCore(coreBase),
     ...contextMessagesFromSummaries(summaries)
   ]);
@@ -834,6 +859,37 @@ function buildExecutionEvidencePack(groups, maxTokens) {
     },
     receipt: { decisions: receiptDecisions }
   };
+}
+
+function buildCurrentTurnEvidencePack(groups = {}) {
+  const sourceRecords = [
+    ...dedupeSimilarToolResults(Array.isArray(groups.toolExecutionResults) ? groups.toolExecutionResults : []).map((item) => ({ kind: "tool", item })),
+    ...dedupeSimilarToolResults(Array.isArray(groups.rejectedToolRequests) ? groups.rejectedToolRequests : []).map((item) => ({ kind: "rejected", item }))
+  ];
+  const records = sourceRecords.map(({ kind, item }) => compactExecutionEvidenceRecord(kind, item, MAX_TOOL_CONTEXT_STRING_CHARS).record);
+  const toolExecutionResults = records.filter((_, index) => sourceRecords[index].kind === "tool");
+  const rejectedToolRequests = records.filter((_, index) => sourceRecords[index].kind === "rejected");
+  const sources = sourceRecords.map(({ kind, item }, index) => executionEvidenceSource(kind, item, index));
+  return {
+    records,
+    toolExecutionResults,
+    rejectedToolRequests,
+    sourceRecords,
+    receipt: {
+      sources,
+      decisions: sources.map((source) => ({
+        section: "current_turn_tool_evidence",
+        source,
+        status: "injected",
+        reason: "protected_immediate_tool_result"
+      }))
+    }
+  };
+}
+
+function currentTurnEvidenceIdentity(kind, item = {}) {
+  const source = executionEvidenceSource(kind, item, 0);
+  return `${source.type}\u001f${source.id}`;
 }
 
 function deduplicatedEvidenceReceiptDecisions(kind, items, signatureFor) {
@@ -1139,10 +1195,10 @@ function selectRecentTranscript(messages, limit = DEFAULT_RECENT_MESSAGES) {
   return messages.slice(-safeCount);
 }
 
-function fitRecentTranscriptToLimit({ stableMessages, coreMessages, summaryMessages, recentTranscript, limits }) {
+function fitRecentTranscriptToLimit({ stableMessages, currentTurnMessages = [], coreMessages, summaryMessages, recentTranscript, limits }) {
   const targetTokens = compressionTargetTokens(limits);
   if (!targetTokens) return recentTranscript;
-  const stableTokens = estimateMessagesTokens(stableMessages);
+  const stableTokens = estimateMessagesTokens([...stableMessages, ...currentTurnMessages]);
   const coreTokens = estimateMessagesTokens(coreMessages);
   const summaryTokens = estimateMessagesTokens(summaryMessages);
   let kept = [...recentTranscript];
@@ -1213,6 +1269,14 @@ function contextMessagesFromCore(core) {
     { role: "user", content: formatExecutionEvidenceCompression(core.executionEvidenceCompression) },
     { role: "user", content: formatTaskStateForPrompt(core.taskState) }
   ].filter((message) => message.content);
+}
+
+function contextMessagesFromCurrentTurnEvidence(evidence = {}) {
+  if (!evidence.records?.length) return [];
+  return [{
+    role: "user",
+    content: `Immediately preceding tool results; newer and authoritative over summaries and retained history:\n${JSON.stringify(evidence.records)}`
+  }];
 }
 
 function contextMessagesFromSummaries(summaries) {

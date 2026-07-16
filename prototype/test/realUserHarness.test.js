@@ -5,7 +5,7 @@ import path from "node:path";
 import zlib from "node:zlib";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { prepareCampaignFixtures, providerCallMetrics, runSeededRealUserBaseline, runSeededRealUserCampaign, verifyCampaignDeliverable, verifyCampaignPersistence, verifyCampaignResumption, verifyCampaignToolEvidence } from "../src/realUserHarness.js";
+import { prepareCampaignFixtures, providerCallMetrics, runSeededRealUserBaseline, runSeededRealUserCampaign, verifyCampaignDeliverable, verifyCampaignPersistence, verifyCampaignResumption, verifyCampaignToolEvidence, verifyNoDuplicateVerifiedWork } from "../src/realUserHarness.js";
 import { createSeededCampaignScenario, EXTERNAL_ROOT_TOKEN } from "../src/realUserCampaign.js";
 
 test("seeded real-user baseline uses the HTTP/SSE route, persists interruption, continues after restart, and verifies an edited artifact", async () => {
@@ -126,6 +126,27 @@ test("campaign recovery requires completed visible work after every interruption
     messages: [{ createdAt: "2026-07-16T00:01:00.000Z" }]
   };
   assert.equal(verifyCampaignResumption(interrupted, sessions).passed, true);
+});
+
+test("campaign recovery recognizes successful run_code and run_tests as verified work without allowing replay", () => {
+  const interrupted = [{
+    id: "interrupted-verified-tools",
+    toolExecutionResults: [
+      { tool: "run_code", status: "completed", language: "node", code: "console.log('verified')", result: { exitCode: 0 } },
+      { tool: "run_tests", status: "completed", runner: "custom", command: "node --test", cwd: "shared/app", result: { exitCode: 0, passed: true } }
+    ]
+  }];
+  const cleanContinuation = [{ id: "continued", continuationContext: { previousSessionId: "interrupted-verified-tools" }, toolExecutionResults: [] }];
+  const clean = verifyNoDuplicateVerifiedWork(interrupted, cleanContinuation);
+  assert.equal(clean.passed, true);
+  assert.match(clean.checks[0].evidence, /2 successful verified-work fingerprints/);
+
+  const replayed = verifyNoDuplicateVerifiedWork(interrupted, [{
+    ...cleanContinuation[0],
+    toolExecutionResults: [{ tool: "run_code", status: "completed", language: "node", code: "console.log('verified')", result: { exitCode: 0 } }]
+  }]);
+  assert.equal(replayed.passed, false);
+  assert.match(replayed.checks[1].evidence, /1 duplicate completed verification actions/);
 });
 
 test("real-user baseline rejects mock providers outside its plumbing test mode", async () => {

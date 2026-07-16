@@ -421,6 +421,64 @@ test("current checkpoint evidence remains in protected context when raw tool his
   assert.equal(context.contextReceipt.sections.some((section) => section.id === "non_compressible_core" && section.sources.some((source) => source.type === "execution_checkpoint_evidence" && source.id === "validate-catalog")), true);
 });
 
+test("immediate tool results remain authoritative when historical execution evidence exhausts its budget", () => {
+  const immediateApi = {
+    id: "tool_api_exact",
+    tool: "api_request",
+    status: "completed",
+    source_agent_id: "critic",
+    url: "http://127.0.0.1/catalog/6",
+    result: {
+      status: 200,
+      body: '{"items":[{"id":"atlas-6","title":"Atlas 6","priority":"high","active":true},{"id":"cedar-6","title":"Cedar 0","priority":"low","active":false}]}'
+    }
+  };
+  const immediateRead = {
+    id: "tool_read_exact",
+    tool: "read_file",
+    status: "completed",
+    source_agent_id: "critic",
+    path: "shared/deliverables/catalog-6.json",
+    result: { content: '{"source":"api_collection","items":[]}' }
+  };
+  const historical = Array.from({ length: 80 }, (_, index) => ({
+    id: `historical_${index}`,
+    tool: "execute_command",
+    status: "completed",
+    source_agent_id: "critic",
+    command: `historical-command-${index}`,
+    result: { stdout: `STALE_${index}_${"x".repeat(3000)}` }
+  }));
+  const context = buildMemberContext({
+    ...agent,
+    providerLimits: { contextWindow: 5000, maxOutputTokens: 1000 },
+    tokenLimits: { maxInputTokensPerCall: 4000 }
+  }, {
+    id: "session_immediate_evidence",
+    question: "Write the exact API response to the artifact.",
+    unresolvedObjections: {},
+    artifacts: [],
+    messages: [],
+    toolExecutionResults: [...historical, immediateApi, immediateRead]
+  }, {
+    taskState: { currentTask: "STALE TASK SUMMARY MUST NOT OVERRIDE CURRENT RESULTS" },
+    groupSharedSummary: "Old summaries may contain guessed catalog values.",
+    currentTurnToolResults: [immediateApi, immediateRead]
+  });
+  const prompt = buildContextPromptSections(context).map((section) => `${section.title}\n${section.content}`).join("\n");
+
+  assert.match(prompt, /Current-turn tool evidence/);
+  assert.match(prompt, /newer and authoritative/);
+  assert.match(prompt, /Atlas 6/);
+  assert.match(prompt, /Cedar 0/);
+  assert.equal(context.currentTurnEvidence.records[0].result.body, immediateApi.result.body);
+  assert.equal(context.currentTurnEvidence.records[1].result.content, immediateRead.result.content);
+  assert.equal(context.contextReceipt.decisions.some((item) => item.source.id === "tool_api_exact" && item.status === "injected" && item.reason === "protected_immediate_tool_result"), true);
+  assert.equal(context.contextReceipt.decisions.some((item) => item.source.id === "tool_read_exact" && item.status === "injected" && item.reason === "protected_immediate_tool_result"), true);
+  assert.equal(context.contextReceipt.decisions.some((item) => item.source.id === "tool_api_exact" && item.status === "retrieved_but_omitted"), false);
+  assert.equal(context.executionEvidenceCompression.omittedCount > 0, true);
+});
+
 test("context prompt sections keep only the latest repeated tool result", () => {
   const context = buildMemberContext(agent, {
     question: "Use the latest file read.",

@@ -549,17 +549,17 @@ export function verifyCampaignPersistence(groupPath, sessions, runtimeGroup) {
 export function verifyNoDuplicateVerifiedWork(interruptedSessions = [], sessions = []) {
   const interruptedById = new Map((interruptedSessions || []).filter(Boolean).map((session) => [session.id, session]));
   const verifiedFingerprints = new Set([...interruptedById.values()].flatMap((session) => (
-    (session.toolExecutionResults || []).filter(isSuccessfulCommand).map(commandFingerprint)
+    (session.toolExecutionResults || []).filter(isSuccessfulVerifiedWork).map(verifiedWorkFingerprint)
   )).filter(Boolean));
   const continuations = (sessions || []).filter((session) => interruptedById.has(session.continuationContext?.previousSessionId));
   const repeatedCommands = continuations.flatMap((session) => (
-    (session.toolExecutionResults || []).filter(isSuccessfulCommand).filter((item) => verifiedFingerprints.has(commandFingerprint(item)))
+    (session.toolExecutionResults || []).filter(isSuccessfulVerifiedWork).filter((item) => verifiedFingerprints.has(verifiedWorkFingerprint(item)))
   ));
   const blockedReplays = continuations.flatMap((session) => session.rejectedToolRequests || [])
     .filter((item) => item.code === "already_verified_continuation_command");
   const checks = [
-    check("verified_work_before_interruption", verifiedFingerprints.size > 0, `${verifiedFingerprints.size} successful command fingerprints`),
-    check("no_verified_command_replay_after_continue", repeatedCommands.length === 0, `${repeatedCommands.length} duplicate completed commands; ${blockedReplays.length} prevented replays`)
+    check("verified_work_before_interruption", verifiedFingerprints.size > 0, `${verifiedFingerprints.size} successful verified-work fingerprints`),
+    check("no_verified_command_replay_after_continue", repeatedCommands.length === 0, `${repeatedCommands.length} duplicate completed verification actions; ${blockedReplays.length} prevented replays`)
   ];
   return { passed: checks.every((item) => item.passed), checks };
 }
@@ -598,16 +598,36 @@ export function verifyCampaignToolEvidence(verifier = {}, sessions = []) {
   return { passed: checks.every((item) => item.passed), checks };
 }
 
-function isSuccessfulCommand(item = {}) {
-  return item.tool === "execute_command"
-    && item.status === "completed"
+function isSuccessfulVerifiedWork(item = {}) {
+  if (!["execute_command", "run_code", "run_tests"].includes(item.tool)) return false;
+  return item.status === "completed"
     && Number(item.result?.exitCode) === 0
-    && Boolean(item.command || item.result?.command);
+    && (item.tool !== "run_tests" || item.result?.passed !== false)
+    && Boolean(verifiedWorkPayload(item));
 }
 
-function commandFingerprint(item = {}) {
-  const command = String(item.command || item.result?.command || "").trim().replace(/\s+/g, " ").toLowerCase();
-  return command ? createHash("sha256").update(command).digest("hex") : "";
+function verifiedWorkFingerprint(item = {}) {
+  const payload = verifiedWorkPayload(item);
+  return payload ? createHash("sha256").update(`${item.tool}\n${payload}`).digest("hex") : "";
+}
+
+function verifiedWorkPayload(item = {}) {
+  if (item.tool === "execute_command") {
+    return stableVerifiedWorkFields(item, ["command", "cwd", "shell"]);
+  }
+  if (item.tool === "run_code") {
+    return stableVerifiedWorkFields(item, ["language", "code", "cwd"]);
+  }
+  if (item.tool === "run_tests") {
+    return stableVerifiedWorkFields(item, ["runner", "command", "cwd"]);
+  }
+  return "";
+}
+
+function stableVerifiedWorkFields(item, keys) {
+  const result = item.result || {};
+  const values = keys.map((key) => String(item[key] ?? result[key] ?? "").trim().replace(/\s+/g, " ").toLowerCase());
+  return values.some(Boolean) ? JSON.stringify(values) : "";
 }
 
 function runtimeSeatSnapshot(agent = {}) {
@@ -977,7 +997,9 @@ function isStreamingActivityEvent(event = {}) {
 }
 
 function isVerifiedToolActivityEvent(event = {}) {
-  return event.type === "tool_success" && event.tool === "execute_command" && event.status === "completed";
+  return event.type === "tool_success"
+    && ["execute_command", "run_code", "run_tests"].includes(event.tool)
+    && event.status === "completed";
 }
 
 function isMaterialActionType(type) {
