@@ -52,6 +52,7 @@ export function buildMemberContext(agent, session, options = {}) {
     unresolvedObjections,
     executionStandard: options.executionStandard || "",
     verificationStandard: options.verificationStandard || "",
+    executionCheckpointEvidence: normalizeExecutionCheckpointEvidence(session.executionState?.checkpointEvidence),
     fileOperationExecutionResults: [],
     toolExecutionResults: [],
     rejectedToolRequests: [],
@@ -552,6 +553,7 @@ function contextSourcesBySection({ agent, session, options, context, recentTrans
     ...context.core.latestArtifacts.map((item, index) => contextSource("artifact", item?.id || `${sessionId}:artifact:${index}`, { sessionId, sourcePath: item?.sourcePath, path: item?.path })),
     ...objectionSources(context.core.unresolvedObjections, sessionId),
     ...context.core.attachedFiles.map((item, index) => contextSource("attachment", item?.id || `${sessionId}:attachment:${index}`, { sessionId, sourcePath: item?.path || item?.name || item?.fileName })),
+    ...context.core.executionCheckpointEvidence.map((item) => contextSource("execution_checkpoint_evidence", item.id, { sessionId, path: item.target, tool: item.tool })),
     ...executionEvidenceReceiptSources(executionEvidence)
   ];
   const retrievedSources = context.summaries.retrievedContext.items.map(retrievedContextSource);
@@ -657,6 +659,7 @@ export function buildContextPromptSections(context) {
       `Unresolved objections: ${JSON.stringify(context.core.unresolvedObjections)}`,
       context.core.executionStandard ? `Execution standard: ${context.core.executionStandard}` : "",
       context.core.verificationStandard ? `Verification standard: ${context.core.verificationStandard}` : "",
+      context.core.executionCheckpointEvidence?.length ? `Current execution checkpoint evidence (newer than task-state history): ${JSON.stringify(context.core.executionCheckpointEvidence)}` : "",
       context.core.attachedFiles?.length ? `User attached files:\n${formatFileAttachmentsForPrompt(context.core.attachedFiles)}` : "",
       context.core.fileOperationExecutionResults?.length ? `File operation execution results: ${JSON.stringify(context.core.fileOperationExecutionResults)}` : "",
       context.core.toolExecutionResults?.length ? `Tool execution results: ${JSON.stringify(context.core.toolExecutionResults)}` : "",
@@ -727,6 +730,16 @@ function selectVisibleToolResults(results, agent, visibility) {
     const source = item.source_agent_id || item.sourceAgentId || item.proposedBy?.seatId || item.proposedBy?.id;
     return source === agent.id;
   });
+}
+
+function normalizeExecutionCheckpointEvidence(value) {
+  return (Array.isArray(value) ? value : []).map((item) => ({
+    id: String(item?.id || "").trim(),
+    tool: String(item?.tool || "").trim(),
+    status: String(item?.status || "").trim(),
+    target: String(item?.target || "").trim(),
+    outcome: String(item?.outcome || "").trim()
+  })).filter((item) => item.id && item.tool).slice(-6);
 }
 
 function resolveExecutionEvidenceBudget({ limits, stableMessages, coreBase, summaries }) {

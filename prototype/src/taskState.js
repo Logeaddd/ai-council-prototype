@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { nowIso } from "./types.js";
+import { writeTextFileAtomically } from "./atomicFile.js";
 
 export function readTaskState(groupPath) {
   const filePath = taskStatePath(groupPath);
@@ -16,7 +17,7 @@ export function writeTaskState(groupPath, state) {
   const filePath = taskStatePath(groupPath);
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   const normalized = normalizeTaskState(state);
-  fs.writeFileSync(filePath, JSON.stringify(normalized, null, 2), "utf8");
+  writeTextFileAtomically(filePath, JSON.stringify(normalized, null, 2));
   return normalized;
 }
 
@@ -179,9 +180,20 @@ function normalizeExecutionCheckpoint(value, session = {}) {
     artifactStatus: String(value.artifactStatus || "not_checked"),
     lastAction: String(value.lastAction || ""),
     lastError: truncate(value.lastError || "", 1200),
+    checkpointEvidence: normalizeCheckpointEvidence(value.checkpointEvidence),
     sourceSessionId: String(session.id || value.sourceSessionId || ""),
     updatedAt: String(session.id ? nowIso() : value.updatedAt || "")
   };
+}
+
+function normalizeCheckpointEvidence(value) {
+  return (Array.isArray(value) ? value : []).map((item) => ({
+    id: String(item?.id || "").trim(),
+    tool: String(item?.tool || "").trim(),
+    status: String(item?.status || "").trim(),
+    target: String(item?.target || "").trim(),
+    outcome: String(item?.outcome || "").trim()
+  })).filter((item) => item.id && item.tool).slice(-6);
 }
 
 function defaultTaskState(extra = {}) {

@@ -142,6 +142,8 @@ test("an explicit generic validation command is a real verification checkpoint",
   assert.equal(state.phase, "review");
   assert.equal(state.artifactStatus, "verified");
   assert.equal(state.lastAction, "verification_passed:catalog-parse");
+  assert.equal(state.checkpointEvidence.some((item) => item.id === "catalog-parse" && item.outcome === "exit=0"), true);
+  assert.match(executionInstruction(state, agents[2]), /catalog-parse/);
 });
 
 test("a successful validation script is a checkpoint even when the model omits a reason", () => {
@@ -265,6 +267,7 @@ test("review directive is not overridden by delivery words inside the supplied p
 test("delivery classification requires an explicit delivery action", () => {
   assert.equal(isDeliveryTask("Fix the code and build the JAR."), true);
   assert.equal(isDeliveryTask("Update the existing catalog JSON to preserve every collected item."), true);
+  assert.equal(isDeliveryTask("Make the final requested catalog update without inventing or dropping API records. Preserve response order and validate the current JSON artifact."), true);
   assert.equal(isDeliveryTask("Should we update the existing catalog JSON?"), false);
   const followUp = "Use the latest requirements only: the final JSON must have source set to api_collection and an items array with id, title, priority and active for every collected item. Validate it.";
   assert.equal(isDeliveryTask(followUp), true);

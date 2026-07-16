@@ -37,7 +37,8 @@ export function createExecutionState({ question, agents = [], workspaceGroup, pr
     noActionCalls: 0,
     artifactStatus: "not_checked",
     lastAction: "",
-    lastError: ""
+    lastError: "",
+    checkpointEvidence: []
   };
 }
 
@@ -63,12 +64,16 @@ export function executionInstruction(state, agent) {
     return [
       `[Execution owner] You are the primary executor for this delivery task. Current phase: ${state.phase}.`,
       `Required next action: ${state.nextAction}`,
+      formatCheckpointEvidence(state.checkpointEvidence),
       "Do not restart broad planning. Continue from the recorded checkpoint and use a real file, command, build, or test action now.",
       state.lastError ? `Last verification error: ${state.lastError}` : ""
     ].filter(Boolean).join("\n");
   }
   if (isReviewerLike(agent)) {
-    return `[Checkpoint review] Review checkpoint ${state.checkpointVersion}. Use the recorded diff, command, test, or artifact evidence. Do not repeat an unchanged objection without new evidence.`;
+    return [
+      `[Checkpoint review] Review checkpoint ${state.checkpointVersion}. Use the recorded diff, command, test, or artifact evidence. Do not repeat an unchanged objection without new evidence.`,
+      formatCheckpointEvidence(state.checkpointEvidence)
+    ].filter(Boolean).join("\n");
   }
   return "";
 }
@@ -96,6 +101,7 @@ export function advanceExecutionState({ state, session, agent, groupPath, questi
   const fileResults = (session.fileOperationExecutionResults || []).slice(state.processedFileResults);
   state.processedToolResults = (session.toolExecutionResults || []).length;
   state.processedFileResults = (session.fileOperationExecutionResults || []).length;
+  state.checkpointEvidence = mergeCheckpointEvidence(state.checkpointEvidence, [...fileResults, ...toolResults]);
   const material = [...toolResults, ...fileResults].some(hasMaterialWorkspaceChange);
   const verificationResults = toolResults.filter(isVerificationResult);
   const latestVerification = verificationResults.at(-1);
@@ -167,8 +173,9 @@ export function isDeliveryTask(question) {
   if (explicitDelivery.test(directive.combined)) return true;
 
   const imperativeContinuation = /^(?:use|keep|make|ensure|preserve|apply|update|continue|finish|complete|validate|verify)\b|^(?:\u4f7f\u7528|\u4fdd\u7559|\u786e\u4fdd|\u66f4\u65b0|\u7ee7\u7eed|\u5b8c\u6210|\u9a8c\u8bc1|\u6821\u9a8c)/i;
-  const constrainedArtifact = /\b(?:final|current|requested|existing)\s+(?:[a-z0-9_-]+\s+)?(?:json|file|artifact|document|spreadsheet|archive|package|project)\b[\s\S]{0,480}\b(?:must|shall|need(?:s)?|require(?:s|d)?)\b/i;
-  if (imperativeContinuation.test(directive.leading) && constrainedArtifact.test(text)) return true;
+  const constrainedArtifact = /\b(?:final|current|requested|existing)\b[\s\S]{0,160}\b(?:json|file|artifact|document|spreadsheet|archive|package|project)\b/i;
+  const artifactOperation = /\b(?:update|edit|change|adjust|extend|refactor|write|modify|fix|generate|build|create|validate|verify|preserve|package|compile|assemble)\b|\u66f4\u65b0|\u4fee\u6539|\u4fee\u590d|\u751f\u6210|\u9a8c\u8bc1|\u6821\u9a8c|\u6784\u5efa|\u6253\u5305/i;
+  if (imperativeContinuation.test(directive.leading) && constrainedArtifact.test(text) && artifactOperation.test(text)) return true;
 
   const requestedArtifact = /\b(?:jar|exe|msi|apk|ipa|dmg|deb|rpm)\b[^\r\n]{0,40}\b(?:needed|required|deliver|output)\b|(?:需要|产出|交付|给我|做成)[^\r\n]{0,30}\.(?:jar|exe|msi|apk|ipa|dmg|deb|rpm)\b/i;
   return requestedArtifact.test(directive.combined);
@@ -221,4 +228,36 @@ function isVerificationResult(item = {}) {
 
 function verificationError(item = {}) {
   return String(item.error || item.result?.stderr || item.result?.stdout || item.code || "verification_failed").slice(0, 1200);
+}
+
+function mergeCheckpointEvidence(previous = [], results = []) {
+  const next = [...(Array.isArray(previous) ? previous : []), ...results.map(checkpointEvidenceItem).filter(Boolean)];
+  const byId = new Map();
+  for (const item of next) byId.set(item.id, item);
+  return [...byId.values()].slice(-6);
+}
+
+function checkpointEvidenceItem(item = {}) {
+  if (item?.status !== "completed" || item?.result?.ok === false) return null;
+  const tool = String(item.tool || item.op || item.action || "").trim();
+  const id = String(item.id || item.proposalId || "").trim();
+  if (!tool || !id) return null;
+  const changes = item.result?.workspaceChanges || {};
+  const changeCount = Number(changes.totalChanges || changes.total || 0);
+  const httpStatus = Number(item.result?.status || 0);
+  const exitCode = item.result?.exitCode;
+  const target = String(item.path || item.destination || "").trim();
+  const outcome = [
+    Number.isFinite(exitCode) ? `exit=${exitCode}` : "",
+    httpStatus > 0 ? `http=${httpStatus}` : "",
+    changeCount > 0 ? `workspace_changes=${changeCount}` : "",
+    item.result?.verificationIntent ? "verification_intent" : ""
+  ].filter(Boolean).join(", ") || "completed";
+  return { id, tool, status: "completed", target, outcome };
+}
+
+function formatCheckpointEvidence(value) {
+  const evidence = Array.isArray(value) ? value.filter((item) => item?.id && item?.tool).slice(-6) : [];
+  if (!evidence.length) return "";
+  return `Recorded current-session evidence (newer than prior task summaries): ${evidence.map((item) => `${item.tool}#${item.id}${item.target ? `(${item.target})` : ""} ${item.outcome || item.status}`).join("; ")}`;
 }

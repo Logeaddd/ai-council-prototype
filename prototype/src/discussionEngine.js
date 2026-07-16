@@ -75,7 +75,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
   const excludedLegacyContinuationIds = automaticContinuationSource
     ? recentGroupSessions.filter(isLegacyContinuationShell).map((session) => session.id)
     : [];
-  const taskState = options.groupPath && memoryEnabled ? readTaskState(options.groupPath) : undefined;
+  let taskState = options.groupPath && memoryEnabled ? readTaskState(options.groupPath) : undefined;
   const contextInvalidations = mergeContextInvalidations(taskState?.invalidations, options.contextInvalidations);
   const runtimeDiscoveryOptions = { managedToolRoots: [path.join(baseDir, "tools")] };
   const runtimeEnvironment = formatRuntimeEnvironment(discoverRuntimeEnvironment(options.groupPath || baseDir, runtimeDiscoveryOptions));
@@ -147,6 +147,11 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
     if (!options.groupPath) return undefined;
     session.durationMs = elapsedMs(sessionStartMs);
     return writeGroupSession(session, options.groupPath);
+  };
+  const refreshExecutionCheckpoint = () => {
+    const updated = updateExecutionCheckpoint(options.groupPath, session);
+    if (updated) taskState = updated;
+    return updated;
   };
   const persistInterruptedSession = () => {
     if (session.status !== "running") return;
@@ -319,6 +324,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
             question: executionQuestion,
             response: currentResponse
           });
+          refreshExecutionCheckpoint();
           executionDirective = executionInstruction(session.executionState, agent);
         }
       };
@@ -418,6 +424,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
             question: executionQuestion,
             response
           });
+          refreshExecutionCheckpoint();
           executionDirective = executionInstruction(session.executionState, agent);
         }
         persistRunningSession();
@@ -617,7 +624,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
         question: executionQuestion,
         response: message.response
       });
-      updateExecutionCheckpoint(options.groupPath, session);
+      refreshExecutionCheckpoint();
       recordObjections(session, agent, message.response, round, group.settings);
       persistRunningSession();
       yield {

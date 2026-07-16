@@ -2,12 +2,13 @@ import fs from "node:fs";
 import path from "node:path";
 import { makeId, nowIso } from "./types.js";
 import { isPublicSessionTombstoned, listTombstonedPublicSessionIds, syncPublicEventJournal } from "./publicEventJournal.js";
+import { writeTextFileAtomically } from "./atomicFile.js";
 
 export function writeSession(session, baseDir) {
   const dir = path.resolve(baseDir, "sessions");
   fs.mkdirSync(dir, { recursive: true });
   const filePath = path.join(dir, `${session.id}.json`);
-  fs.writeFileSync(filePath, JSON.stringify(session, null, 2), "utf8");
+  writeTextFileAtomically(filePath, JSON.stringify(session, null, 2));
   return filePath;
 }
 
@@ -15,7 +16,7 @@ export function writeGroupSession(session, groupPath) {
   const dir = path.resolve(groupPath, "sessions");
   fs.mkdirSync(dir, { recursive: true });
   const filePath = path.join(dir, `${session.id}.json`);
-  fs.writeFileSync(filePath, JSON.stringify(session, null, 2), "utf8");
+  writeTextFileAtomically(filePath, JSON.stringify(session, null, 2));
   syncPublicEventJournal(session, groupPath);
   return filePath;
 }

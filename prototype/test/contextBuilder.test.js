@@ -383,6 +383,44 @@ test("execution evidence uses one dynamic budget without mutating complete store
   assert.doesNotMatch(core, /"url":""/);
 });
 
+test("current checkpoint evidence remains in protected context when raw tool history is budgeted", () => {
+  const context = buildMemberContext(agent, {
+    id: "checkpoint-session",
+    question: "Make the final requested JSON artifact and validate it.",
+    unresolvedObjections: {},
+    artifacts: [],
+    executionState: {
+      checkpointEvidence: [{
+        id: "validate-catalog",
+        tool: "execute_command",
+        status: "completed",
+        target: "deliverables/catalog.json",
+        outcome: "exit=0"
+      }]
+    },
+    toolExecutionResults: Array.from({ length: 18 }, (_, index) => ({
+      id: `historical-tool-${index}`,
+      tool: "read_file",
+      status: "completed",
+      source_agent_id: "builder",
+      path: `deliverables/history-${index}.json`,
+      result: { ok: true, content: "history ".repeat(1400) }
+    })),
+    messages: []
+  }, {
+    taskState: {
+      decisions: Array.from({ length: 5 }, (_, index) => ({ id: `old-${index}`, text: "old decision ".repeat(180) })),
+      risks: Array.from({ length: 8 }, (_, index) => `old risk ${index}: ${"stale ".repeat(120)}`),
+      nextActions: []
+    }
+  });
+  const core = buildContextPromptSections(context).find((section) => section.title === "Non-compressible core")?.content || "";
+
+  assert.match(core, /Current execution checkpoint evidence/);
+  assert.match(core, /validate-catalog/);
+  assert.equal(context.contextReceipt.sections.some((section) => section.id === "non_compressible_core" && section.sources.some((source) => source.type === "execution_checkpoint_evidence" && source.id === "validate-catalog")), true);
+});
+
 test("context prompt sections keep only the latest repeated tool result", () => {
   const context = buildMemberContext(agent, {
     question: "Use the latest file read.",
