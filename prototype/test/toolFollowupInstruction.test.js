@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildToolFollowupInstruction } from "../src/discussionEngine.js";
+import { buildToolFollowupInstruction, updateStagnantToolLoopCount } from "../src/discussionEngine.js";
 
 test("tool follow-up moves from successful acquisition to real usage without exposing a benchmark solution", () => {
   const npm = buildToolFollowupInstruction([{
@@ -55,4 +55,46 @@ test("tool follow-up moves from successful acquisition to real usage without exp
   }]);
   assert.match(guessedDirectory, /Do not invent managed environment paths/);
   assert.match(guessedDirectory, /current existing workspace/);
+});
+
+test("acquired capability followed by read-only wandering triggers action recovery without limiting useful pre-acquisition inspection", () => {
+  const seenTargets = new Set();
+  const acquisition = {
+    tool: "install_package",
+    status: "completed",
+    result: { ok: true, manager: "npm", packageName: "chosen-package" }
+  };
+  let state = { count: 0, recoveryRequired: false };
+  for (const path of ["input-a.json", "package.json", "deliverables"]) {
+    state = updateStagnantToolLoopCount({
+      requests: [{ tool: "read_file", path }],
+      results: [{ tool: "read_file", status: "completed", result: { ok: true, path } }],
+      current: state.count,
+      seenTargets,
+      history: [acquisition]
+    });
+  }
+  assert.deepEqual(state, { count: 3, recoveryRequired: true });
+
+  const preAcquisition = updateStagnantToolLoopCount({
+    requests: [{ tool: "read_file", path: "new-source.js" }],
+    results: [{ tool: "read_file", status: "completed", result: { ok: true } }],
+    current: 2,
+    seenTargets: new Set(),
+    history: []
+  });
+  assert.deepEqual(preAcquisition, { count: 0, recoveryRequired: false });
+
+  const mutation = updateStagnantToolLoopCount({
+    requests: [{ tool: "workspace_edit", action: "write", path: "render.js" }],
+    results: [{
+      tool: "workspace_edit",
+      status: "completed",
+      result: { ok: true, workspaceChanges: { totalChanges: 1, created: [{ path: "render.js" }] } }
+    }],
+    current: 3,
+    seenTargets,
+    history: [acquisition]
+  });
+  assert.deepEqual(mutation, { count: 0, recoveryRequired: false });
 });

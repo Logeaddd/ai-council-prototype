@@ -446,7 +446,8 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
           results: toolResult.results,
           rejected: toolResult.rejected,
           current: consecutiveStagnantToolLoops,
-          seenTargets: seenToolTargets
+          seenTargets: seenToolTargets,
+          history: accumulatedToolResults
         });
         consecutiveStagnantToolLoops = toolLoopStagnated.count;
 
@@ -1113,15 +1114,29 @@ function hasMaterialWorkspaceProgress(session = {}) {
   });
 }
 
-function updateStagnantToolLoopCount({ requests = [], results = [], rejected = [], current = 0, seenTargets = new Set() } = {}) {
+export function updateStagnantToolLoopCount({ requests = [], results = [], rejected = [], current = 0, seenTargets = new Set(), history = [] } = {}) {
   const material = (results || []).some(hasMaterialWorkspaceChange);
   const actionableFailure = (rejected || []).some((item) => ["permission_denied", "capability_disabled", "invalid_tool"].includes(String(item.code || "")))
     || (results || []).some((item) => item.status === "failed" && !isRepeatableInspectionTool(item));
   const targets = (requests || []).map(toolLoopTarget).filter(Boolean);
   const hasNovelTarget = targets.some((target) => !seenTargets.has(target));
   for (const target of targets) seenTargets.add(target);
-  const count = material || actionableFailure || hasNovelTarget ? 0 : Number(current || 0) + 1;
+  const acquiredCapabilityReady = hasReadyAcquiredCapability(history);
+  const inspectionOnly = results.length > 0 && results.every((item) => item.status === "completed" && isRepeatableInspectionTool(item));
+  const count = material || actionableFailure
+    ? 0
+    : acquiredCapabilityReady && inspectionOnly
+      ? Number(current || 0) + 1
+      : hasNovelTarget ? 0 : Number(current || 0) + 1;
   return { count, recoveryRequired: count >= 3 };
+}
+
+function hasReadyAcquiredCapability(items = []) {
+  return (Array.isArray(items) ? items : []).some((item) => {
+    if (item?.status !== "completed" || item.result?.ok === false) return false;
+    if (["install_package", "provision_tool", "skill_install", "mcp_install_npm"].includes(item.tool)) return true;
+    return item.tool === "execute_command" && isSuccessfulPackageInstallCommand(item);
+  });
 }
 
 function toolLoopTarget(request = {}) {
