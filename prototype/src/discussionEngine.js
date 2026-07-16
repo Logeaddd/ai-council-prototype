@@ -1954,7 +1954,7 @@ function loadEnabledSkills(baseDir, groupPath, appSettings) {
   }
 }
 
-function buildToolFollowupInstruction(results = [], rejected = []) {
+export function buildToolFollowupInstruction(results = [], rejected = []) {
   const lines = [
     "Tool results from your previous request are now available in context. Use the real tool results to continue this round. Request another tool only when a real next step still requires it; otherwise finish with speak or skip JSON."
   ];
@@ -1970,6 +1970,26 @@ function buildToolFollowupInstruction(results = [], rejected = []) {
   const repeatedFamilies = repeatedFailedCommandFamilies(failedCommands);
   if (repeatedFamilies.length) {
     lines.push(`Repeated failed command strategies: ${repeatedFamilies.join(", ")}. Stop retrying that strategy for now; inspect existing files, detected runtimes, and generated artifacts before another install or download attempt.`);
+  }
+  for (const item of completed.filter((entry) => entry.tool === "install_package")) {
+    const manager = item.result?.manager || item.manager || "package manager";
+    const packageName = item.result?.packageName || item.packageName || item.package || "the selected package";
+    const environmentPath = item.result?.environmentPath || "the managed workspace environment";
+    if (manager === "npm") {
+      lines.push(`npm package ${JSON.stringify(packageName)} is installed in ${environmentPath}. Later execute_command and run_code calls automatically receive the managed NODE_PATH. Import the package by its normal module name and use it for the next artifact-producing action; do not search forbidden or global node_modules directories and do not reinstall it.`);
+    } else if (manager === "pip") {
+      lines.push(`Python package ${JSON.stringify(packageName)} is installed in ${environmentPath}. Later commands automatically receive the managed environment's executable directory on PATH. Use that managed Python environment for the next artifact-producing action; do not search or reinstall globally.`);
+    } else {
+      lines.push(`${manager} package ${JSON.stringify(packageName)} is installed in ${environmentPath}. Use the returned managed environment in the next artifact-producing command; do not repeat discovery or reinstall the same package.`);
+    }
+  }
+  for (const item of completed.filter((entry) => entry.tool === "provision_tool")) {
+    const command = item.result?.command || item.commandName || item.toolName || "the acquired command";
+    const status = item.result?.status || "verified";
+    lines.push(`Tool acquisition completed with status ${JSON.stringify(status)} for command ${JSON.stringify(command)}. Invoke the acquired command in the next artifact-producing or verification action. Do not search for or install another copy unless that invocation produces a real failure.`);
+  }
+  for (const item of completed.filter((entry) => entry.tool === "execute_command" && isSuccessfulPackageInstallCommand(entry))) {
+    lines.push(`A direct package-manager command completed successfully: ${JSON.stringify(String(item.command || item.result?.command || "").slice(0, 240))}. Use the acquired dependency in the next artifact-producing or verification command. Do not return to package discovery or repeat the install without a real usage failure.`);
   }
   const searchResults = completed.filter((item) => item.tool === "mcp_search_npm");
   for (const item of searchResults) {
@@ -2030,6 +2050,13 @@ function buildToolFollowupInstruction(results = [], rejected = []) {
     lines.push("Some tool requests were rejected. Read the rejected tool request reasons in context before choosing the next step.");
   }
   return lines.join("\n");
+}
+
+function isSuccessfulPackageInstallCommand(item) {
+  const command = String(item.command || item.result?.command || "");
+  if (!/(?:^|[;&|]\s*)(?:npm|pnpm|yarn)\s+(?:add|install)\b|\b(?:python|python3|py)(?:\.exe)?\s+-m\s+pip\s+install\b|(?:^|[;&|]\s*)pip3?\s+install\b|(?:^|[;&|]\s*)cargo\s+(?:add|install)\b|(?:^|[;&|]\s*)go\s+(?:get|install)\b|(?:^|[;&|]\s*)gem\s+install\b|(?:^|[;&|]\s*)(?:winget|choco|scoop|brew)\s+install\b|\bapt(?:-get)?\s+install\b/i.test(command)) return false;
+  const output = `${item.result?.stdout || ""}\n${item.result?.stderr || ""}`;
+  return !/(?:npm ERR!|permission denied|unable to acquire|could not open lock file|no module named ensurepip|command not found|not recognized as an internal or external command)/i.test(output);
 }
 
 function missingCommandNames(items = []) {
