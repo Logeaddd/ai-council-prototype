@@ -131,7 +131,8 @@ function runTestSuite(root, options) {
   const env = { ...process.env };
   delete env.NODE_TEST_CONTEXT;
   const timeout = testSuiteTimeoutMs(options.testTimeoutMs);
-  const result = spawnSync(process.execPath, ["--test", ...testFiles], {
+  const concurrency = testSuiteConcurrency(options.testConcurrency);
+  const result = spawnSync(process.execPath, ["--test", `--test-concurrency=${concurrency}`, ...testFiles], {
     cwd: root,
     encoding: "utf8",
     windowsHide: true,
@@ -155,6 +156,11 @@ function runTestSuite(root, options) {
 export function testSuiteTimeoutMs(value) {
   const timeout = Number(value);
   return Number.isFinite(timeout) && timeout > 0 ? timeout : undefined;
+}
+
+export function testSuiteConcurrency(value) {
+  const concurrency = Number.parseInt(String(value ?? ""), 10);
+  return Number.isFinite(concurrency) && concurrency > 0 ? concurrency : 4;
 }
 
 function summarizeTestEvidence(value = {}) {
