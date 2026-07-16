@@ -376,6 +376,8 @@ test("full tool prompt advertises full-only tools while tool tier does not", () 
   });
 
   assert.match(full[0].content, /extract_archive for zip files/);
+  assert.match(full[0].content, /create_archive for packaging workspace files\/directories into a real zip/);
+  assert.match(full[0].content, /For create_archive include paths \(or files\)/);
   assert.match(full[0].content, /execute_command for real shell commands/);
   assert.match(full[0].content, /process_control for listing background processes/);
   assert.match(full[0].content, /background execute_command result means started, not completed/);
@@ -404,7 +406,7 @@ test("full tool prompt advertises full-only tools while tool tier does not", () 
   assert.match(tool[0].content, /skill_read for loading an enabled skill's instructions/);
   assert.match(tool[0].content, /skill_list, skill_search, skill_install, skill_enable, skill_disable, skill_remove.*require full permission/);
   assert.match(tool[0].content, /database_query write operations require full permission/);
-  assert.match(tool[0].content, /extract_archive, execute_command, process_control, run_code, install_package, provision_tool, run_tests, git_operation, browser_control, mcp_search_npm, mcp_install_npm, mcp_uninstall, mcp_list_tools, mcp_call, mcp_list_resources, mcp_read_resource, mcp_list_prompts, and mcp_get_prompt require full permission/);
+  assert.match(tool[0].content, /extract_archive, create_archive, execute_command, process_control, run_code, install_package, provision_tool, run_tests, git_operation, browser_control, mcp_search_npm, mcp_install_npm, mcp_uninstall, mcp_list_tools, mcp_call, mcp_list_resources, mcp_read_resource, mcp_list_prompts, and mcp_get_prompt require full permission/);
   assert.doesNotMatch(tool[0].content, /extract_archive for zip files inside the group workspace/);
   assert.doesNotMatch(tool[0].content, /execute_command for real shell commands/);
   assert.doesNotMatch(tool[0].content, /process_control for listing background processes/);
