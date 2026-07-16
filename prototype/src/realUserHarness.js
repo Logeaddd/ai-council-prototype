@@ -175,6 +175,7 @@ export async function runSeededRealUserCampaign(options = {}) {
           question: stage.prompt,
           onEvent(event) { timeline.push(compactCampaignEvent(stage, event)); }
         });
+        throwIfCampaignProviderUnavailable(groupPath, stage.prompt);
         timeline.push({ stageId: stage.id, kind: stage.kind, result: "completed", events: run.events.length });
         continue;
       }
@@ -193,6 +194,7 @@ export async function runSeededRealUserCampaign(options = {}) {
           abortWhen: stage.interruptAt === "during_model_streaming" ? isStreamingActivityEvent : isVerifiedToolActivityEvent
         });
         if (!run.aborted) {
+          throwIfCampaignProviderUnavailable(groupPath, stage.prompt || "continue");
           const budgetStop = latestSessionGuardStopReason(groupPath, stage.prompt || "continue");
           if (budgetStop === "model_call_budget_exhausted") {
             throw harnessFailure("campaign_budget_exhausted_before_interrupt", "The campaign payment guard was exhausted before the requested interruption boundary was reached.");
@@ -221,10 +223,7 @@ export async function runSeededRealUserCampaign(options = {}) {
     const artifactDelivery = await verifyCampaignDeliverable(campaign.hiddenVerifier, groupPath);
     const sessions = listPersistedSessions(groupPath);
     const toolEvidence = verifyCampaignToolEvidence(campaign.hiddenVerifier, sessions);
-    const delivery = {
-      passed: artifactDelivery.passed && toolEvidence.passed,
-      checks: [...artifactDelivery.checks, ...toolEvidence.checks]
-    };
+    const deliveryLayers = classifyCampaignDelivery(artifactDelivery);
     const attemptedModelCalls = sessions.reduce((total, session) => total + Number(session.modelCallCount || 0), 0);
     const budgetLedger = readCampaignBudgetLedger(groupPath);
     const providerCalls = providerCallMetrics({
@@ -240,11 +239,18 @@ export async function runSeededRealUserCampaign(options = {}) {
       checks: [...replayRecovery.checks, ...resumption.checks]
     };
     const resumed = resumption.passed;
+    const physiologyPassed = !failure
+      && deliveryLayers.minimumUsableDelivery.passed
+      && toolEvidence.passed
+      && interruptedSessions.length === 2
+      && resumed
+      && persistence.passed
+      && recovery.passed;
     const report = {
       schema: "ai-council.real-user-campaign-run.v1",
       startedAt,
       completedAt: new Date().toISOString(),
-      status: failure ? failureKind : delivery.passed && interruptedSessions.length === 2 && resumed && persistence.passed && recovery.passed ? "passed" : "failed",
+      status: failure ? failureKind : physiologyPassed ? "passed" : "failed",
       error: failure ? String(failure.message || failure).slice(0, 1600) : "",
       seed: campaign.seed,
       providerAcceptance: {
@@ -275,9 +281,10 @@ export async function runSeededRealUserCampaign(options = {}) {
         materialActionsObserved: timeline.filter((item) => isMaterialActionType(item.type)).length,
         resumedAfterInterruption: resumed,
         noDuplicateVerifiedWork: replayRecovery.passed,
-        passed: !failure && resumed && persistence.passed && recovery.passed
+        passed: physiologyPassed
       },
-      minimumUsableDelivery: delivery,
+      minimumUsableDelivery: deliveryLayers.minimumUsableDelivery,
+      outcomeConformance: deliveryLayers.outcomeConformance,
       subjectiveQuality: { status: "not_scored" },
       sessions: { interrupted: interruptedSessions.map(summarizeSession), total: sessions.length, modelCalls: attemptedModelCalls },
       persistence,
@@ -557,6 +564,23 @@ function latestSessionGuardStopReason(groupPath, question) {
     ?.guardStopReason || "";
 }
 
+function throwIfCampaignProviderUnavailable(groupPath, question) {
+  const session = listPersistedSessions(groupPath)
+    .filter((item) => item.question === question)
+    .sort((left, right) => Date.parse(right.createdAt || "") - Date.parse(left.createdAt || ""))[0];
+  const reason = campaignProviderFailureReason(session);
+  if (reason) throw harnessFailure("campaign_provider_unavailable", reason, true);
+}
+
+export function campaignProviderFailureReason(session = {}) {
+  const responses = (session.messages || []).map((message) => message.response).filter(Boolean);
+  if (!responses.length || responses.some((response) => response.status !== "unavailable")) return "";
+  const reasons = responses.map((response) => String(response.reason || ""));
+  const providerReasons = reasons.filter((reason) => /agent_call_failed:.*(?:HTTP\s+(?:401|402|403|408|409|429|5\d\d)|insufficient balance|rate limit|authentication|provider)/i.test(reason));
+  if (providerReasons.length !== responses.length) return "";
+  return `All participating provider calls were unavailable: ${providerReasons[0].slice(0, 1200)}`;
+}
+
 export function verifyCampaignPersistence(groupPath, sessions, runtimeGroup) {
   const checks = [];
   const taskStatePath = path.join(groupPath, "shared", "task_state.json");
@@ -766,11 +790,13 @@ export async function verifyCampaignDeliverable(verifier = {}, groupPath) {
   if (verifier.kind === "json" && fs.existsSync(filePath)) {
     try {
       const value = JSON.parse(fs.readFileSync(filePath, "utf8"));
+      checks.push(check("json_parses", true, "valid JSON"));
       checks.push(check("json_expected", Object.entries(verifier.expected || {}).every(([key, expected]) => value[key] === expected), JSON.stringify(value)));
     } catch (error) { checks.push(check("json_parses", false, error.message)); }
   } else if (verifier.kind === "api_collection" && fs.existsSync(filePath)) {
     try {
       const value = JSON.parse(fs.readFileSync(filePath, "utf8"));
+      checks.push(check("api_collection_parses", true, "valid JSON"));
       checks.push(check("api_collection_exact", stableJson(value) === stableJson(verifier.expected || {}), JSON.stringify({ keys: Object.keys(value || {}), itemCount: Array.isArray(value?.items) ? value.items.length : -1 })));
     } catch (error) { checks.push(check("api_collection_parses", false, error.message)); }
   } else if (verifier.kind === "csv" && fs.existsSync(filePath)) {
@@ -787,12 +813,14 @@ export async function verifyCampaignDeliverable(verifier = {}, groupPath) {
     try {
       const entries = readZipArchiveEntries(filePath).map((entry) => ({ name: entry.name, content: entry.content.toString("utf8") }));
       const expected = (verifier.entries || []).map((entry) => ({ name: String(entry.name), content: String(entry.content) }));
+      checks.push(check("zip_parses", true, `${entries.length} extracted entries`));
       checks.push(check("zip_entries", JSON.stringify(entries.map((entry) => entry.name)) === JSON.stringify(expected.map((entry) => entry.name)), JSON.stringify(entries.map((entry) => entry.name))));
       checks.push(check("zip_contents", JSON.stringify(entries) === JSON.stringify(expected), `${entries.length} extracted entries`));
     } catch (error) { checks.push(check("zip_parses", false, error.message)); }
   } else if (verifier.kind === "png_rgba" && fs.existsSync(filePath)) {
     try {
       const image = decodeRgbaPng(fs.readFileSync(filePath));
+      checks.push(check("png_rgba_parses", true, `${image.width}x${image.height} RGBA PNG`));
       checks.push(check("png_dimensions", image.width === verifier.width && image.height === verifier.height, `${image.width}x${image.height}`));
       checks.push(check("png_rgba_pixels", Buffer.from(verifier.pixels || []).equals(image.pixels), `${image.pixels.length} decoded bytes`));
     } catch (error) { checks.push(check("png_rgba_parses", false, error.message)); }
@@ -803,6 +831,29 @@ export async function verifyCampaignDeliverable(verifier = {}, groupPath) {
     checks.push(check("final_requirement", result.stdout.trim() === verifier.expectedOutput, result.stdout.trim()));
   }
   return { passed: checks.every((item) => item.passed), checks };
+}
+
+export function classifyCampaignDelivery(artifactDelivery = {}) {
+  const minimumIds = new Set([
+    "file_exists",
+    "json_parses",
+    "api_collection_parses",
+    "csv_parses",
+    "zip_parses",
+    "png_rgba_parses",
+    "command_exit"
+  ]);
+  const minimumChecks = (artifactDelivery.checks || []).filter((item) => minimumIds.has(item.id));
+  return {
+    minimumUsableDelivery: {
+      passed: minimumChecks.length > 0 && minimumChecks.every((item) => item.passed),
+      checks: minimumChecks
+    },
+    outcomeConformance: {
+      passed: artifactDelivery.passed === true,
+      checks: artifactDelivery.checks || []
+    }
+  };
 }
 
 function decodeRgbaPng(buffer) {

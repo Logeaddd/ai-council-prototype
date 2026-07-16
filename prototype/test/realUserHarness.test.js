@@ -5,7 +5,7 @@ import path from "node:path";
 import zlib from "node:zlib";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { isStreamingActivityEvent, postCouncilEvents, prepareCampaignFixtures, prepareGroupWorkspace, providerCallMetrics, runSeededRealUserBaseline, runSeededRealUserCampaign, verifyCampaignDeliverable, verifyCampaignPersistence, verifyCampaignResumption, verifyCampaignToolEvidence, verifyNoDuplicateVerifiedWork } from "../src/realUserHarness.js";
+import { campaignProviderFailureReason, classifyCampaignDelivery, isStreamingActivityEvent, postCouncilEvents, prepareCampaignFixtures, prepareGroupWorkspace, providerCallMetrics, runSeededRealUserBaseline, runSeededRealUserCampaign, verifyCampaignDeliverable, verifyCampaignPersistence, verifyCampaignResumption, verifyCampaignToolEvidence, verifyNoDuplicateVerifiedWork } from "../src/realUserHarness.js";
 import { createSeededCampaignScenario, EXTERNAL_ROOT_TOKEN } from "../src/realUserCampaign.js";
 
 test("seeded real-user baseline uses the HTTP/SSE route, persists interruption, continues after restart, and verifies an edited artifact", async () => {
@@ -124,6 +124,22 @@ test("model-stream interruption can close at real agent start before text or too
   assert.equal(isStreamingActivityEvent({ type: "agent_start" }), true);
   assert.equal(isStreamingActivityEvent({ type: "agent_delta" }), true);
   assert.equal(isStreamingActivityEvent({ type: "tool_start" }), false);
+});
+
+test("provider exhaustion is infrastructure evidence instead of an agent interruption failure", () => {
+  const exhausted = campaignProviderFailureReason({
+    messages: [
+      { response: { status: "unavailable", reason: "agent_call_failed:builder:HTTP 402: Insufficient Balance" } },
+      { response: { status: "unavailable", reason: "agent_call_failed:builder:HTTP 402: Insufficient Balance" } }
+    ]
+  });
+  assert.match(exhausted, /provider calls were unavailable/i);
+  assert.equal(campaignProviderFailureReason({
+    messages: [
+      { response: { status: "unavailable", reason: "agent_call_failed:builder:HTTP 402: Insufficient Balance" } },
+      { response: { status: "speak", argument: "Another member completed the work." } }
+    ]
+  }), "");
 });
 
 test("campaign recovery requires completed visible work after every interruption", () => {
@@ -358,10 +374,16 @@ test("capability-acquisition PNG verifier checks the real binary structure, dime
     const wrong = Buffer.from(correct);
     wrong[0] ^= 0xff;
     fs.writeFileSync(target, makeRgbaPng(campaign.hiddenVerifier.width, campaign.hiddenVerifier.height, wrong));
-    assert.equal((await verifyCampaignDeliverable(campaign.hiddenVerifier, root)).passed, false);
+    const wrongResult = await verifyCampaignDeliverable(campaign.hiddenVerifier, root);
+    assert.equal(wrongResult.passed, false);
+    const layers = classifyCampaignDelivery(wrongResult);
+    assert.equal(layers.minimumUsableDelivery.passed, true, "a valid RGBA artifact proves delivery physiology even when task pixels are wrong");
+    assert.equal(layers.outcomeConformance.passed, false);
 
     fs.writeFileSync(target, "not a png", "utf8");
-    assert.equal((await verifyCampaignDeliverable(campaign.hiddenVerifier, root)).passed, false);
+    const malformed = classifyCampaignDelivery(await verifyCampaignDeliverable(campaign.hiddenVerifier, root));
+    assert.equal(malformed.minimumUsableDelivery.passed, false);
+    assert.equal(malformed.outcomeConformance.passed, false);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
