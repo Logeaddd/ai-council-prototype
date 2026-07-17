@@ -17,7 +17,7 @@
     "renderer:install": "npm --prefix ./renderer install",
     "renderer:build": "npm --prefix ./renderer run build",
     "desktop": "electron ./desktop/main.mjs",
-    "test": "node --test test/*.test.js",
+    "test": "node --test --test-concurrency=1 test/*.test.js",
     "show-memory": "node ./src/cli.js list-memory-pending",
     "desktop:shortcut": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/install-desktop-shortcut.ps1",
     "desktop:portable": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/build-portable.ps1",
