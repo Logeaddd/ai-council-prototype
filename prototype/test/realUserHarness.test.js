@@ -5,7 +5,7 @@ import path from "node:path";
 import zlib from "node:zlib";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { campaignProviderFailureReason, classifyCampaignDelivery, isStreamingActivityEvent, postCouncilEvents, prepareCampaignFixtures, prepareGroupWorkspace, providerCallMetrics, runSeededRealUserBaseline, runSeededRealUserCampaign, verifyCampaignDeliverable, verifyCampaignPersistence, verifyCampaignResumption, verifyCampaignToolEvidence, verifyNoDuplicateVerifiedWork } from "../src/realUserHarness.js";
+import { campaignProviderFailureReason, classifyCampaignDelivery, isStreamingActivityEvent, postCouncilEvents, prepareCampaignFixtures, prepareGroupWorkspace, providerCallMetrics, runSeededRealUserBaseline, runSeededRealUserCampaign, verifyCampaignDeliverable, verifyCampaignPersistence, verifyCampaignResumption, verifyCampaignToolEvidence, verifyNoDuplicateVerifiedWork, waitForHarnessHealth } from "../src/realUserHarness.js";
 import { createSeededCampaignScenario, EXTERNAL_ROOT_TOKEN } from "../src/realUserCampaign.js";
 
 test("seeded real-user baseline uses the HTTP/SSE route, persists interruption, continues after restart, and verifies an edited artifact", async () => {
@@ -116,6 +116,24 @@ test("real HTTP/SSE campaign requests fail as infrastructure when no event or he
       noProgressTimeoutMs: 50
     }), (error) => error.code === "campaign_sse_no_progress_timeout" && error.harnessInfrastructure === true);
   } finally {
+    await close(server);
+  }
+});
+
+test("harness startup times out when a listening server never answers health requests", async () => {
+  const server = http.createServer((req, res) => {
+    req.resume();
+    // Leave the response open: a TCP listener alone is not a healthy harness server.
+  });
+  await listen(server);
+  try {
+    await assert.rejects(() => waitForHarnessHealth(server.address().port, { exitCode: null }, () => "child still running", {
+      timeoutMs: 80,
+      pollMs: 5,
+      requestTimeoutMs: 10
+    }), (error) => error.code === "server_start_timeout" && error.harnessInfrastructure === true && /child still running/.test(error.message));
+  } finally {
+    server.closeAllConnections?.();
     await close(server);
   }
 });

@@ -1094,7 +1094,7 @@ async function startHarnessServer(options = {}) {
   child.stdout.on("data", (chunk) => { output += String(chunk); });
   child.stderr.on("data", (chunk) => { output += String(chunk); });
   try {
-    await waitForHealth(port, child, () => output);
+    await waitForHarnessHealth(port, child, () => output);
     return { child, port };
   } catch (error) {
     await stopHarnessServer({ child });
@@ -1118,19 +1118,31 @@ async function stopHarnessServer(server) {
   }
 }
 
-async function waitForHealth(port, child, output) {
-  const deadline = Date.now() + 10000;
+export async function waitForHarnessHealth(port, child, output, options = {}) {
+  const timeoutMs = positiveNumber(options.timeoutMs, 10000);
+  const pollMs = positiveNumber(options.pollMs, 50);
+  const requestTimeoutMs = positiveNumber(options.requestTimeoutMs, 500);
+  const fetchImpl = options.fetchImpl || fetch;
+  const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (child.exitCode !== null) throw harnessFailure("server_exited_early", `Harness server exited early: ${output()}`, true);
     try {
-      const response = await fetch(`http://127.0.0.1:${port}/api/health`);
-      if (response.ok) return;
+      const controller = new AbortController();
+      const remainingMs = Math.max(1, deadline - Date.now());
+      const timer = setTimeout(() => controller.abort(), Math.min(requestTimeoutMs, remainingMs));
+      try {
+        const response = await fetchImpl(`http://127.0.0.1:${port}/api/health`, { signal: controller.signal });
+        if (response.ok) return;
+      } finally {
+        clearTimeout(timer);
+      }
     } catch {
       // Wait for the isolated local server to bind.
     }
-    await delay(50);
+    await delay(pollMs);
   }
-  throw harnessFailure("server_start_timeout", "Harness server did not become healthy.", true);
+  const detail = String(output?.() || "").trim().slice(-1200);
+  throw harnessFailure("server_start_timeout", `Harness server did not become healthy within ${timeoutMs}ms.${detail ? ` Output: ${detail}` : ""}`, true);
 }
 
 async function waitForSession(port, groupPath, predicate) {
