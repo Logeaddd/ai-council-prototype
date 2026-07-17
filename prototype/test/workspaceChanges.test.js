@@ -39,6 +39,35 @@ test("unchanged artifacts remain observable after an incremental build", () => {
   assert.equal(result.observedArtifacts.some((item) => item.path === "dist/app.jar" && item.reliable), true);
 });
 
+test("timestamp-only generator rewrites are not material workspace progress", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-workspace-identical-rewrite-"));
+  const filePath = path.join(root, "deliverables", "generated.png");
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, "SAME_BINARY_BYTES", "utf8");
+  const before = captureWorkspaceSnapshot(root);
+
+  fs.writeFileSync(filePath, "SAME_BINARY_BYTES", "utf8");
+  fs.utimesSync(filePath, new Date(), new Date(Date.now() + 1000));
+  const after = captureWorkspaceSnapshot(root);
+  const result = diffWorkspaceSnapshots(before, after);
+
+  assert.equal(result.totalChanges, 0);
+});
+
+test("same-size content rewrites remain material workspace progress", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-workspace-same-size-rewrite-"));
+  const filePath = path.join(root, "deliverables", "artifact.txt");
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, "before", "utf8");
+  const before = captureWorkspaceSnapshot(root);
+
+  fs.writeFileSync(filePath, "after!", "utf8");
+  fs.utimesSync(filePath, new Date(), new Date(Date.now() + 1000));
+  const result = diffWorkspaceSnapshots(before, captureWorkspaceSnapshot(root));
+
+  assert.equal(result.modified.some((item) => item.path === "deliverables/artifact.txt"), true);
+});
+
 test("workspace snapshots exclude secrets dependencies and council runtime state", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-workspace-ignore-"));
   const ignored = [

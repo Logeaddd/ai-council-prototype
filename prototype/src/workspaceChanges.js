@@ -1,8 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
+import { createHash } from "node:crypto";
 
 const DEFAULT_MAX_ENTRIES = 20000;
 const DEFAULT_MAX_CHANGES = 1000;
+const MAX_CONTENT_COMPARISON_BYTES = 8 * 1024 * 1024;
 const SKIP_DIRS = new Set([
   ".git",
   ".hg",
@@ -66,7 +68,7 @@ export function captureWorkspaceSnapshot(groupRoot, options = {}) {
         continue;
       }
       if (child.isDirectory() && !child.isSymbolicLink()) stack.push(absolutePath);
-      const metadata = snapshotMetadata(relativePath, stat);
+      const metadata = snapshotMetadata(relativePath, stat, absolutePath);
       entries.set(relativePathKey(relativePath), metadata);
     }
   }
@@ -99,9 +101,7 @@ export function diffWorkspaceSnapshots(before, after, options = {}) {
       created.push(changeRecord("created", current, undefined, Boolean(before?.complete)));
       continue;
     }
-    if (metadataChanged(previous, current)) {
-      modified.push(changeRecord("modified", current, previous, true));
-    }
+    if (metadataChanged(previous, current)) modified.push(changeRecord("modified", current, previous, true));
   }
   for (const [key, previous] of beforeEntries) {
     if (!afterEntries.has(key)) deleted.push(changeRecord("deleted", previous, previous, Boolean(after?.complete)));
@@ -161,22 +161,39 @@ export function backgroundWorkspaceChanges() {
   };
 }
 
-function snapshotMetadata(relativePath, stat) {
+function snapshotMetadata(relativePath, stat, absolutePath) {
   return {
     path: relativePath,
     type: stat.isFile() ? "file" : stat.isDirectory() ? "directory" : stat.isSymbolicLink() ? "symlink" : "other",
     sizeBytes: stat.size,
     modifiedMs: stat.mtimeMs,
-    changedMs: stat.ctimeMs
+    changedMs: stat.ctimeMs,
+    contentHash: shouldCaptureContentFingerprint(relativePath, stat) ? safeFileDigest(absolutePath) : ""
   };
 }
 
 function metadataChanged(a, b) {
   if (a.type === "directory" && b.type === "directory") return false;
+  if (a.contentHash && b.contentHash) return a.contentHash !== b.contentHash;
   return a.type !== b.type
     || a.sizeBytes !== b.sizeBytes
     || a.modifiedMs !== b.modifiedMs
     || a.changedMs !== b.changedMs;
+}
+
+function shouldCaptureContentFingerprint(relativePath, stat) {
+  if (!stat.isFile() || stat.size > MAX_CONTENT_COMPARISON_BYTES) return false;
+  const firstSegment = String(relativePath || "").replaceAll("\\", "/").split("/")[0].toLowerCase();
+  return ["deliverables", "artifacts", "dist", "build", "out", "output", "release", "releases"].includes(firstSegment)
+    || ARTIFACT_EXTENSIONS.has(path.extname(relativePath).toLowerCase());
+}
+
+function safeFileDigest(filePath) {
+  try {
+    return createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
+  } catch {
+    return "";
+  }
 }
 
 function changeRecord(change, current, previous, reliable) {
