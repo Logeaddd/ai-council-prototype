@@ -5,6 +5,7 @@ import { filterDurableMemoryCandidates } from "./storage.js";
 
 const MAX_MEMORY_ITEMS = 80;
 const MAX_MEMORY_TEXT = 4000;
+const MAX_MEMORY_SOURCE_TEXT = 256000;
 
 const EXPLICIT_MEMORY_PATTERNS = [
   /(?:^|[\n。！？!?；;，,])\s*((?:我(?:现在|再次|再|明确)?(?:告诉|要求|提醒)你(?:们)?[，,:：\s]*)?(?:(?:请|务必|一定(?:要)?|必须)\s*)?(?:(?:你|你们|系统|所有成员|各成员|成员|AI|agent)\s*(?:要|必须|务必)?\s*)?记住(?!了?[吗么嘛]|没有|什么)[，,:：\s]+[^\n]+)/giu,
@@ -94,7 +95,7 @@ export function appendSummarizerPublicMemories(groupPath, candidates, options = 
 }
 
 export function extractExplicitUserMemory(text) {
-  const source = cleanText(text, MAX_MEMORY_TEXT);
+  const source = cleanText(text, MAX_MEMORY_SOURCE_TEXT);
   if (!source) return [];
   const found = [];
 
@@ -182,6 +183,62 @@ export function rememberExplicitUserMemory(groupPath, text, options = {}) {
     savedCount: saved.length,
     duplicateCount: duplicates,
     upgradedCount: upgraded,
+    savedIds: saved.map((item) => item.id)
+  };
+}
+
+export function appendAgentSemanticPublicMemories(groupPath, candidates, options = {}) {
+  if (options.enabled === false) {
+    return { status: "disabled", reason: "memory_capability_disabled", candidateCount: 0, savedCount: 0, duplicateCount: 0, rejectedCount: 0 };
+  }
+  if (!groupPath) {
+    return { status: "not_applicable", reason: "group_workspace_unavailable", candidateCount: 0, savedCount: 0, duplicateCount: 0, rejectedCount: 0 };
+  }
+
+  const sourceText = cleanText(options.sourceText, MAX_MEMORY_SOURCE_TEXT);
+  const submitted = Array.isArray(candidates) ? candidates : [];
+  const verbatim = [];
+  let rejected = 0;
+  for (const candidate of submitted) {
+    const content = cleanText(candidate, MAX_MEMORY_TEXT);
+    if (!content || !sourceText.includes(content)) {
+      rejected += 1;
+      continue;
+    }
+    verbatim.push(content);
+  }
+
+  const current = listPublicMemories(groupPath);
+  const known = new Set(current.map((item) => normalizedContentKey(item.content)));
+  const saved = [];
+  let duplicates = 0;
+  for (const content of verbatim) {
+    const key = normalizedContentKey(content);
+    if (!key || known.has(key)) {
+      duplicates += 1;
+      continue;
+    }
+    known.add(key);
+    saved.push(normalizeMemoryRecord({
+      title: memoryTitle(content),
+      content,
+      source: "user_semantic",
+      sourceSessionId: options.sourceSessionId,
+      sourceAgentId: options.sourceAgentId,
+      createdBy: "user",
+      provenance: "original_user_directive",
+      createdAt: options.createdAt
+    }));
+  }
+
+  if (saved.length) writePublicMemoryFile(groupPath, [...current, ...saved].slice(-MAX_MEMORY_ITEMS));
+  return {
+    status: saved.length ? "saved" : "no_new_memory",
+    candidateCount: submitted.length,
+    verbatimCount: verbatim.length,
+    savedCount: saved.length,
+    duplicateCount: duplicates,
+    rejectedCount: rejected,
     savedIds: saved.map((item) => item.id)
   };
 }

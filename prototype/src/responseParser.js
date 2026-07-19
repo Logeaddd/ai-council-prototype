@@ -36,7 +36,8 @@ export function parseRoundResponse(rawText) {
     return {
       status: "skip",
       reason: String(parsed.reason || "No new objection."),
-      resolved_ids: normalizeResolvedIds(parsed.resolved_ids)
+      resolved_ids: normalizeResolvedIds(parsed.resolved_ids),
+      memory_candidates: normalizeStringArray(parsed.memory_candidates)
     };
   }
   if (parsed.status === "error" || parsed.status === "unavailable") {

@@ -4,6 +4,7 @@ import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  appendAgentSemanticPublicMemories,
   appendSummarizerPublicMemories,
   deletePublicMemory,
   extractExplicitUserMemory,
@@ -126,6 +127,31 @@ test("disabled explicit memory does not create a memory file", () => {
   assert.equal(result.status, "disabled");
   assert.deepEqual(listPublicMemories(groupPath), []);
   assert.equal(fs.existsSync(path.join(groupPath, "shared", "memory", "public-memory.json")), false);
+});
+
+test("agent semantic memory accepts verbatim durable meaning in any language and rejects paraphrases", () => {
+  const groupPath = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-semantic-memory-"));
+  const directives = [
+    "wo xihuan mei ci dou gei chu ke yanzheng de zhengju",
+    "Ich bevorzuge nachvollziehbare Belege statt kurzer Behauptungen.",
+    "私は短い返事よりも、根拠のある詳しい説明を好みます。",
+    "Мне нужны проверяемые доказательства, а не краткие заявления."
+  ];
+  const sourceText = directives.join("\n");
+  const result = appendAgentSemanticPublicMemories(groupPath, [
+    ...directives,
+    "The user prefers evidence."
+  ], {
+    sourceText,
+    sourceSessionId: "session_semantic",
+    sourceAgentId: "member_semantic"
+  });
+
+  assert.equal(result.savedCount, 4);
+  assert.equal(result.rejectedCount, 1);
+  assert.deepEqual(listPublicMemories(groupPath).map((item) => item.content), directives);
+  assert.ok(listPublicMemories(groupPath).every((item) => item.source === "user_semantic"));
+  assert.ok(listPublicMemories(groupPath).every((item) => item.provenance === "original_user_directive"));
 });
 
 test("summarizer durable filter supports Chinese memory labels without storing meeting actions", () => {

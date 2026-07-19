@@ -6748,6 +6748,94 @@ test("explicit user memory is saved before model calls and reaches the next prov
   }
 });
 
+test("member semantic memory handles non-keyword language and reaches the next member immediately", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-semantic-memory-runtime-"));
+  const groupPath = path.join(tmp, "group");
+  fs.mkdirSync(groupPath, { recursive: true });
+  const requests = [];
+  const directive = "私は短い返事よりも、根拠のある詳しい説明を好みます。";
+  const server = http.createServer(async (req, res) => {
+    const body = JSON.parse(await readRequestBody(req));
+    requests.push(body);
+    if (body.model === "semantic-a") {
+      writeOpenAiStream(res, JSON.stringify({
+        status: "skip",
+        reason: "No task objection.",
+        memory_candidates: [directive]
+      }));
+      return;
+    }
+    if (body.model === "semantic-final") {
+      writeOpenAiStream(res, JSON.stringify({
+        answer: "Semantic memory was processed.",
+        consensus_score: 1,
+        supporting_agents: ["Semantic A", "Semantic B"],
+        dissenting_agents: [],
+        minority_report: "",
+        risks: [],
+        next_actions: [],
+        selected_file_operation_ids: [],
+        memory_candidates: []
+      }));
+      return;
+    }
+    writeOpenAiStream(res, JSON.stringify({
+      status: "skip",
+      reason: "The durable preference is already available.",
+      memory_candidates: []
+    }));
+  });
+  await listen(server);
+  const apiBaseUrl = `http://127.0.0.1:${server.address().port}/v1`;
+
+  try {
+    fs.writeFileSync(path.join(groupPath, "group.json"), JSON.stringify({
+      id: "semantic-memory-runtime",
+      seats: [
+        { seatId: "semantic-a", displayName: "Semantic A", privateFolder: "members/Semantic A" },
+        { seatId: "semantic-b", displayName: "Semantic B", privateFolder: "members/Semantic B" },
+        { seatId: "semantic-final", displayName: "Semantic Final", privateFolder: "members/Semantic Final", judge: true }
+      ],
+      permissions: { defaultTier: "text", seatTiers: {} },
+      settings: {}
+    }, null, 2), "utf8");
+    const baseAgent = {
+      provider: "openai-compatible",
+      apiBaseUrl,
+      allowUnsafePrivateNetwork: true,
+      apiKey: "secret-runtime-key",
+      weight: 1,
+      enabled: true,
+      providerLimits: { contextWindow: 12000, maxOutputTokens: 1000 }
+    };
+    const group = validateGroupConfig({
+      id: "semantic-memory-runtime",
+      name: "Semantic Memory Runtime",
+      settings: { maxRounds: 1, minConsensusWeight: 1, stopWhenAllSkip: true, agentTimeoutMs: 1000 },
+      agents: [
+        { ...baseAgent, id: "semantic-a", name: "Semantic A", role: "Member", model: "semantic-a" },
+        { ...baseAgent, id: "semantic-b", name: "Semantic B", role: "Member", model: "semantic-b" },
+        { ...baseAgent, id: "semantic-final", name: "Semantic Final", role: "Finalizer", model: "semantic-final", judge: true }
+      ]
+    });
+
+    const result = await runCouncil(directive, group, tmp, { groupPath });
+    const secondMemberRequest = requests.find((body) => body.model === "semantic-b");
+    const secondMemberPrompt = JSON.stringify(secondMemberRequest?.messages || []);
+    assert.equal(result.session.explicitMemoryUpdate.status, "no_explicit_memory");
+    assert.ok(result.session.semanticMemoryUpdates.some((item) => item.agentId === "semantic-a" && item.status === "saved"));
+    assert.match(secondMemberPrompt, new RegExp(directive));
+    assert.match(secondMemberPrompt, /Provenance: original user directive/);
+    const memories = listPublicMemories(groupPath);
+    assert.equal(memories.length, 1);
+    assert.equal(memories[0].content, directive);
+    assert.equal(memories[0].source, "user_semantic");
+    assert.equal(memories[0].sourceAgentId, "semantic-a");
+  } finally {
+    await close(server);
+  }
+});
+
 test("disabled memory stays out of provider prompts and stops automatic memory writes", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-memory-disabled-runtime-"));
   const groupPath = path.join(tmp, "group");

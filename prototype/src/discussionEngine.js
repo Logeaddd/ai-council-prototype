@@ -8,7 +8,7 @@ import { appendMemoryCandidates, listSessionHistoryCatalogue, readRecentGroupSes
 import { assessBudgetUsage, assessSizeUsage } from "./tokenLimits.js";
 import { appendSessionTranscriptChunk, readSummaryCache, updateDeterministicSummaries } from "./summaryCache.js";
 import { appendSessionUsage, estimateCost, estimateMemberAccruedCost } from "./usageStats.js";
-import { appendSummarizerPublicMemories, formatPublicMemoriesForPrompt, rememberExplicitUserMemory } from "./publicMemory.js";
+import { appendAgentSemanticPublicMemories, appendSummarizerPublicMemories, formatPublicMemoriesForPrompt, rememberExplicitUserMemory } from "./publicMemory.js";
 import { applyObjectionLedger, isReviewerLike } from "./objectionLedger.js";
 import { computeFinalState } from "./finalState.js";
 import { parseFileOperationProposals } from "./fileOperations.js";
@@ -123,6 +123,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
     rejectedToolRequests: [],
     contextRetrievalResults: retrievedContext,
     contextReceipts: [],
+    semanticMemoryUpdates: [],
     contextInvalidations,
     rejectedFileOperationProposals: [],
     pendingFileOperationProposals: [],
@@ -266,6 +267,18 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
         ...promptOptions,
         contextSections: buildContextPromptSections(memberContext)
       });
+      const captureSemanticMemory = (currentResponse, phase) => {
+        if (!Array.isArray(currentResponse?.memory_candidates) || !currentResponse.memory_candidates.length) return undefined;
+        const update = persistAgentSemanticPublicMemory(options.groupPath, currentResponse?.memory_candidates, {
+          appSettings: options.appSettings,
+          sourceText: question,
+          sessionId: session.id,
+          agent,
+          createdAt: nowIso()
+        });
+        session.semanticMemoryUpdates.push({ phase, round, agentId: agent.id, ...update });
+        return update;
+      };
       let callOutcome = yield* callRoundModel({
         options,
         session,
@@ -278,6 +291,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
         nativeToolPermissionTier: fileOperationPermissionTier
       });
       let response = applyRoundResponseRules(callOutcome.response, agent, round);
+      captureSemanticMemory(response, "round");
       let rawTextForMessage = callOutcome.rawTextForMessage;
       let errorForMessage = callOutcome.errorForMessage;
       const accumulatedToolRequests = [];
@@ -376,6 +390,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
           nativeToolChoice: fileOperationPermissionTier === "full" ? "required" : "auto"
         });
         response = applyRoundResponseRules(callOutcome.response, agent, round);
+        captureSemanticMemory(response, "file_operation_recovery");
         rawTextForMessage = callOutcome.rawTextForMessage;
         errorForMessage = callOutcome.errorForMessage;
         processResponseFileOperations(response);
@@ -505,6 +520,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
             : "auto"
         });
         response = applyRoundResponseRules(callOutcome.response, agent, round);
+        captureSemanticMemory(response, toolLoopStagnated.recoveryRequired ? "tool_stagnation_recovery" : "tool_followup");
         rawTextForMessage = callOutcome.rawTextForMessage;
         errorForMessage = callOutcome.errorForMessage;
         if (toolLoopStagnated.recoveryRequired && isReviewerLike(agent) && response.tool_requests?.length) {
@@ -525,6 +541,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
             nativeToolChoice: "auto"
           });
           response = applyRoundResponseRules(callOutcome.response, agent, round);
+          captureSemanticMemory(response, "tool_stagnation_review_recovery");
           rawTextForMessage = callOutcome.rawTextForMessage;
           errorForMessage = callOutcome.errorForMessage;
           if (response.tool_requests?.length) {
@@ -562,6 +579,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
             nativeToolChoice: "required"
           });
           response = applyRoundResponseRules(callOutcome.response, agent, round);
+          captureSemanticMemory(response, "tool_stagnation_action_recovery");
           rawTextForMessage = callOutcome.rawTextForMessage;
           errorForMessage = callOutcome.errorForMessage;
           if (!hasMaterialExecutionRequest(response)) {
@@ -599,6 +617,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
             nativeToolChoice: "required"
           });
           response = applyRoundResponseRules(callOutcome.response, agent, round);
+          captureSemanticMemory(response, "tool_stagnation_verification_recovery");
           rawTextForMessage = callOutcome.rawTextForMessage;
           errorForMessage = callOutcome.errorForMessage;
           if (!hasVerificationRequest(response)) {
@@ -809,6 +828,15 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
       session.finalDecision = parseFinalDecision(finalRaw.text, fallback);
     }
   }
+  session.finalSemanticMemoryUpdate = Array.isArray(session.finalDecision.memory_candidates) && session.finalDecision.memory_candidates.length
+    ? persistAgentSemanticPublicMemory(options.groupPath, session.finalDecision.memory_candidates, {
+      appSettings: options.appSettings,
+      sourceText: question,
+      sessionId: session.id,
+      agent: judge,
+      createdAt: nowIso()
+    })
+    : { status: "no_candidates", candidateCount: 0, savedCount: 0, duplicateCount: 0, rejectedCount: 0 };
   session.finalizationStatus = finalizationFailure
     ? { status: "failed", reason: finalizationFailure }
     : { status: "completed", reason: "" };
@@ -964,6 +992,46 @@ function persistExplicitUserMemory(groupPath, text, options = {}) {
       savedCount: 0,
       duplicateCount: 0,
       error: String(error?.message || error || "explicit_public_memory_write_failed").slice(0, 500)
+    };
+  }
+}
+
+function persistAgentSemanticPublicMemory(groupPath, candidates, options = {}) {
+  if (!capabilityEnabled(options.appSettings, "memory")) {
+    return {
+      status: "disabled",
+      reason: "memory_capability_disabled",
+      candidateCount: Array.isArray(candidates) ? candidates.length : 0,
+      savedCount: 0,
+      duplicateCount: 0,
+      rejectedCount: 0
+    };
+  }
+  if (!groupPath) {
+    return {
+      status: "not_applicable",
+      reason: "group_workspace_unavailable",
+      candidateCount: Array.isArray(candidates) ? candidates.length : 0,
+      savedCount: 0,
+      duplicateCount: 0,
+      rejectedCount: 0
+    };
+  }
+  try {
+    return appendAgentSemanticPublicMemories(groupPath, candidates, {
+      sourceText: options.sourceText,
+      sourceSessionId: options.sessionId,
+      sourceAgentId: options.agent?.id,
+      createdAt: options.createdAt
+    });
+  } catch (error) {
+    return {
+      status: "failed",
+      candidateCount: Array.isArray(candidates) ? candidates.length : 0,
+      savedCount: 0,
+      duplicateCount: 0,
+      rejectedCount: 0,
+      error: String(error?.message || error || "semantic_public_memory_write_failed").slice(0, 500)
     };
   }
 }

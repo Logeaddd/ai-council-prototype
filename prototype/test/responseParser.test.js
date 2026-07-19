@@ -141,11 +141,13 @@ test("round response parser preserves resolved ids on skip", () => {
   const parsed = parseRoundResponse(JSON.stringify({
     status: "skip",
     reason: "Earlier blocker is fixed.",
-    resolved_ids: ["risk-1"]
+    resolved_ids: ["risk-1"],
+    memory_candidates: ["私は検証可能な証拠を好みます。"]
   }));
 
   assert.equal(parsed.status, "skip");
   assert.deepEqual(parsed.resolved_ids, ["risk-1"]);
+  assert.deepEqual(parsed.memory_candidates, ["私は検証可能な証拠を好みます。"]);
 });
 
 test("final parser rejects skip as the final answer", () => {
