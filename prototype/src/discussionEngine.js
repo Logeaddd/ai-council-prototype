@@ -1099,6 +1099,7 @@ function noProgressGuardReason(session, question, settings = {}) {
 }
 
 function isFileDeliveryTask(question) {
+  if (/(?:produce|export|pdf|report|document|presentation|spreadsheet|\u5e2e\u6211\u505a|\u505a(?:\u4e00|\u4e2a|\u4efd)|\u62a5\u544a|\u5bfc\u51fa|\u684c\u9762)/i.test(String(question || ""))) return true;
   return /(build|create|implement|write|modify|fix|generate|package|compile|jar|mod\b|source|code|file|构建|生成|制作|开发|实现|编写|写入|修改|修复|打包|源码|代码|文件|模组)/i.test(String(question || ""));
 }
 
@@ -1126,9 +1127,13 @@ export function updateStagnantToolLoopCount({ requests = [], results = [], rejec
   const inspectionOnly = results.length > 0 && results.every(isRepeatableInspectionTool);
   const repeatedInspection = inspectionOnly && !allTargetsNovel;
   const scoreIncrement = acquiredCapabilityReady || repeatedInspection ? 3 : 1;
-  const count = material || actionableFailure || !inspectionOnly
+  const count = material
     ? 0
-    : Number(current || 0) + scoreIncrement;
+    : actionableFailure
+      ? Number(current || 0) + 3
+      : !inspectionOnly
+        ? 0
+        : Number(current || 0) + scoreIncrement;
   return { count, recoveryRequired: count >= 9 };
 }
 
@@ -2026,6 +2031,8 @@ export function buildToolFollowupInstruction(results = [], rejected = []) {
   const completed = (Array.isArray(results) ? results : []).filter((item) => item?.status === "completed" && item.result?.ok !== false);
   const failedCommands = (Array.isArray(results) ? results : []).filter((item) => item?.tool === "execute_command" && item?.status === "failed");
   const failedManagedInstalls = (Array.isArray(results) ? results : []).filter((item) => item?.tool === "install_package" && item?.status === "failed");
+  const failedSkillReads = (Array.isArray(results) ? results : []).filter((item) => item?.tool === "skill_read" && item?.status === "failed");
+  const invalidSkillRequests = (Array.isArray(rejected) ? rejected : []).filter((item) => item?.code === "invalid_tool" && /^skill(?::|$)/i.test(String(item.tool || "")));
   if (failedCommands.length) {
     lines.push(`Failed command attempts this round: ${failedCommands.length}. Do not repeat an identical failed command. Read its stdout, stderr, exit code, timeout state, and environment hint before choosing a materially different next action.`);
   }
@@ -2033,6 +2040,13 @@ export function buildToolFollowupInstruction(results = [], rejected = []) {
     const manager = item.manager || item.result?.manager || "the selected package manager";
     const packageName = item.packageName || item.package || item.result?.packageName || "the selected package";
     lines.push(`Managed package installation failed for ${manager} package ${JSON.stringify(packageName)}. Use the exact returned error. Do not retry the same manager unchanged; if another already-detected runtime ecosystem can satisfy the task, choose an equivalent package yourself and request install_package with that manager.`);
+  }
+  for (const item of failedSkillReads) {
+    const skillId = item.skillId || "the requested skill";
+    lines.push(`Skill instructions could not be loaded for ${JSON.stringify(skillId)} (${item.code || "skill_read_failed"}). Do not retry the same skill_read unchanged. Request skill_list to inspect installed and enabled skills. If no suitable enabled skill exists, use skill_search plus skill_install/skill_enable, or switch to a verified generic package, runtime, CLI, or code path that can produce the requested artifact.`);
+  }
+  if (invalidSkillRequests.length) {
+    lines.push("A skill-like tool name was invalid. The protocol has no dynamic tool named skill or skill:<id>. Use skill_read with skillId for an enabled skill, skill_list to inspect availability, skill_search/skill_install/skill_enable to acquire one, or a generic package/runtime/command path. Do not repeat the invalid tool name.");
   }
   for (const item of failedCommands.filter((entry) => isPackageInstallCommand(entry))) {
     const output = `${item.result?.stdout || ""}\n${item.result?.stderr || ""}\n${item.result?.error || item.error || ""}`;

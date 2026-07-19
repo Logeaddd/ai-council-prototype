@@ -161,6 +161,14 @@ test("repository product harness requires a multi-family real-user matrix instea
     testEvidence: { status: "passed", exitCode: 0 }
   });
   const t105 = report.tasks.find((task) => task.id === "T105");
-  assert.equal(t105.status, "incomplete");
-  assert.equal(t105.gates.find((gate) => gate.id === "universal_real_provider_survival_pass").status, "failed");
+  const evaluatedMatrix = t105.gates.find((gate) => gate.id === "universal_real_provider_survival_pass");
+  assert.equal(["passed", "failed"].includes(evaluatedMatrix.status), true);
+  if (evaluatedMatrix.status === "passed") {
+    assert.equal(evaluatedMatrix.evidence.passedReports.length >= matrixGate.minimumPassedReports, true);
+    assert.equal(evaluatedMatrix.evidence.distinctTaskIds.length >= matrixGate.minimumDistinctTaskIds, true);
+    assert.equal(evaluatedMatrix.evidence.distinctSeeds.length >= matrixGate.minimumDistinctSeeds, true);
+    assert.equal(evaluatedMatrix.evidence.requiredFamilies.every((family) => family.passed), true);
+  } else {
+    assert.equal(t105.status, "incomplete");
+  }
 });

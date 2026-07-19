@@ -148,6 +148,37 @@ test("requested artifact verification accepts output in a retained user-authoriz
   assert.equal(report.requirements[0].path, "project:result.json");
 });
 
+test("requested artifact verification accepts a current-run external artifact path printed by a command", () => {
+  const groupPath = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-required-output-group-"));
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-required-output-project-"));
+  const pdfPath = path.join(project, "report.pdf");
+  fs.writeFileSync(pdfPath, "%PDF-1.7\nexternal report", "ascii");
+  const session = {
+    authorizedProjectRoots: [project],
+    finalDecision: { answer: "Created the requested PDF.", final_state: "ready_to_execute", blocking_issues: [], risks: [] },
+    toolExecutionResults: [{
+      id: "external-pdf-command",
+      tool: "execute_command",
+      status: "completed",
+      command: "python generate_report.py",
+      createdAt: new Date().toISOString(),
+      result: {
+        ok: true,
+        exitCode: 0,
+        durationMs: 1000,
+        stdout: `PDF created: ${pdfPath}`,
+        workspaceChanges: { status: "completed", created: [], modified: [], observedArtifacts: [] }
+      }
+    }],
+    fileOperationExecutionResults: []
+  };
+
+  const report = enforceRequestedArtifactRequirements({ groupPath, question: "Create a PDF report.", session });
+  assert.equal(report.status, "verified");
+  assert.equal(path.resolve(report.requirements[0].path), path.resolve(pdfPath));
+  assert.equal(report.requirements[0].evidence_id, "external-pdf-command");
+});
+
 test("normalizes structured deliverable claims", () => {
   assert.deepEqual(normalizeDeliverableClaims([
     { path: "dist/app.jar", claim: "built", evidence_ids: ["tool-build", "", 42] },

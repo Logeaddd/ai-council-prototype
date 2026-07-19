@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { isInsidePath, normalizeWorkspacePathAlias } from "./pathGuards.js";
 
@@ -85,7 +86,7 @@ export function extractImportedProjectRoots(attachments = []) {
   return [...new Set(roots.map((root) => safeRealpath(root)).filter(Boolean))];
 }
 
-export function extractUserReferencedRoots({ text = "", attachments = [] } = {}) {
+export function extractUserReferencedRoots({ text = "", attachments = [], homeDir = os.homedir() } = {}) {
   const sources = [String(text || "")];
   for (const attachment of Array.isArray(attachments) ? attachments : []) {
     if (attachment?.localPath) sources.push(String(attachment.localPath));
@@ -101,8 +102,19 @@ export function extractUserReferencedRoots({ text = "", attachments = [] } = {})
         roots.push(stat.isDirectory() ? existing : path.dirname(existing));
       } catch {}
     }
+    roots.push(...naturalLanguageOutputRoots(source, homeDir));
   }
   return [...new Set(roots.map((root) => safeRealpath(root)).filter(Boolean))];
+}
+
+function naturalLanguageOutputRoots(value, homeDir) {
+  const text = String(value || "");
+  const explicitlyRequestsDesktop = /(?:放(?:到|在)?|保存(?:到|在)?|输出(?:到|在)?|导出(?:到|在)?|写(?:到|在)?|创建(?:到|在)?|生成(?:到|在)?)[^\r\n]{0,32}(?:桌面|desktop)|(?:桌面|desktop)[^\r\n]{0,32}(?:放|保存|输出|导出|写|创建|生成)/i.test(text);
+  if (!explicitlyRequestsDesktop) return [];
+  return [path.join(homeDir, "Desktop"), path.join(homeDir, "OneDrive", "Desktop")]
+    .filter((candidate) => {
+      try { return fs.statSync(candidate).isDirectory(); } catch { return false; }
+    });
 }
 
 function extractAbsolutePathCandidates(value) {

@@ -26,6 +26,15 @@ test("delivery tasks choose one highest-permission executor", () => {
   assert.match(executionInstruction(state, agents[1]), /primary executor/);
 });
 
+test("Chinese report requests are delivery work owned by one full-permission executor", () => {
+  const question = "帮我做一个关于我的世界兔子模组的调查报告，要完整全面，图文并茂，编辑在1个pdf文件里面，放在桌面上";
+  const state = createExecutionState({ question, agents, workspaceGroup });
+  assert.equal(isDeliveryTask(question), true);
+  assert.equal(state.active, true);
+  assert.equal(state.executorId, "builder");
+  assert.deepEqual(selectExecutionAgents(state, agents).map((agent) => agent.id), ["builder"]);
+});
+
 test("reviewers join only after a real checkpoint and own the review phase", () => {
   const state = createExecutionState({ question: "Create the project files.", agents, workspaceGroup });
   state.phase = "verify";
@@ -70,6 +79,36 @@ test("failed build transitions to repair with exact error evidence", () => {
   advanceExecutionState({ state, session, agent: agents[1], question: "Build a JAR." });
   assert.equal(state.phase, "repair");
   assert.match(state.lastError, /Java compilation failed/);
+  assert.match(state.nextAction, /patch/);
+});
+
+test("a failed artifact command after a workspace write enters repair even without a verification reason", () => {
+  const state = createExecutionState({ question: "Create a PDF report.", agents, workspaceGroup });
+  const session = {
+    toolExecutionResults: [
+      {
+        id: "write-generator",
+        tool: "workspace_edit",
+        status: "completed",
+        result: { ok: true, workspaceChanges: { totalChanges: 1, created: [{ path: "generate_report.py" }] } }
+      },
+      {
+        id: "run-generator",
+        tool: "execute_command",
+        command: "python generate_report.py",
+        status: "failed",
+        error: "Command exited with code 1.",
+        result: { ok: false, exitCode: 1, stderr: "FileNotFoundError: wrong output directory" }
+      }
+    ],
+    fileOperationExecutionResults: [],
+    groupSnapshot: { agents }
+  };
+  advanceExecutionState({ state, session, agent: agents[1], question: state.taskQuestion });
+  assert.equal(state.phase, "repair");
+  assert.equal(state.lastAction, "verification_failed:run-generator");
+  assert.match(state.lastError, /Command exited with code 1/);
+  assert.match(state.lastError, /wrong output directory/);
   assert.match(state.nextAction, /patch/);
 });
 

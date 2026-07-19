@@ -105,9 +105,16 @@ export function advanceExecutionState({ state, session, agent, groupPath, questi
   const material = [...toolResults, ...fileResults].some(hasMaterialWorkspaceChange);
   const verificationResults = toolResults.filter(isVerificationResult);
   const latestVerification = verificationResults.at(-1);
+  const latestExecution = toolResults.filter((item) => ["execute_command", "run_code", "run_tests"].includes(item.tool)).at(-1);
+  const latestFailedExecution = latestExecution
+    && (latestExecution.status !== "completed" || latestExecution.result?.ok === false || Number(latestExecution.result?.exitCode ?? 0) !== 0)
+    ? latestExecution
+    : undefined;
   const failedVerification = latestVerification && (latestVerification.status !== "completed" || latestVerification.result?.ok === false || Number(latestVerification.result?.exitCode ?? 0) !== 0)
     ? latestVerification
-    : undefined;
+    : latestFailedExecution && (material || ["verify", "repair"].includes(state.phase))
+      ? latestFailedExecution
+      : undefined;
   const successfulVerification = latestVerification && latestVerification.status === "completed" && latestVerification.result?.ok !== false && Number(latestVerification.result?.exitCode ?? 0) === 0
     ? latestVerification
     : undefined;
@@ -164,6 +171,8 @@ export function advanceExecutionState({ state, session, agent, groupPath, questi
 export function isDeliveryTask(question) {
   const text = String(question || "");
   const directive = taskDirectiveText(text);
+  const directArtifactRequest = /\b(?:make|produce|create|generate|write|export)\b[^\r\n]{0,100}\b(?:pdf|report|document|presentation|spreadsheet|file)\b|\u5e2e\u6211\u505a|\u505a(?:\u4e00|\u4e2a|\u4efd)[^\r\n]{0,100}(?:\u62a5\u544a|\u6587\u4ef6|\u6587\u6863|\u8868\u683c|\u5e7b\u706f\u7247|pdf)|(?:\u7f16\u8f91|\u5bfc\u51fa|\u4fdd\u5b58|\u653e)[^\r\n]{0,80}(?:\u6587\u4ef6|\u684c\u9762|pdf)/i;
+  if (directArtifactRequest.test(directive.combined)) return true;
   const continuationWork = /\bcontinue(?:\s+from|\s+with|\s+the)?\b|继续(?:处理|完成|做|推进)?/i.test(directive.combined)
     && /\b(?:current|existing|latest|newest|requested)\b[^\r\n]{0,100}\b(?:artifact|deliverable|file|project|task|requirement)\b|\b[\w./-]+\.(?:json|js|cjs|mjs|ts|py|java|md|txt|csv|zip|jar)\b|当前|现有|最新|最终|要求|产物|文件|项目/i.test(directive.combined);
   const explicitNoChange = /\b(?:do not|don't|without)\s+(?:modify|change|edit|write|touch)\b|只(?:检查|审查|分析)|不要(?:修改|改动|编辑|写入)/i.test(directive.leading);
@@ -232,7 +241,10 @@ function isVerificationResult(item = {}) {
 }
 
 function verificationError(item = {}) {
-  return String(item.error || item.result?.stderr || item.result?.stdout || item.code || "verification_failed").slice(0, 1200);
+  const details = [item.error, item.result?.stderr, item.result?.stdout, item.code]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+  return [...new Set(details)].join("\n").slice(0, 1200) || "verification_failed";
 }
 
 function mergeCheckpointEvidence(previous = [], results = []) {

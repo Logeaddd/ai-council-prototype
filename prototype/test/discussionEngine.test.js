@@ -4471,6 +4471,117 @@ test("delivery work calls one full-permission executor instead of every ordinary
   assert.equal(session.messages.some((message) => message.agentId === "reviewer"), false);
 });
 
+test("report delivery keeps one executor and recovers from a missing skill into a real verified artifact", async () => {
+  const groupPath = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-report-recovery-"));
+  fs.mkdirSync(path.join(groupPath, "sessions"), { recursive: true });
+  fs.writeFileSync(path.join(groupPath, "group.json"), JSON.stringify({
+    id: "report-recovery",
+    name: "Report Recovery",
+    permissions: { defaultTier: "text", seatTiers: { executor: "full", reviewer: "tool" } },
+    seats: [
+      { seatId: "designer", displayName: "Designer", enabled: true, privateFolder: "members/Designer" },
+      { seatId: "executor", displayName: "Executor", enabled: true, privateFolder: "members/Executor" },
+      { seatId: "reviewer", displayName: "Reviewer", enabled: true, reviewer: true, privateFolder: "members/Reviewer" }
+    ]
+  }), "utf8");
+  const roundAgents = [];
+  let executorStep = 0;
+  let verificationSent = false;
+  const server = http.createServer(async (req, res) => {
+    const body = JSON.parse(await readRequestBody(req));
+    const prompt = JSON.stringify(body.messages || []);
+    if (prompt.includes("FinalDecision JSON object")) {
+      writeOpenAiStream(res, JSON.stringify({
+        answer: "Created and verified `report.pdf`.",
+        final_state: "ready_to_execute",
+        consensus_score: 1,
+        supporting_agents: ["Executor"],
+        dissenting_agents: [],
+        minority_report: "",
+        risks: [],
+        next_actions: [],
+        deliverables: [{ path: "report.pdf", claim: "created" }],
+        selected_file_operation_ids: [],
+        memory_candidates: []
+      }));
+      return;
+    }
+    const agentName = body.messages?.[0]?.content?.match(/You are ([^.\n]+)/)?.[1] || "";
+    roundAgents.push(agentName);
+    if (prompt.includes("[Checkpoint review]")) {
+      writeOpenAiStream(res, JSON.stringify({ status: "skip", reason: "The PDF header verification passed.", objection_items: [], memory_candidates: [] }));
+      return;
+    }
+    if (executorStep === 0) {
+      executorStep += 1;
+      writeOpenAiStream(res, JSON.stringify({
+        status: "speak",
+        argument: "Load the document skill before producing the report.",
+        tool_requests: [{ tool: "skill_read", skillId: "missing-document-skill", reason: "Load document generation instructions." }],
+        objections: [],
+        confidence: 0.5,
+        memory_candidates: []
+      }));
+      return;
+    }
+    if (executorStep === 1) {
+      assert.match(prompt, /Do not retry the same skill_read unchanged/);
+      assert.match(prompt, /generic package, runtime, CLI, or code path/);
+      executorStep += 1;
+      writeOpenAiStream(res, JSON.stringify({
+        status: "speak",
+        argument: "The named skill is unavailable, so I am switching to a generic artifact path.",
+        tool_requests: [{ tool: "workspace_edit", action: "write", path: "report.pdf", code: "%PDF-1.7\nREAL_REPORT_CONTENT\n", reason: "Create the requested PDF artifact." }],
+        objections: [],
+        confidence: 0.8,
+        memory_candidates: []
+      }));
+      return;
+    }
+    assert.match(prompt, /(?:verify|verification|artifact)/i);
+    if (verificationSent) {
+      writeOpenAiStream(res, JSON.stringify({ status: "speak", argument: "The PDF verification passed.", objections: [], confidence: 1, memory_candidates: [] }));
+      return;
+    }
+    verificationSent = true;
+    writeOpenAiStream(res, JSON.stringify({
+      status: "speak",
+      argument: "Verify the generated PDF now.",
+      tool_requests: [{
+        tool: "run_code",
+        language: "javascript",
+        code: "const fs=require('fs'); const head=fs.readFileSync('report.pdf').subarray(0,5).toString('ascii'); console.assert(head === '%PDF-', 'invalid PDF'); console.log('PDF_OK');",
+        reason: "Verify the PDF artifact header."
+      }],
+      objections: [],
+      confidence: 0.9,
+      memory_candidates: []
+    }));
+  });
+  await listen(server);
+  try {
+    const apiBaseUrl = `http://127.0.0.1:${server.address().port}/v1`;
+    const group = validateGroupConfig({
+      id: "report-recovery",
+      name: "Report Recovery",
+      settings: { maxRounds: 2, minConsensusWeight: 1, stopWhenAllSkip: true, agentTimeoutMs: 5000, allowSoloCouncil: true },
+      agents: [
+        { id: "designer", name: "Designer", role: "Designer", provider: "openai-compatible", apiBaseUrl, allowUnsafePrivateNetwork: true, apiKey: "secret-runtime-key", model: "report-model", weight: 1, enabled: true },
+        { id: "executor", name: "Executor", role: "Executor", provider: "openai-compatible", apiBaseUrl, allowUnsafePrivateNetwork: true, apiKey: "secret-runtime-key", model: "report-model", weight: 1, enabled: true },
+        { id: "reviewer", name: "Reviewer", role: "Reviewer", provider: "openai-compatible", apiBaseUrl, allowUnsafePrivateNetwork: true, apiKey: "secret-runtime-key", model: "report-model", weight: 1, enabled: true, reviewer: true }
+      ]
+    });
+    const result = await runCouncil("帮我做一份图文调查报告，编辑在1个PDF文件里面。", group, groupPath, { groupPath });
+    assert.equal(fs.readFileSync(path.join(groupPath, "report.pdf"), "ascii").startsWith("%PDF-"), true);
+    assert.equal(result.session.executionState.executorId, "executor");
+    assert.equal(result.session.finalDecision.requested_artifact_verification.status, "verified");
+    assert.equal(result.session.status, "completed");
+    assert.equal(roundAgents.includes("Designer"), false);
+  } finally {
+    await close(server);
+  }
+});
+
 test("primary executor completes a deterministic project through real writes tests and review", async () => {
   const groupPath = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-project-benchmark-"));
   fs.mkdirSync(path.join(groupPath, "sessions"), { recursive: true });

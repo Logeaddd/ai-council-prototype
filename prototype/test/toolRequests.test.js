@@ -1015,6 +1015,25 @@ test("execute_command rejects an identical command after it already failed in th
   assert.equal(fs.existsSync(marker), false);
 });
 
+test("an identical command can be retried after a real repair mutation", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-command-repair-retry-"));
+  const command = nodeCommand("console.log('REPAIRED_COMMAND_RAN')");
+  const result = await executeToolRequests({
+    permissionTier: "full",
+    groupPath: tmp,
+    agent: { id: "full", name: "Full" },
+    round: 1,
+    previousResults: [
+      { tool: "execute_command", command, status: "failed", result: { command, exitCode: 1 } },
+      { tool: "workspace_edit", status: "completed", result: { ok: true, workspaceChanges: { totalChanges: 1, modified: [{ path: "generate_report.py" }] } } }
+    ],
+    requests: [{ tool: "execute_command", command, shell: shellForNodeCommand(), reason: "Retry after repairing the generator." }]
+  });
+  assert.equal(result.rejected.length, 0);
+  assert.equal(result.results[0].status, "completed");
+  assert.match(result.results[0].result.stdout, /REPAIRED_COMMAND_RAN/);
+});
+
 test("plain continuation does not replay an already verified command", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-continuation-command-"));
   const marker = path.join(tmp, "should-not-run.txt");
@@ -1919,6 +1938,22 @@ test("user pasted and attachment paths authorize their real containing folders",
   assert.equal(roots.includes(fs.realpathSync.native(project)), true);
 });
 
+test("an explicit Desktop output request authorizes the user's Desktop root", () => {
+  const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-home-"));
+  const desktop = path.join(homeDir, "Desktop");
+  fs.mkdirSync(desktop);
+  try {
+    const roots = extractUserReferencedRoots({
+      text: "生成一份调查报告 PDF，放在桌面上。",
+      homeDir
+    });
+    assert.deepEqual(roots, [fs.realpathSync.native(desktop)]);
+    assert.deepEqual(extractUserReferencedRoots({ text: "讨论桌面端 UI 的布局。", homeDir }), []);
+  } finally {
+    fs.rmSync(homeDir, { recursive: true, force: true });
+  }
+});
+
 test("user-referenced Windows paths remain authorized when a path segment contains an apostrophe", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-user's-root-"));
   try {
@@ -1941,6 +1976,29 @@ test("user-referenced POSIX paths authorize an external project root from ordina
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("the same failed skill_read cannot be retried unchanged inside one tool loop", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-failed-skill-loop-"));
+  fs.mkdirSync(path.join(tmp, "shared"), { recursive: true });
+  const first = await executeToolRequests({
+    permissionTier: "full",
+    groupPath: tmp,
+    baseDir: tmp,
+    agent: { id: "builder", name: "Builder" },
+    requests: [{ tool: "skill_read", skillId: "missing-document-skill", reason: "Load PDF instructions." }]
+  });
+  assert.equal(first.results[0].status, "failed");
+  const second = await executeToolRequests({
+    permissionTier: "full",
+    groupPath: tmp,
+    baseDir: tmp,
+    agent: { id: "builder", name: "Builder" },
+    previousResults: first.results,
+    requests: [{ tool: "skill_read", skillId: "missing-document-skill", reason: "Retry PDF instructions." }]
+  });
+  assert.equal(second.results.length, 0);
+  assert.equal(second.rejected[0].code, "repeated_failed_capability_request");
 });
 
 function executeFileToolResult(request, groupPath) {

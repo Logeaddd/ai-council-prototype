@@ -69,6 +69,28 @@ test("tool follow-up moves from successful acquisition to real usage without exp
   assert.match(placeholderWorkspace, /Remove the guessed cd prefix/);
 });
 
+test("failed skill paths trigger capability discovery or a generic execution fallback", () => {
+  const failedRead = buildToolFollowupInstruction([{
+    tool: "skill_read",
+    skillId: "missing-document-skill",
+    status: "failed",
+    code: "skill_not_enabled",
+    error: "not enabled"
+  }]);
+  assert.match(failedRead, /Do not retry the same skill_read unchanged/);
+  assert.match(failedRead, /skill_list/);
+  assert.match(failedRead, /skill_search plus skill_install\/skill_enable/);
+  assert.match(failedRead, /generic package, runtime, CLI, or code path/);
+
+  const invalidAlias = buildToolFollowupInstruction([], [{
+    tool: "skill:missing-document-skill",
+    status: "rejected",
+    code: "invalid_tool"
+  }]);
+  assert.match(invalidAlias, /no dynamic tool named skill or skill:<id>/);
+  assert.match(invalidAlias, /Do not repeat the invalid tool name/);
+});
+
 test("acquired capability followed by read-only wandering triggers action recovery without limiting useful pre-acquisition inspection", () => {
   const seenTargets = new Set();
   const acquisition = {
@@ -145,6 +167,26 @@ test("endlessly novel inspection eventually requires action without imposing a t
     state = updateStagnantToolLoopCount({
       requests: [{ tool: "read_file", path: `source-${index}.json` }],
       results: [{ tool: "read_file", status: "completed", result: { ok: true } }],
+      current: state.count,
+      seenTargets
+    });
+  }
+  assert.deepEqual(state, { count: 9, recoveryRequired: true });
+});
+
+test("failed capability calls cannot erase search-only stagnation", () => {
+  let state = { count: 0, recoveryRequired: false };
+  const seenTargets = new Set();
+  for (let index = 0; index < 3; index += 1) {
+    state = updateStagnantToolLoopCount({
+      requests: [
+        { tool: "skill_read", skillId: "missing-document-skill" },
+        { tool: "web_search", query: `novel research wording ${index}` }
+      ],
+      results: [
+        { tool: "skill_read", skillId: "missing-document-skill", status: "failed", code: "skill_not_enabled" },
+        { tool: "web_search", status: "completed", result: { ok: true, results: [{ title: "source" }] } }
+      ],
       current: state.count,
       seenTargets
     });

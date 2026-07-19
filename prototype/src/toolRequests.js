@@ -235,6 +235,13 @@ export async function executeToolRequests(options = {}) {
       appendCommandAuditLog(options.groupPath, "rejected", rejection);
       continue;
     }
+    if (isRepeatedFailedCapabilityRequest(normalized, [...(options.previousResults || []), ...results])) {
+      const rejection = reject(base, "repeated_failed_capability_request", "This exact capability request already failed in the current tool loop. Use the recorded error, inspect available capabilities, or switch to a materially different acquisition or execution path.");
+      rejected.push(rejection);
+      events.push(toolEvent("tool_failure", base, { status: "rejected", code: rejection.code, error: rejection.error }));
+      appendToolAuditLog(options.groupPath, "rejected", rejection);
+      continue;
+    }
     if (options.blockVerifiedContinuationCommands
       && ![...(options.previousResults || []), ...results].some(hasMaterialWorkspaceChange)
       && isRepeatedVerifiedContinuationCommand(normalized, [...(options.previousResults || []), ...results])) {
@@ -336,10 +343,23 @@ function isRepeatedFailedCommand(request, previousResults = []) {
   if (request.tool !== "execute_command") return false;
   const signature = commandSignature(request.command);
   if (!signature) return false;
-  return (Array.isArray(previousResults) ? previousResults : []).some((item) => (
+  const items = Array.isArray(previousResults) ? previousResults : [];
+  return items.some((item, index) => (
     item?.tool === "execute_command"
     && item?.status === "failed"
     && commandSignature(item.command || item.result?.command) === signature
+    && !items.slice(index + 1).some(hasMaterialWorkspaceChange)
+  ));
+}
+
+function isRepeatedFailedCapabilityRequest(request, previousResults = []) {
+  if (request.tool !== "skill_read") return false;
+  const skillId = normalizeObservationValue(request.skillId);
+  if (!skillId) return false;
+  return (Array.isArray(previousResults) ? previousResults : []).some((item) => (
+    item?.tool === "skill_read"
+    && item?.status === "failed"
+    && normalizeObservationValue(item.skillId) === skillId
   ));
 }
 

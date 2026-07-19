@@ -30,6 +30,10 @@ const DELIVERABLE_EXTENSIONS = new Set([
   ".py", ".js", ".jsx", ".ts", ".tsx", ".java", ".kt", ".c", ".cpp", ".h", ".cs", ".go", ".rs", ".rb", ".php", ".sh", ".ps1",
   ".svg", ".png", ".jpg", ".jpeg", ".webp", ".gif", ".wav", ".mp3", ".mp4", ".webm"
 ]);
+const DELIVERABLE_EXTENSION_PATTERN = [...DELIVERABLE_EXTENSIONS]
+  .map((extension) => extension.slice(1).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+  .sort((a, b) => b.length - a.length)
+  .join("|");
 const EVIDENCE_TIME_TOLERANCE_MS = 5000;
 
 export function normalizeDeliverableClaims(value) {
@@ -173,9 +177,10 @@ function verifyRequestedArtifact(extension, groupPath, evidence, projectRoots = 
     .flatMap((item) => workspaceArtifactPaths(item.item).map((relativePath) => ({ relativePath, evidenceId: item.id })))
     .filter((item) => item.relativePath.toLowerCase().endsWith(extension));
   for (const candidate of candidates) {
+    const resolvablePath = normalizeAuthorizedArtifactPath(candidate.relativePath, projectRoots);
     let absolutePath;
     try {
-      absolutePath = resolveDeliverablePath(groupPath, candidate.relativePath, projectRoots).absolutePath;
+      absolutePath = resolveDeliverablePath(groupPath, resolvablePath, projectRoots).absolutePath;
     } catch {
       continue;
     }
@@ -193,6 +198,21 @@ function verifyRequestedArtifact(extension, groupPath, evidence, projectRoots = 
     status: "missing_or_invalid",
     reason: `No valid ${extension} artifact was produced and observed by a successful command in this run.`
   };
+}
+
+function normalizeAuthorizedArtifactPath(value, projectRoots = []) {
+  const raw = String(value || "").trim();
+  if (!path.isAbsolute(raw)) return raw;
+  for (const root of Array.isArray(projectRoots) ? projectRoots : []) {
+    try {
+      const realRoot = fs.realpathSync.native(root);
+      const realTarget = fs.realpathSync.native(raw);
+      if (isInsidePath(realRoot, realTarget)) {
+        return `project:${path.relative(realRoot, realTarget).replaceAll("\\", "/")}`;
+      }
+    } catch {}
+  }
+  return raw;
 }
 
 function validArtifactFormat(extension, absolutePath) {
@@ -245,7 +265,29 @@ function workspaceArtifactPaths(record = {}) {
     if (observedPath) changedPaths.push(observedPath);
   }
   if (record.tool === "create_archive" && record.result?.archivePath) changedPaths.push(String(record.result.archivePath));
+  if (["execute_command", "run_code", "run_tests"].includes(String(record.tool || ""))) {
+    changedPaths.push(...executionOutputArtifactPaths(record));
+  }
   return [...new Set(changedPaths)];
+}
+
+function executionOutputArtifactPaths(record = {}) {
+  const output = [record.result?.stdout, record.result?.stderr].filter(Boolean).join("\n");
+  if (!output) return [];
+  const windows = new RegExp(`[A-Za-z]:[\\\\/][^<>"|\\r\\n]*?\\.(?:${DELIVERABLE_EXTENSION_PATTERN})(?=$|[\\s'"),;:\\]}])`, "gi");
+  const posix = new RegExp(`(?:^|[\\s'"(=])(/[^<>"|\\r\\n]*?\\.(?:${DELIVERABLE_EXTENSION_PATTERN}))(?=$|[\\s'"),;:\\]}])`, "gim");
+  const candidates = [
+    ...[...output.matchAll(windows)].map((match) => match[0]),
+    ...[...output.matchAll(posix)].map((match) => match[1])
+  ].map((value) => String(value || "").trim()).filter(Boolean);
+  return [...new Set(candidates)].filter((candidate) => {
+    try {
+      const stat = fs.statSync(candidate);
+      return stat.isFile() && stat.size > 0 && modifiedDuringEvidenceWindow(stat, record);
+    } catch {
+      return false;
+    }
+  });
 }
 
 function extractDeliverableClaims(answer) {
