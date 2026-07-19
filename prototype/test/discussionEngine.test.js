@@ -6669,6 +6669,85 @@ test("public memory reaches model prompts as editable shared memory", async () =
   }
 });
 
+test("explicit user memory is saved before model calls and reaches the next provider prompt", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-explicit-memory-runtime-"));
+  const groupPath = path.join(tmp, "group");
+  fs.mkdirSync(groupPath, { recursive: true });
+  const requests = [];
+  const server = http.createServer(async (req, res) => {
+    const body = JSON.parse(await readRequestBody(req));
+    requests.push(body);
+    const isFinal = JSON.stringify(body.messages || []).includes("FinalDecision JSON object");
+    writeOpenAiStream(res, JSON.stringify(isFinal ? {
+      answer: "No summarizer memory was proposed.",
+      consensus_score: 1,
+      supporting_agents: ["Builder"],
+      dissenting_agents: [],
+      minority_report: "",
+      risks: [],
+      next_actions: [],
+      selected_file_operation_ids: [],
+      memory_candidates: []
+    } : {
+      status: "speak",
+      argument: "The explicit memory is visible.",
+      objections: [],
+      confidence: 1,
+      memory_candidates: []
+    }));
+  });
+  await listen(server);
+  const apiBaseUrl = `http://127.0.0.1:${server.address().port}/v1`;
+
+  try {
+    fs.writeFileSync(path.join(groupPath, "group.json"), JSON.stringify({
+      id: "explicit-memory-runtime",
+      seats: [
+        { seatId: "builder", displayName: "Builder", privateFolder: "members/Builder" },
+        { seatId: "finalizer", displayName: "Finalizer", privateFolder: "members/Finalizer", judge: true }
+      ],
+      permissions: { defaultTier: "text", seatTiers: {} },
+      settings: {}
+    }, null, 2), "utf8");
+    const baseAgent = {
+      provider: "openai-compatible",
+      apiBaseUrl,
+      allowUnsafePrivateNetwork: true,
+      apiKey: "secret-runtime-key",
+      model: "runtime-model",
+      weight: 1,
+      enabled: true,
+      providerLimits: { contextWindow: 12000, maxOutputTokens: 1000 }
+    };
+    const group = validateGroupConfig({
+      id: "explicit-memory-runtime",
+      name: "Explicit Memory Runtime",
+      settings: { maxRounds: 1, minConsensusWeight: 1, stopWhenAllSkip: true, agentTimeoutMs: 1000 },
+      agents: [
+        { ...baseAgent, id: "builder", name: "Builder", role: "Builder" },
+        { ...baseAgent, id: "finalizer", name: "Finalizer", role: "Finalizer", judge: true }
+      ]
+    });
+    const directive = "记住：EXPLICIT_RUNTIME_MEMORY 必须跨会话保留。";
+
+    const firstStart = requests.length;
+    const first = await runCouncil(directive, group, tmp, { groupPath });
+    const firstPrompts = requests.slice(firstStart).map((body) => JSON.stringify(body.messages || [])).join("\n");
+    assert.equal(first.session.explicitMemoryUpdate.status, "saved");
+    assert.equal(first.session.publicMemoryUpdate.status, "no_new_memory");
+    assert.match(firstPrompts, /EXPLICIT_RUNTIME_MEMORY/);
+    assert.match(firstPrompts, /original user directive/);
+
+    const secondStart = requests.length;
+    await runCouncil("Continue using the remembered rule.", group, tmp, { groupPath });
+    const secondPrompts = requests.slice(secondStart).map((body) => JSON.stringify(body.messages || [])).join("\n");
+    assert.match(secondPrompts, /EXPLICIT_RUNTIME_MEMORY/);
+    assert.equal(listPublicMemories(groupPath).length, 1);
+  } finally {
+    await close(server);
+  }
+});
+
 test("disabled memory stays out of provider prompts and stops automatic memory writes", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-memory-disabled-runtime-"));
   const groupPath = path.join(tmp, "group");

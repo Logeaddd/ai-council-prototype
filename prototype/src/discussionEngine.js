@@ -8,7 +8,7 @@ import { appendMemoryCandidates, listSessionHistoryCatalogue, readRecentGroupSes
 import { assessBudgetUsage, assessSizeUsage } from "./tokenLimits.js";
 import { appendSessionTranscriptChunk, readSummaryCache, updateDeterministicSummaries } from "./summaryCache.js";
 import { appendSessionUsage, estimateCost, estimateMemberAccruedCost } from "./usageStats.js";
-import { appendSummarizerPublicMemories, formatPublicMemoriesForPrompt } from "./publicMemory.js";
+import { appendSummarizerPublicMemories, formatPublicMemoriesForPrompt, rememberExplicitUserMemory } from "./publicMemory.js";
 import { applyObjectionLedger, isReviewerLike } from "./objectionLedger.js";
 import { computeFinalState } from "./finalState.js";
 import { parseFileOperationProposals } from "./fileOperations.js";
@@ -140,6 +140,11 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
         || (isContinuationRequest(question) ? taskState?.executionCheckpoint : undefined)
     })
   };
+  session.explicitMemoryUpdate = persistExplicitUserMemory(options.groupPath, question, {
+    appSettings: options.appSettings,
+    sourceSessionId: session.id,
+    createdAt: sessionStartedAt
+  });
   const observationCache = createObservationCache();
 
   // The history API reads this file directly, so update it only at real event boundaries.
@@ -924,6 +929,41 @@ function persistSummarizerPublicMemory(groupPath, candidates, options = {}) {
       status: "failed",
       candidateCount: Array.isArray(candidates) ? candidates.length : 0,
       error: String(error?.message || error || "public_memory_write_failed").slice(0, 500)
+    };
+  }
+}
+
+function persistExplicitUserMemory(groupPath, text, options = {}) {
+  if (!capabilityEnabled(options.appSettings, "memory")) {
+    return {
+      status: "disabled",
+      reason: "memory_capability_disabled",
+      candidateCount: 0,
+      savedCount: 0,
+      duplicateCount: 0
+    };
+  }
+  if (!groupPath) {
+    return {
+      status: "not_applicable",
+      reason: "group_workspace_unavailable",
+      candidateCount: 0,
+      savedCount: 0,
+      duplicateCount: 0
+    };
+  }
+  try {
+    return rememberExplicitUserMemory(groupPath, text, {
+      sourceSessionId: options.sourceSessionId,
+      createdAt: options.createdAt
+    });
+  } catch (error) {
+    return {
+      status: "failed",
+      candidateCount: 0,
+      savedCount: 0,
+      duplicateCount: 0,
+      error: String(error?.message || error || "explicit_public_memory_write_failed").slice(0, 500)
     };
   }
 }

@@ -6,8 +6,10 @@ import assert from "node:assert/strict";
 import {
   appendSummarizerPublicMemories,
   deletePublicMemory,
+  extractExplicitUserMemory,
   formatPublicMemoriesForPrompt,
   listPublicMemories,
+  rememberExplicitUserMemory,
   upsertPublicMemory
 } from "../src/publicMemory.js";
 
@@ -80,6 +82,50 @@ test("summarizer memories keep provenance, filter meeting notes, and deduplicate
   assert.equal(memories[0].sourceSessionId, "session_summary_1");
   assert.equal(memories[0].provenance, "editable_summary_not_original_fact");
   assert.match(formatPublicMemoriesForPrompt(groupPath), /editable summary; not original fact/);
+});
+
+test("explicit user directives are captured with original provenance and deduplicated", () => {
+  const groupPath = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-explicit-memory-"));
+  const directive = "记住：不要为了完成单项任务迎合用户，我们做的是通用 agent。";
+
+  const first = rememberExplicitUserMemory(groupPath, directive, {
+    sourceSessionId: "session_explicit_1",
+    createdAt: "2026-07-19T01:02:03.000Z"
+  });
+  const second = rememberExplicitUserMemory(groupPath, directive, {
+    sourceSessionId: "session_explicit_2"
+  });
+
+  assert.equal(first.status, "saved");
+  assert.equal(first.savedCount, 1);
+  assert.equal(second.status, "no_new_memory");
+  assert.equal(second.duplicateCount, 1);
+  const memories = listPublicMemories(groupPath);
+  assert.equal(memories.length, 1);
+  assert.equal(memories[0].content, directive);
+  assert.equal(memories[0].source, "user_explicit");
+  assert.equal(memories[0].sourceSessionId, "session_explicit_1");
+  assert.equal(memories[0].createdBy, "user");
+  assert.equal(memories[0].provenance, "original_user_directive");
+  assert.match(formatPublicMemoriesForPrompt(groupPath), /authoritative user instructions/);
+  assert.match(formatPublicMemoriesForPrompt(groupPath), /Provenance: original user directive/);
+});
+
+test("explicit memory extraction rejects questions and examples", () => {
+  assert.deepEqual(extractExplicitUserMemory("你还记得我说过什么吗？"), []);
+  assert.deepEqual(extractExplicitUserMemory("我让他记住什么，它真的能计入记忆吗？"), []);
+  assert.deepEqual(extractExplicitUserMemory("例如，记住：这里展示的是示例文案。"), []);
+  assert.deepEqual(extractExplicitUserMemory("Do you remember what I said?"), []);
+  assert.deepEqual(extractExplicitUserMemory("从现在起，所有成员必须保留用户的原始要求。"), ["从现在起，所有成员必须保留用户的原始要求。"]);
+});
+
+test("disabled explicit memory does not create a memory file", () => {
+  const groupPath = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-explicit-memory-disabled-"));
+  const result = rememberExplicitUserMemory(groupPath, "请记住：DISABLED_EXPLICIT_MEMORY", { enabled: false });
+
+  assert.equal(result.status, "disabled");
+  assert.deepEqual(listPublicMemories(groupPath), []);
+  assert.equal(fs.existsSync(path.join(groupPath, "shared", "memory", "public-memory.json")), false);
 });
 
 test("summarizer durable filter supports Chinese memory labels without storing meeting actions", () => {
