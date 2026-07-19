@@ -144,6 +144,58 @@ test("product harness requires a real multi-family matrix and cannot count repea
   assert.equal(evidence.requiredFamilies.every((family) => family.passed), true);
 });
 
+test("product harness cannot hide recent campaign failures behind one success per family", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-product-campaign-reliability-"));
+  const reportsRoot = path.join(root, "eval", "campaign");
+  const manifest = { tasks: [{ id: "T", gates: [{
+    id: "reliability",
+    type: "real_user_campaign",
+    reportsRoot: "eval/campaign",
+    minimumPassedReports: 2,
+    minimumDistinctTaskIds: 2,
+    minimumDistinctSeeds: 2,
+    evidenceWindowPerTask: 3,
+    minimumPassRate: 0.75,
+    requireLatestPerTaskPass: true,
+    requiredFamilies: [
+      { id: "coding", taskIds: ["node-cli"] },
+      { id: "archive", taskIds: ["zip-archive"] }
+    ]
+  }] }] };
+  const writeReport = (name, { taskId, seed, status, completedAt }) => {
+    const dir = path.join(reportsRoot, name);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "report.json"), JSON.stringify({
+      schema: "ai-council.real-user-campaign-run.v1",
+      status,
+      seed,
+      completedAt,
+      providerAcceptance: { realProvider: true, observedModelCalls: 2, blockedBeforeSendModelCalls: 0 },
+      scenario: { task: { id: taskId } },
+      autonomousExecution: { passed: status === "passed", resumedAfterInterruption: status === "passed" },
+      minimumUsableDelivery: { passed: status === "passed" },
+      persistence: { passed: status === "passed" },
+      recovery: { passed: status === "passed", checks: status === "passed" ? [{ id: "continuation_completed_visible_work", passed: true }] : [] },
+      sessions: { interrupted: status === "passed" ? [{ id: `interrupted-${seed}` }] : [] }
+    }), "utf8");
+  };
+
+  writeReport("node-pass", { taskId: "node-cli", seed: 1, status: "passed", completedAt: "2026-07-19T10:00:00.000Z" });
+  writeReport("node-fail", { taskId: "node-cli", seed: 2, status: "failed", completedAt: "2026-07-19T11:00:00.000Z" });
+  writeReport("archive-pass", { taskId: "zip-archive", seed: 3, status: "passed", completedAt: "2026-07-19T10:30:00.000Z" });
+  const failed = evaluateProductHarness({ root, manifest, testEvidence: { status: "passed" } });
+  const failedGate = failed.tasks[0].gates[0];
+  assert.equal(failed.status, "incomplete");
+  assert.equal(failedGate.evidence.passRate, 2 / 3);
+  assert.equal(failedGate.evidence.latestTasksPassed, false);
+
+  writeReport("node-pass-new", { taskId: "node-cli", seed: 4, status: "passed", completedAt: "2026-07-19T12:00:00.000Z" });
+  const passed = evaluateProductHarness({ root, manifest, testEvidence: { status: "passed" } });
+  assert.equal(passed.status, "complete");
+  assert.equal(passed.tasks[0].gates[0].evidence.passRate, 0.75);
+  assert.equal(passed.tasks[0].gates[0].evidence.latestTasksPassed, true);
+});
+
 test("repository product harness requires a multi-family real-user matrix instead of a Forge-only or single-report release gate", () => {
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   const manifestPath = path.join(root, "config", "product-harness.json");
@@ -153,6 +205,8 @@ test("repository product harness requires a multi-family real-user matrix instea
   const matrixGate = configured.gates.find((gate) => gate.id === "universal_real_provider_survival_pass" && gate.type === "real_user_campaign");
   assert.equal(Boolean(matrixGate), true);
   assert.equal(matrixGate.minimumPassedReports >= 5, true);
+  assert.equal(matrixGate.minimumPassRate >= 0.75, true);
+  assert.equal(matrixGate.requireLatestPerTaskPass, true);
   assert.equal(matrixGate.requiredFamilies.some((family) => family.requireAcquisitionEvidence), true);
   const report = evaluateProductHarness({
     root,

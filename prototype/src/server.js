@@ -133,7 +133,7 @@ async function handleApi(req, res, url) {
   if (req.method === "GET" && url.pathname === "/api/capabilities") {
     const appSettings = readCurrentAppSettings();
     sendJson(res, 200, {
-      capabilities: listCapabilities({ env: process.env, appSettings }),
+      capabilities: listCapabilities({ env: process.env, appSettings, baseDir }),
       toolAccess: appSettings.capabilities?.toolAccess || {}
     });
     return;

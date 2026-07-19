@@ -74,7 +74,8 @@ function evaluateRealUserCampaignGate(root, gate, base) {
   const reports = findReports(reportsRoot).map((filePath) => {
     try { return { filePath, report: JSON.parse(fs.readFileSync(filePath, "utf8")) }; } catch { return null; }
   }).filter(Boolean).filter(({ report }) => report?.schema === "ai-council.real-user-campaign-run.v1");
-  const passedReports = reports.filter(({ report }) => (
+  const evidenceReports = selectCampaignEvidenceReports(reports, gate);
+  const passedReports = evidenceReports.filter(({ report }) => (
     report.status === "passed"
     && report.providerAcceptance?.realProvider === true
     && Number(report.providerAcceptance?.blockedBeforeSendModelCalls || 0) === 0
@@ -87,31 +88,49 @@ function evaluateRealUserCampaignGate(root, gate, base) {
     && Number(report.providerAcceptance?.observedModelCalls || report.sessions?.modelCalls || 0) > 0
   ));
   const requiredFamilies = Array.isArray(gate.requiredFamilies) ? gate.requiredFamilies : [];
+  const defaultMinimumFamilyAttempts = positiveInteger(gate.minimumAttemptsPerFamily, 1);
+  const defaultMinimumFamilyPasses = positiveInteger(gate.minimumPassedReportsPerFamily, 1);
   const familyEvidence = requiredFamilies.map((family) => {
     const taskIds = new Set((Array.isArray(family.taskIds) ? family.taskIds : []).map(String));
+    const attempts = evidenceReports.filter(({ report }) => {
+      const taskId = campaignTaskId(report);
+      return taskIds.size === 0 || taskIds.has(taskId);
+    });
     const matches = passedReports.filter(({ report }) => {
-      const taskId = String(report.scenario?.task?.id || "");
+      const taskId = campaignTaskId(report);
       if (taskIds.size > 0 && !taskIds.has(taskId)) return false;
       if (family.requireAcquisitionEvidence && report.capabilityAcquisition?.passed !== true) return false;
       return true;
     });
+    const minimumAttempts = positiveInteger(family.minimumAttempts, defaultMinimumFamilyAttempts);
+    const minimumPasses = positiveInteger(family.minimumPassedReports, defaultMinimumFamilyPasses);
     return {
       id: String(family.id || ""),
-      passed: matches.length > 0,
-      taskIds: [...new Set(matches.map(({ report }) => String(report.scenario?.task?.id || "")).filter(Boolean))],
+      passed: attempts.length >= minimumAttempts && matches.length >= minimumPasses,
+      attempts: attempts.length,
+      passedReports: matches.length,
+      minimumAttempts,
+      minimumPassedReports: minimumPasses,
+      taskIds: [...new Set(matches.map(({ report }) => campaignTaskId(report)).filter(Boolean))],
       reports: matches.map(({ filePath }) => path.relative(root, filePath).replaceAll("\\", "/"))
     };
   });
-  const distinctTaskIds = new Set(passedReports.map(({ report }) => String(report.scenario?.task?.id || "")).filter(Boolean));
+  const distinctTaskIds = new Set(passedReports.map(({ report }) => campaignTaskId(report)).filter(Boolean));
   const distinctSeeds = new Set(passedReports.map(({ report }) => String(report.seed ?? "")).filter(Boolean));
   const minimumPassedReports = positiveInteger(gate.minimumPassedReports, 1);
   const minimumDistinctTaskIds = positiveInteger(gate.minimumDistinctTaskIds, requiredFamilies.length > 0 ? requiredFamilies.length : 1);
   const minimumDistinctSeeds = positiveInteger(gate.minimumDistinctSeeds, 1);
+  const minimumPassRate = campaignPassRate(gate.minimumPassRate);
+  const passRate = evidenceReports.length > 0 ? passedReports.length / evidenceReports.length : 0;
+  const latestTaskEvidence = latestCampaignTaskEvidence(evidenceReports, root);
+  const latestTasksPassed = gate.requireLatestPerTaskPass !== true || latestTaskEvidence.every((item) => item.status === "passed");
   const matrixPassed = passedReports.length >= minimumPassedReports
     && distinctTaskIds.size >= minimumDistinctTaskIds
     && distinctSeeds.size >= minimumDistinctSeeds
+    && passRate >= minimumPassRate
+    && latestTasksPassed
     && familyEvidence.every((family) => family.passed);
-  const passed = requiredFamilies.length > 0 || minimumPassedReports > 1 || minimumDistinctTaskIds > 1 || minimumDistinctSeeds > 1
+  const passed = requiredFamilies.length > 0 || minimumPassedReports > 1 || minimumDistinctTaskIds > 1 || minimumDistinctSeeds > 1 || minimumPassRate > 0 || gate.requireLatestPerTaskPass === true
     ? matrixPassed
     : passedReports.length > 0;
   return {
@@ -120,16 +139,68 @@ function evaluateRealUserCampaignGate(root, gate, base) {
     evidence: {
       reportsRoot: path.relative(root, reportsRoot).replaceAll("\\", "/"),
       matchingReports: reports.length,
+      evaluatedReports: evidenceReports.length,
+      failedReports: evidenceReports.filter(({ report }) => report.status !== "passed").map(({ filePath }) => path.relative(root, filePath).replaceAll("\\", "/")),
       passedReports: passedReports.map(({ filePath }) => path.relative(root, filePath).replaceAll("\\", "/")),
       minimumPassedReports,
       minimumDistinctTaskIds,
       minimumDistinctSeeds,
+      evidenceWindowPerTask: optionalPositiveInteger(gate.evidenceWindowPerTask),
+      passRate,
+      minimumPassRate,
+      requireLatestPerTaskPass: gate.requireLatestPerTaskPass === true,
+      latestTasksPassed,
+      latestTaskEvidence,
       distinctTaskIds: [...distinctTaskIds],
       distinctSeeds: [...distinctSeeds],
       requiredFamilies: familyEvidence,
       passedReport: passed && passedReports.length === 1 ? path.relative(root, passedReports[0].filePath).replaceAll("\\", "/") : ""
     }
   };
+}
+
+function selectCampaignEvidenceReports(reports, gate) {
+  const windowSize = optionalPositiveInteger(gate.evidenceWindowPerTask);
+  const sorted = [...reports].sort((left, right) => campaignReportTime(right) - campaignReportTime(left));
+  if (!windowSize) return sorted;
+  const counts = new Map();
+  return sorted.filter(({ report }) => {
+    const taskId = campaignTaskId(report) || "(unknown)";
+    const count = counts.get(taskId) || 0;
+    if (count >= windowSize) return false;
+    counts.set(taskId, count + 1);
+    return true;
+  });
+}
+
+function latestCampaignTaskEvidence(reports, root) {
+  const latest = new Map();
+  for (const item of reports) {
+    const taskId = campaignTaskId(item.report);
+    if (!taskId || latest.has(taskId)) continue;
+    latest.set(taskId, {
+      taskId,
+      status: String(item.report.status || "unknown"),
+      report: path.relative(root, item.filePath).replaceAll("\\", "/")
+    });
+  }
+  return [...latest.values()];
+}
+
+function campaignTaskId(report) {
+  return String(report?.scenario?.task?.id || "");
+}
+
+function campaignReportTime(item) {
+  const parsed = Date.parse(item.report?.completedAt || item.report?.startedAt || "");
+  if (Number.isFinite(parsed)) return parsed;
+  try { return fs.statSync(item.filePath).mtimeMs; } catch { return 0; }
+}
+
+function campaignPassRate(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return 0;
+  return Math.min(1, Math.max(0, number));
 }
 
 function hasCompleteContinuationEvidence(report) {
@@ -142,6 +213,11 @@ function hasCompleteContinuationEvidence(report) {
 function positiveInteger(value, fallback) {
   const number = Number(value);
   return Number.isInteger(number) && number > 0 ? number : fallback;
+}
+
+function optionalPositiveInteger(value) {
+  const number = Number(value);
+  return Number.isInteger(number) && number > 0 ? number : 0;
 }
 
 function evaluateRealBenchmarkGate(root, gate, base) {

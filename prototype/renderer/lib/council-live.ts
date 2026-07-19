@@ -435,6 +435,12 @@ export interface CapabilityRecord {
   command?: string
   tools?: string[]
   capabilityKey?: keyof CapabilityAccess
+  health?: {
+    localVerified?: boolean
+    externalVerified?: boolean
+    checkedAt?: string
+    detail?: string
+  }
 }
 
 export interface McpInstallCatalogItem {

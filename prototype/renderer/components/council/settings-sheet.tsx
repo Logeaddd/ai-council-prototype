@@ -1170,8 +1170,8 @@ function PluginsPanel({
           key: server.id,
           name: server.name || server.id,
           meta: server.install?.packageName || server.command || server.transport || "stdio",
-          tone: server.enabled === false ? "neutral" : "success",
-          status: server.enabled === false ? "停用" : "启用",
+          tone: "neutral",
+          status: server.enabled === false ? "停用" : "已配置（未验证）",
         }))}
         loading={loading}
         emptyText="暂无"
@@ -1192,7 +1192,7 @@ function MemoryPanel({
     .map((item) => ({
       key: item.id,
       name: item.label,
-      meta: item.source || item.provider || "local_server",
+      meta: item.health?.detail || item.source || item.provider || "local_server",
       tone: capabilityTone(item),
       status: capabilityStatus(item),
     }))
@@ -1238,7 +1238,7 @@ function SecurityPanel({
   onToggle: (key: keyof CapabilityAccess) => void
 }) {
   const fullTools = capabilities.filter((item) =>
-    ["execute-command", "run-code", "install-package", "run-tests", "git-operation", "browser-control"].includes(item.id) ||
+    ["execute-command", "background-processes", "run-code", "install-package", "provision-tool", "run-tests", "git-operation", "browser-control", "create-archive", "skill-packs"].includes(item.id) ||
     item.id.startsWith("mcp-")
   )
 
@@ -1267,7 +1267,7 @@ function SecurityPanel({
         rows={fullTools.map((item) => ({
           key: item.id,
           name: item.label,
-          meta: item.provider || item.source || item.kind,
+          meta: item.health?.detail || item.provider || item.source || item.kind,
           tone: capabilityTone(item),
           status: capabilityStatus(item),
         }))}
@@ -1412,14 +1412,18 @@ function RangeControl({
 function capabilityStatus(item: CapabilityRecord) {
   if (item.status === "needs_config") return "需配置"
   if (item.status === "planned") return "未安装"
+  if (item.status === "unverified") return "未验证"
+  if (item.status === "unavailable") return "不可用"
+  if (item.status === "degraded") return "部分可用"
   if (item.enabled === false) return "停用"
-  return "可用"
+  if (item.status === "ready") return "可用"
+  return "状态未知"
 }
 
 function capabilityTone(item: CapabilityRecord): Tone {
-  if (item.status === "needs_config") return "warning"
-  if (item.status === "planned" || item.enabled === false) return "neutral"
-  return "success"
+  if (item.status === "ready" && item.enabled !== false) return "success"
+  if (item.status === "needs_config" || item.status === "unverified" || item.status === "degraded") return "warning"
+  return "neutral"
 }
 
 function mcpCatalogDisplay(item: McpInstallCatalogItem): {

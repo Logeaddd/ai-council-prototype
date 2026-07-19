@@ -19,6 +19,9 @@
           "minimumPassedReports": 5,
           "minimumDistinctTaskIds": 5,
           "minimumDistinctSeeds": 5,
+          "evidenceWindowPerTask": 3,
+          "minimumPassRate": 0.75,
+          "requireLatestPerTaskPass": true,
           "requiredFamilies": [
             { "id": "coding_runtime", "taskIds": ["node-cli", "python-cli"] },
             { "id": "network_collection", "taskIds": ["api-collection"] },
@@ -73,6 +76,9 @@
           "minimumPassedReports": 5,
           "minimumDistinctTaskIds": 5,
           "minimumDistinctSeeds": 5,
+          "evidenceWindowPerTask": 3,
+          "minimumPassRate": 0.75,
+          "requireLatestPerTaskPass": true,
           "requiredFamilies": [
             { "id": "coding_runtime", "taskIds": ["node-cli", "python-cli"] },
             { "id": "network_collection", "taskIds": ["api-collection"] },

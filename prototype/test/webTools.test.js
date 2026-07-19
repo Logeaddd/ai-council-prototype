@@ -7,8 +7,37 @@ import { listCapabilities } from "../src/capabilityRegistry.js";
 import { assertSafePublicUrl, fetchPublicUrl, searchWeb } from "../src/webTools.js";
 import { executeToolRequests } from "../src/toolRequests.js";
 
-test("capability registry reports built-in web search as ready without a key", () => {
-  const capabilities = listCapabilities({ env: {} });
+const VERIFIED_RUNTIME = {
+  webRuntime: true,
+  filesystem: true,
+  archiveRuntime: true,
+  shell: true,
+  shellDetail: "verified shell",
+  backgroundRuntime: true,
+  codeRuntime: true,
+  codeRuntimeDetail: "verified node",
+  packageRuntime: true,
+  packageRuntimeDetail: "verified npm",
+  provisionRuntime: true,
+  provisionRuntimeDetail: "verified installer",
+  testRuntime: true,
+  testRuntimeDetail: "verified test runtime",
+  git: true,
+  gitDetail: "verified git",
+  browser: true,
+  browserDetail: "verified browser",
+  database: true,
+  databaseDetail: "verified sqlite",
+  memoryRuntime: true,
+  skillRuntime: true,
+  mcpRuntime: true,
+  mcpRuntimeDetail: "verified MCP runtime",
+  mcpMarketplaceRuntime: true,
+  mcpMarketplaceDetail: "verified npm"
+};
+
+test("capability registry distinguishes local verification from external-service verification", () => {
+  const capabilities = listCapabilities({ env: {}, runtimeFacts: VERIFIED_RUNTIME });
   const search = capabilities.find((item) => item.id === "web-search");
   const fetchUrl = capabilities.find((item) => item.id === "fetch-url");
   const apiRequest = capabilities.find((item) => item.id === "api-request");
@@ -16,6 +45,7 @@ test("capability registry reports built-in web search as ready without a key", (
   const executeCommand = capabilities.find((item) => item.id === "execute-command");
   const runCode = capabilities.find((item) => item.id === "run-code");
   const installPackage = capabilities.find((item) => item.id === "install-package");
+  const provisionTool = capabilities.find((item) => item.id === "provision-tool");
   const runTests = capabilities.find((item) => item.id === "run-tests");
   const gitOperation = capabilities.find((item) => item.id === "git-operation");
   const browserControl = capabilities.find((item) => item.id === "browser-control");
@@ -23,34 +53,35 @@ test("capability registry reports built-in web search as ready without a key", (
   const mcpWebTools = capabilities.find((item) => item.id === "mcp-web-tools");
   const mcpMarketplace = capabilities.find((item) => item.id === "mcp-marketplace");
 
-  assert.equal(search.status, "ready");
+  assert.equal(search.status, "unverified");
   assert.equal(search.enabled, true);
   assert.equal(search.provider, "Bing Web");
   assert.equal(search.source, "built_in_html");
-  assert.equal(fetchUrl.status, "ready");
+  assert.equal(fetchUrl.status, "unverified");
   assert.equal(fetchUrl.enabled, true);
-  assert.equal(apiRequest.status, "ready");
+  assert.equal(apiRequest.status, "unverified");
   assert.equal(apiRequest.enabled, true);
   assert.equal(extractArchive.status, "ready");
-  assert.match(extractArchive.requirement, /full permission/);
+  assert.match(extractArchive.requirement, /完全权限/);
   assert.equal(executeCommand.status, "ready");
   assert.equal(executeCommand.enabled, true);
-  assert.match(executeCommand.requirement, /完全允许/);
+  assert.match(executeCommand.requirement, /完全权限/);
   assert.equal(runCode.status, "ready");
   assert.equal(runCode.enabled, true);
-  assert.match(runCode.requirement, /完全允许/);
+  assert.match(runCode.requirement, /完全权限/);
   assert.equal(installPackage.status, "ready");
   assert.equal(installPackage.enabled, true);
-  assert.match(installPackage.requirement, /完全允许/);
+  assert.match(installPackage.requirement, /完全权限/);
+  assert.equal(provisionTool.status, "ready");
   assert.equal(runTests.status, "ready");
   assert.equal(runTests.enabled, true);
   assert.equal(gitOperation.status, "ready");
   assert.equal(gitOperation.enabled, true);
-  assert.match(runTests.requirement, /完全允许/);
-  assert.match(gitOperation.requirement, /完全允许/);
+  assert.match(runTests.requirement, /完全权限/);
+  assert.match(gitOperation.requirement, /完全权限/);
   assert.equal(browserControl.status, "ready");
   assert.equal(browserControl.enabled, true);
-  assert.match(browserControl.requirement, /完全允许/);
+  assert.match(browserControl.requirement, /完全权限/);
   assert.equal(databaseQuery.status, "ready");
   assert.equal(databaseQuery.enabled, true);
   assert.equal(mcpWebTools.status, "ready");
@@ -58,11 +89,13 @@ test("capability registry reports built-in web search as ready without a key", (
   assert.equal(mcpWebTools.source, "local_stdio");
   assert.equal(mcpWebTools.command, "npm run mcp:web");
   assert.deepEqual(mcpWebTools.tools, ["web_search", "fetch_url"]);
-  assert.equal(mcpWebTools.requirement, "内置");
-  assert.equal(mcpMarketplace.status, "ready");
+  assert.match(mcpWebTools.requirement, /MCP stdio/);
+  assert.equal(mcpMarketplace.status, "unverified");
   assert.equal(mcpMarketplace.enabled, true);
   assert.equal(mcpMarketplace.source, "local_installer");
-  assert.match(databaseQuery.requirement, /工具授权/);
+  assert.match(databaseQuery.requirement, /工具权限/);
+  assert.equal(executeCommand.health.localVerified, true);
+  assert.equal(search.health.externalVerified, false);
 });
 
 test("capability registry accepts a locally stored search key", () => {
@@ -74,11 +107,12 @@ test("capability registry accepts a locally stored search key", () => {
           apiKey: "local-search-secret"
         }
       }
-    }
+    },
+    runtimeFacts: VERIFIED_RUNTIME
   });
   const search = capabilities.find((item) => item.id === "web-search");
 
-  assert.equal(search.status, "ready");
+  assert.equal(search.status, "unverified");
   assert.equal(search.enabled, true);
   assert.equal(search.source, "configured_local");
   assert.equal(JSON.stringify(search).includes("local-search-secret"), false);
@@ -87,13 +121,24 @@ test("capability registry accepts a locally stored search key", () => {
 test("capability registry reports global switches from the same execution policy", () => {
   const capabilities = listCapabilities({
     env: {},
-    appSettings: { capabilities: { toolAccess: { web: false, automation: false } } }
+    appSettings: { capabilities: { toolAccess: { web: false, automation: false } } },
+    runtimeFacts: VERIFIED_RUNTIME
   });
 
   assert.equal(capabilities.find((item) => item.id === "web-search").enabled, false);
   assert.equal(capabilities.find((item) => item.id === "fetch-url").enabled, false);
   assert.equal(capabilities.find((item) => item.id === "execute-command").enabled, false);
   assert.equal(capabilities.find((item) => item.id === "workspace-files").enabled, true);
+});
+
+test("capability registry reports missing local prerequisites as unavailable", () => {
+  const runtimeFacts = Object.fromEntries(Object.entries(VERIFIED_RUNTIME).map(([key, value]) => [key, typeof value === "boolean" ? false : "missing"]));
+  const capabilities = listCapabilities({ env: {}, runtimeFacts });
+
+  assert.equal(capabilities.find((item) => item.id === "execute-command").status, "unavailable");
+  assert.equal(capabilities.find((item) => item.id === "browser-control").status, "unavailable");
+  assert.equal(capabilities.find((item) => item.id === "database-query").status, "unavailable");
+  assert.equal(capabilities.find((item) => item.id === "mcp-marketplace").status, "unavailable");
 });
 
 test("disabled capabilities reject real tool requests before execution and remain audited", async () => {
