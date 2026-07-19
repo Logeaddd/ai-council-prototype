@@ -174,7 +174,7 @@ function requestedArtifactExtensions(question) {
 function verifyRequestedArtifact(extension, groupPath, evidence, projectRoots = []) {
   const candidates = evidence
     .filter((item) => item.kind === "tool")
-    .flatMap((item) => workspaceArtifactPaths(item.item).map((relativePath) => ({ relativePath, evidenceId: item.id })))
+    .flatMap((item) => workspaceArtifactPaths(item.item, projectRoots).map((relativePath) => ({ relativePath, evidenceId: item.id })))
     .filter((item) => item.relativePath.toLowerCase().endsWith(extension));
   for (const candidate of candidates) {
     const resolvablePath = normalizeAuthorizedArtifactPath(candidate.relativePath, projectRoots);
@@ -254,7 +254,7 @@ function readHead(filePath, bytes) {
   }
 }
 
-function workspaceArtifactPaths(record = {}) {
+function workspaceArtifactPaths(record = {}, projectRoots = []) {
   const changes = record.result?.workspaceChanges || {};
   const changedPaths = [changes.created, changes.modified, changes.observedArtifacts]
     .flatMap((items) => Array.isArray(items) ? items : [])
@@ -266,19 +266,19 @@ function workspaceArtifactPaths(record = {}) {
   }
   if (record.tool === "create_archive" && record.result?.archivePath) changedPaths.push(String(record.result.archivePath));
   if (["execute_command", "run_code", "run_tests"].includes(String(record.tool || ""))) {
-    changedPaths.push(...executionOutputArtifactPaths(record));
+    changedPaths.push(...executionOutputArtifactPaths(record, projectRoots));
   }
   return [...new Set(changedPaths)];
 }
 
-function executionOutputArtifactPaths(record = {}) {
+function executionOutputArtifactPaths(record = {}, projectRoots = []) {
   const output = [record.result?.stdout, record.result?.stderr].filter(Boolean).join("\n");
-  if (!output) return [];
   const windows = new RegExp(`[A-Za-z]:[\\\\/][^<>"|\\r\\n]*?\\.(?:${DELIVERABLE_EXTENSION_PATTERN})(?=$|[\\s'"),;:\\]}])`, "gi");
   const posix = new RegExp(`(?:^|[\\s'"(=])(/[^<>"|\\r\\n]*?\\.(?:${DELIVERABLE_EXTENSION_PATTERN}))(?=$|[\\s'"),;:\\]}])`, "gim");
   const candidates = [
-    ...[...output.matchAll(windows)].map((match) => match[0]),
-    ...[...output.matchAll(posix)].map((match) => match[1])
+    ...(output ? [...output.matchAll(windows)].map((match) => match[0]) : []),
+    ...(output ? [...output.matchAll(posix)].map((match) => match[1]) : []),
+    ...recentAuthorizedRootArtifacts(record, projectRoots)
   ].map((value) => String(value || "").trim()).filter(Boolean);
   return [...new Set(candidates)].filter((candidate) => {
     try {
@@ -288,6 +288,34 @@ function executionOutputArtifactPaths(record = {}) {
       return false;
     }
   });
+}
+
+function recentAuthorizedRootArtifacts(record, projectRoots = []) {
+  const found = [];
+  const stack = (Array.isArray(projectRoots) ? projectRoots : [])
+    .map((root) => ({ directory: String(root || "").trim(), depth: 0 }))
+    .filter((item) => item.directory);
+  let scanned = 0;
+  while (stack.length && scanned < 5000 && found.length < 100) {
+    const current = stack.pop();
+    let entries = [];
+    try { entries = fs.readdirSync(current.directory, { withFileTypes: true }); } catch { continue; }
+    for (const entry of entries) {
+      if (scanned >= 5000 || found.length >= 100) break;
+      scanned += 1;
+      const candidate = path.join(current.directory, entry.name);
+      if (entry.isDirectory()) {
+        if (current.depth < 2 && !entry.isSymbolicLink()) stack.push({ directory: candidate, depth: current.depth + 1 });
+        continue;
+      }
+      if (!entry.isFile() || !DELIVERABLE_EXTENSIONS.has(path.extname(entry.name).toLowerCase())) continue;
+      try {
+        const stat = fs.statSync(candidate);
+        if (stat.size > 0 && modifiedDuringEvidenceWindow(stat, record)) found.push(candidate);
+      } catch {}
+    }
+  }
+  return found;
 }
 
 function extractDeliverableClaims(answer) {
@@ -331,10 +359,11 @@ function verifyClaim({ claim, index, groupPath, projectRoots = [], evidence }) {
   }
 
   try {
-    const realGroup = fs.realpathSync.native(groupPath);
     const realTarget = fs.realpathSync.native(resolved.absolutePath);
-    if (!isInsidePath(realGroup, realTarget)) {
-      return { ...base, normalized_path: resolved.relativePath, status: "invalid_path", reason: "Deliverable path resolves outside the group workspace." };
+    const realRoot = fs.realpathSync.native(resolved.rootPath || groupPath);
+    if (!isInsidePath(realRoot, realTarget)) {
+      const scope = resolved.scope === "project" ? "retained user-authorized root" : "group workspace";
+      return { ...base, normalized_path: resolved.relativePath, status: "invalid_path", reason: `Deliverable path resolves outside the ${scope}.` };
     }
   } catch (error) {
     return { ...base, normalized_path: resolved.relativePath, status: "invalid_path", reason: error.message };
@@ -457,6 +486,17 @@ function matchEvidence(evidence, resolved, stat) {
       match: "workspace_observed_after_successful_build"
     };
   }
+  if (resolved.scope === "project"
+    && MUTATING_TOOL_NAMES.has(evidence.tool)
+    && exactAuthorizedArtifactEvidenceMatch(item, resolved)) {
+    return {
+      id: evidence.id,
+      kind: evidence.kind,
+      tool: evidence.tool,
+      strength: buildEvidence(item) ? "build" : "mutation",
+      match: "authorized_external_artifact_observed_after_successful_execution"
+    };
+  }
   if (MUTATING_TOOL_NAMES.has(evidence.tool)
     && !hasWorkspaceChangeManifest(item.result)
     && modifiedDuringEvidenceWindow(stat, item)) {
@@ -497,6 +537,19 @@ function exactObservedArtifactMatch(item, relativePath) {
   ));
 }
 
+function exactAuthorizedArtifactEvidenceMatch(item, resolved) {
+  if (!resolved.rootPath || !["execute_command", "run_code", "run_tests"].includes(String(item.tool || ""))) return false;
+  let realTarget;
+  try { realTarget = fs.realpathSync.native(resolved.absolutePath); } catch { return false; }
+  return executionOutputArtifactPaths(item, [resolved.rootPath]).some((candidate) => {
+    try {
+      return fs.realpathSync.native(candidate) === realTarget;
+    } catch {
+      return false;
+    }
+  });
+}
+
 function inspectionPathMatch(item, resolved) {
   const claimKey = normalizedPathKey(resolved.relativePath);
   const requestPath = normalizeEvidencePath(item.path || item.result?.path);
@@ -521,6 +574,11 @@ function modifiedDuringEvidenceWindow(stat, item) {
 
 function resolveDeliverablePath(groupPath, value, projectRoots = []) {
   const raw = String(value || "").trim();
+  if (path.isAbsolute(raw)) {
+    const normalized = normalizeAuthorizedArtifactPath(raw, projectRoots);
+    if (normalized !== raw) return resolveDeliverablePath(groupPath, normalized, projectRoots);
+    throw new Error("Deliverable absolute path is outside retained user-authorized roots.");
+  }
   if (raw.toLowerCase().startsWith("project:")) {
     const relative = raw.slice("project:".length).replace(/^[/\\]+/, "");
     for (const root of projectRoots) {
@@ -529,18 +587,19 @@ function resolveDeliverablePath(groupPath, value, projectRoots = []) {
         const candidate = path.resolve(realRoot, relative);
         if (!isInsidePath(realRoot, candidate)) continue;
         if (!fs.existsSync(candidate)) continue;
+        const realTarget = fs.realpathSync.native(candidate);
+        if (!isInsidePath(realRoot, realTarget)) continue;
         assertSafeDeliverablePath(relative.replaceAll("\\", "/"));
-        return { absolutePath: candidate, relativePath: `project:${relative.replaceAll("\\", "/")}` };
+        return { absolutePath: candidate, relativePath: `project:${relative.replaceAll("\\", "/")}`, scope: "project", rootPath: realRoot };
       } catch {}
     }
     throw new Error("Deliverable project path is outside retained user-authorized roots or does not exist.");
   }
   const alias = normalizeWorkspacePathAlias(value, { name: "deliverable path" });
-  if (!alias.aliased && path.isAbsolute(alias.path)) throw new Error("Deliverable path must be relative to the group workspace.");
   const absolutePath = resolveInside(groupPath, alias.path, { name: "deliverable path" });
   const relativePath = path.relative(groupPath, absolutePath).replaceAll("\\", "/") || ".";
   assertSafeDeliverablePath(relativePath);
-  return { absolutePath, relativePath };
+  return { absolutePath, relativePath, scope: "workspace", rootPath: groupPath };
 }
 
 function authorizedProjectRoots(session = {}) {

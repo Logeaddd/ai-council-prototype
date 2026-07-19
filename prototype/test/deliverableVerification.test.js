@@ -148,7 +148,7 @@ test("requested artifact verification accepts output in a retained user-authoriz
   assert.equal(report.requirements[0].path, "project:result.json");
 });
 
-test("requested artifact verification accepts a current-run external artifact path printed by a command", () => {
+test("requested artifact verification accepts a current-run artifact in an authorized external root even when command output mangles the path", () => {
   const groupPath = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-required-output-group-"));
   const project = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-required-output-project-"));
   const pdfPath = path.join(project, "report.pdf");
@@ -166,7 +166,7 @@ test("requested artifact verification accepts a current-run external artifact pa
         ok: true,
         exitCode: 0,
         durationMs: 1000,
-        stdout: `PDF created: ${pdfPath}`,
+        stdout: "PDF created at a path whose localized filename was mangled by the shell.",
         workspaceChanges: { status: "completed", created: [], modified: [], observedArtifacts: [] }
       }
     }],
@@ -177,6 +177,32 @@ test("requested artifact verification accepts a current-run external artifact pa
   assert.equal(report.status, "verified");
   assert.equal(path.resolve(report.requirements[0].path), path.resolve(pdfPath));
   assert.equal(report.requirements[0].evidence_id, "external-pdf-command");
+});
+
+test("requested artifact verification does not accept an old artifact from an authorized external root", () => {
+  const groupPath = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-old-output-group-"));
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-old-output-project-"));
+  const pdfPath = path.join(project, "old-report.pdf");
+  fs.writeFileSync(pdfPath, "%PDF-1.7\nold report", "ascii");
+  const old = new Date(Date.now() - 60 * 60_000);
+  fs.utimesSync(pdfPath, old, old);
+  const session = {
+    authorizedProjectRoots: [project],
+    finalDecision: { answer: "Created the requested PDF.", final_state: "ready_to_execute", blocking_issues: [], risks: [] },
+    toolExecutionResults: [{
+      id: "unrelated-current-command",
+      tool: "execute_command",
+      status: "completed",
+      command: "echo done",
+      createdAt: new Date().toISOString(),
+      result: { ok: true, exitCode: 0, durationMs: 10, stdout: "done", workspaceChanges: { status: "completed", created: [], modified: [], observedArtifacts: [] } }
+    }],
+    fileOperationExecutionResults: []
+  };
+
+  const report = enforceRequestedArtifactRequirements({ groupPath, question: "Create a PDF report.", session });
+  assert.equal(report.status, "needs_revision");
+  assert.equal(report.requirements[0].status, "missing_or_invalid");
 });
 
 test("normalizes structured deliverable claims", () => {
@@ -440,6 +466,61 @@ test("missing and escaped deliverable claims are rejected", () => {
 
   assert.equal(report.claims[0].status, "missing");
   assert.equal(report.claims[1].status, "invalid_path");
+});
+
+test("final deliverable claims accept absolute paths inside retained user-authorized roots", () => {
+  const groupPath = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-final-external-group-"));
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-final-external-project-"));
+  const pdfPath = path.join(project, "report.pdf");
+  fs.writeFileSync(pdfPath, "%PDF-1.7\nexternal report", "ascii");
+  const report = verifyFinalDeliverables({
+    groupPath,
+    session: {
+      authorizedProjectRoots: [project],
+      finalDecision: {
+        answer: `Created ${pdfPath}.`,
+        deliverables: [{ path: pdfPath, claim: "created", evidence_ids: ["external-build"] }]
+      },
+      toolExecutionResults: [{
+        id: "external-build",
+        tool: "execute_command",
+        command: "python generate_report.py",
+        status: "completed",
+        createdAt: new Date().toISOString(),
+        result: {
+          ok: true,
+          exitCode: 0,
+          durationMs: 100,
+          stdout: "localized output path was mangled",
+          workspaceChanges: { status: "completed", created: [], modified: [], observedArtifacts: [] }
+        }
+      }],
+      fileOperationExecutionResults: []
+    }
+  });
+
+  assert.equal(report.status, "verified");
+  assert.equal(report.claims[0].status, "verified_created");
+  assert.equal(report.claims[0].normalized_path, "project:report.pdf");
+});
+
+test("final deliverable claims reject absolute paths outside retained user-authorized roots", () => {
+  const groupPath = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-final-external-denied-group-"));
+  const allowed = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-final-external-allowed-"));
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-final-external-outside-"));
+  const pdfPath = path.join(outside, "report.pdf");
+  fs.writeFileSync(pdfPath, "%PDF-1.7\noutside report", "ascii");
+  const report = verifyFinalDeliverables({
+    groupPath,
+    session: {
+      authorizedProjectRoots: [allowed],
+      finalDecision: { answer: "Done.", deliverables: [{ path: pdfPath, claim: "created" }] },
+      toolExecutionResults: [],
+      fileOperationExecutionResults: []
+    }
+  });
+
+  assert.equal(report.claims[0].status, "invalid_path");
 });
 
 test("root artifacts are detected while secret and internal paths are rejected", () => {
