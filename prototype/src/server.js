@@ -26,6 +26,7 @@ import { deletePublicMemory, listPublicMemories, upsertPublicMemory } from "./pu
 import { readTaskState } from "./taskState.js";
 import { queryPublicEvents, tombstonePublicEvents } from "./publicEventJournal.js";
 import { listCapabilities } from "./capabilityRegistry.js";
+import { listTaskRuns, readTaskRun, readTaskRunEvents } from "./taskRuntime.js";
 import { capabilityEnabled } from "./capabilityPolicy.js";
 import { createCouncilRunRegistry } from "./councilRunRegistry.js";
 import { fetchPublicUrl, searchWeb } from "./webTools.js";
@@ -132,9 +133,37 @@ async function handleApi(req, res, url) {
 
   if (req.method === "GET" && url.pathname === "/api/capabilities") {
     const appSettings = readCurrentAppSettings();
+    const groupPath = url.searchParams.get("groupPath")
+      ? resolveWorkspacePath(url.searchParams.get("groupPath"), "groupPath")
+      : undefined;
     sendJson(res, 200, {
-      capabilities: listCapabilities({ env: process.env, appSettings, baseDir }),
+      capabilities: listCapabilities({ env: process.env, appSettings, baseDir, groupPath }),
       toolAccess: appSettings.capabilities?.toolAccess || {}
+    });
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/task-runs") {
+    const groupPath = resolveWorkspacePath(url.searchParams.get("groupPath"), "groupPath");
+    sendJson(res, 200, { taskRuns: listTaskRuns(groupPath, { limit: url.searchParams.get("limit") }) });
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname.startsWith("/api/task-runs/")) {
+    const groupPath = resolveWorkspacePath(url.searchParams.get("groupPath"), "groupPath");
+    const id = decodeURIComponent(url.pathname.slice("/api/task-runs/".length));
+    const taskRun = readTaskRun(groupPath, id);
+    if (!taskRun) {
+      const error = new Error("Unknown task run");
+      error.statusCode = 404;
+      throw error;
+    }
+    sendJson(res, 200, {
+      taskRun,
+      events: readTaskRunEvents(groupPath, id, {
+        offset: url.searchParams.get("offset"),
+        limit: url.searchParams.get("limit")
+      })
     });
     return;
   }

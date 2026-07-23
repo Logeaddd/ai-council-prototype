@@ -757,6 +757,13 @@ export function CouncilApp() {
       addSystemItem(formatToolEvent(event))
       return
     }
+    if (event.type === "task_run" && event.taskRun?.id) {
+      const state = event.taskRun.state || "unknown"
+      const phase = event.taskRun.execution?.phase ? ` · ${event.taskRun.execution.phase}` : ""
+      const reason = event.taskRun.blockReason ? ` · ${event.taskRun.blockReason}` : ""
+      addSystemItem(`任务 ${state}${phase}${reason}`)
+      return
+    }
     if (event.type === "error") {
       addSystemItem(event.error || "讨论流出错。")
     }

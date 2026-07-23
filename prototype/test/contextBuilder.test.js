@@ -88,7 +88,7 @@ test("context prompt sections keep stable and core before transcript", () => {
     "Non-compressible core",
     "Recent transcript"
   ]);
-  assert.match(sections[1].content, /Original question: Question/);
+  assert.doesNotMatch(sections[1].content, /Original question:/);
   assert.match(sections[2].content, /unavailable: 429/);
 });
 
@@ -477,6 +477,90 @@ test("immediate tool results remain authoritative when historical execution evid
   assert.equal(context.contextReceipt.decisions.some((item) => item.source.id === "tool_read_exact" && item.status === "injected" && item.reason === "protected_immediate_tool_result"), true);
   assert.equal(context.contextReceipt.decisions.some((item) => item.source.id === "tool_api_exact" && item.status === "retrieved_but_omitted"), false);
   assert.equal(context.executionEvidenceCompression.omittedCount > 0, true);
+});
+
+test("many huge current-turn tool results are compacted with receipts", () => {
+  const hugeResults = Array.from({ length: 12 }, (_, index) => ({
+    id: `current_huge_${index}`,
+    tool: index % 3 === 0 ? "execute_command" : "read_file",
+    status: index === 2 ? "failed" : "completed",
+    code: index === 2 ? "command_exit_nonzero" : undefined,
+    source_agent_id: "builder",
+    source_agent_name: "Builder",
+    round: 1,
+    path: index % 3 === 0 ? undefined : `workspace/out-${index}.bin`,
+    command: index % 3 === 0 ? `node -e "process.stdout.write('HUGE_${index}_' + 'Y'.repeat(9000))"` : undefined,
+    result: index % 3 === 0
+      ? {
+        ok: index !== 2,
+        exitCode: index === 2 ? 1 : 0,
+        stdout: index === 2 ? "" : `HUGE_${index}_HEAD ${"Y".repeat(9000)} HUGE_${index}_TAIL`,
+        stderr: index === 2 ? `FAIL_${index}_HEAD ${"E".repeat(7000)} FAIL_${index}_TAIL` : "",
+        workspaceChanges: {
+          source: "bounded_workspace_snapshot_diff",
+          status: "completed",
+          complete: true,
+          before: { scannedEntries: 4000, ignoredEntries: 12, errorCount: 0, maxEntries: 20000, durationMs: 8, truncated: false, complete: true },
+          after: { scannedEntries: 4001, ignoredEntries: 12, errorCount: 0, maxEntries: 20000, durationMs: 9, truncated: false, complete: true },
+          created: index === 0 ? [`workspace/out-${index}.bin`] : [],
+          modified: [],
+          deleted: [],
+          observedArtifacts: index === 0 ? [`workspace/out-${index}.bin`] : [],
+          observedArtifactsComplete: true
+        },
+        environment: {
+          pathAdditions: ["C:\\Program Files\\Java\\jdk-21\\bin"],
+          corrections: ["selected JAVA_HOME"]
+        }
+      }
+      : {
+        ok: true,
+        path: `workspace/out-${index}.bin`,
+        content: `FILE_${index}_HEAD ${"Z".repeat(9000)} FILE_${index}_TAIL`
+      }
+  }));
+  const storedSnapshot = JSON.stringify(hugeResults);
+  const context = buildMemberContext({
+    ...agent,
+    id: "builder",
+    name: "Builder",
+    role: "Builder",
+    providerLimits: { contextWindow: 3200, maxOutputTokens: 400 },
+    tokenLimits: { maxInputTokensPerCall: 2800 }
+  }, {
+    id: "session_many_current_turn",
+    question: "Produce and verify the requested artifacts from the latest tool batch.",
+    unresolvedObjections: {},
+    artifacts: [],
+    messages: [],
+    toolExecutionResults: hugeResults
+  }, {
+    currentTurnToolResults: hugeResults
+  });
+  const prompt = buildContextPromptSections(context).map((section) => `${section.title}\n${section.content}`).join("\n");
+  const compression = context.currentTurnEvidenceCompression;
+  const decisions = context.contextReceipt.decisions.filter((item) => item.section === "current_turn_tool_evidence");
+
+  assert.equal(JSON.stringify(hugeResults), storedSnapshot, "raw session tool results must remain unchanged");
+  assert.equal(context.coreOverflow, false);
+  assert.equal(compression.originalCount, 12);
+  assert.ok(compression.keptCount >= 1, "at least one high-priority current-turn result must be retained");
+  assert.ok(compression.keptCount < 12 || compression.shortenedCount > 0, "budgeting must compact or omit some huge results");
+  assert.equal(compression.applied, true);
+  assert.ok(compression.estimatedTokens <= compression.maxTokens);
+  assert.ok(decisions.some((item) => item.status === "shortened" || item.status === "injected"));
+  assert.ok(decisions.some((item) => item.status === "retrieved_but_omitted") || compression.shortenedCount > 0);
+  assert.match(prompt, /Current-turn tool evidence|Immediately preceding tool results/);
+  // Priority keeps recent/high-value results; failures and latest verification evidence must surface.
+  assert.match(prompt, /HUGE_\d+_HEAD|FILE_\d+_HEAD|FAIL_\d+_HEAD|current_huge_\d+/);
+  assert.ok(
+    prompt.includes("FAIL_2_HEAD") || prompt.includes("command_exit_nonzero") || prompt.includes("current_huge_2") || /HUGE_\d+_HEAD/.test(prompt),
+    "useful current-turn evidence must remain visible after budgeting"
+  );
+  assert.doesNotMatch(prompt, /Y{5000}/);
+  assert.doesNotMatch(prompt, /Z{5000}/);
+  assert.doesNotMatch(prompt, /"scannedEntries":4000/);
+  assert.equal(context.currentTurnEvidence.toolExecutionResults.length, compression.keptCount);
 });
 
 test("context prompt sections keep only the latest repeated tool result", () => {

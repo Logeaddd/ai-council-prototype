@@ -30,11 +30,10 @@ export function buildMemberContext(agent, session, options = {}) {
   const visibleFileOperationExecutionResults = selectVisibleFileOperationResults(session.fileOperationExecutionResults || [], agent, transcriptVisibility);
   const visibleToolExecutionResults = selectVisibleToolResults(session.toolExecutionResults || [], agent, transcriptVisibility);
   const visibleRejectedToolRequests = selectVisibleToolResults(session.rejectedToolRequests || [], agent, transcriptVisibility);
-  const currentTurnEvidence = buildCurrentTurnEvidencePack({
+  const currentTurnGroups = {
     toolExecutionResults: selectVisibleToolResults(options.currentTurnToolResults || [], agent, transcriptVisibility),
     rejectedToolRequests: selectVisibleToolResults(options.currentTurnRejectedToolRequests || [], agent, transcriptVisibility)
-  });
-  const currentTurnSignatures = new Set(currentTurnEvidence.sourceRecords.map((item) => currentTurnEvidenceIdentity(item.kind, item.item)));
+  };
   const attachedFiles = normalizeFileAttachments(options.attachments || []);
   const retrievedSelection = excludeInvalidatedContextItems(options.retrievedContext || [], retrievedContextSource, priorityPolicy);
   const hotCacheSelection = excludeInvalidatedContextItems(options.publicEventHotCache?.events || [], (item) => contextSource("public_event", item?.eventId || item?.sequence, {
@@ -82,6 +81,14 @@ export function buildMemberContext(agent, session, options = {}) {
     enabledSkills: String(options.enabledSkills || "").trim()
   };
   const stableMessages = contextMessagesFromStable(stable);
+  const currentTurnEvidenceBudget = resolveCurrentTurnEvidenceBudget({
+    limits,
+    stableMessages,
+    coreBase,
+    summaries
+  });
+  const currentTurnEvidence = buildCurrentTurnEvidencePack(currentTurnGroups, currentTurnEvidenceBudget);
+  const currentTurnSignatures = new Set(currentTurnEvidence.sourceRecords.map((item) => currentTurnEvidenceIdentity(item.kind, item.item)));
   const currentTurnMessages = contextMessagesFromCurrentTurnEvidence(currentTurnEvidence);
   const executionEvidenceBudget = resolveExecutionEvidenceBudget({
     limits,
@@ -145,6 +152,7 @@ export function buildMemberContext(agent, session, options = {}) {
       targetTokens: compressionTargetTokens(limits)
     },
     archiveContextCompression: summaries.retrievedContext.compression,
+    currentTurnEvidenceCompression: currentTurnEvidence.compression,
     executionEvidenceCompression: executionEvidence.compression,
     tokenEstimate: {
       ...tokenEstimate,
@@ -677,7 +685,6 @@ export function buildContextPromptSections(context) {
         : ""
     ]],
     ["Non-compressible core", [
-      `Original question: ${context.core.originalQuestion}`,
       context.core.latestBossInstruction ? `Latest boss instruction: ${context.core.latestBossInstruction}` : "",
       `Latest artifacts: ${JSON.stringify(context.core.latestArtifacts)}`,
       `Unresolved objections: ${JSON.stringify(context.core.unresolvedObjections)}`,
@@ -779,6 +786,18 @@ function resolveExecutionEvidenceBudget({ limits, stableMessages, currentTurnMes
   return Math.max(0, Math.min(available, ratioLimit));
 }
 
+function resolveCurrentTurnEvidenceBudget({ limits, stableMessages, coreBase, summaries }) {
+  const targetTokens = compressionTargetTokens(limits) || limits.effectiveInputLimit;
+  const mandatoryTokens = estimateMessagesTokens([
+    ...stableMessages,
+    ...contextMessagesFromCore(coreBase),
+    ...contextMessagesFromSummaries(summaries)
+  ]);
+  const available = Math.max(0, targetTokens - mandatoryTokens - EXECUTION_EVIDENCE_RESERVE_TOKENS);
+  const ratioLimit = Math.max(0, Math.floor(limits.effectiveInputLimit * MAX_EXECUTION_EVIDENCE_TOKEN_RATIO));
+  return Math.max(0, Math.min(available, ratioLimit));
+}
+
 function buildExecutionEvidencePack(groups, maxTokens) {
   const rawFileResults = Array.isArray(groups.fileOperationExecutionResults) ? groups.fileOperationExecutionResults : [];
   const rawToolResults = Array.isArray(groups.toolExecutionResults) ? groups.toolExecutionResults : [];
@@ -800,7 +819,8 @@ function buildExecutionEvidencePack(groups, maxTokens) {
 
   for (const candidate of candidates) {
     const remaining = Math.max(0, maxTokens - estimatedTokens);
-    const fitted = fitExecutionEvidenceCandidate(candidate, remaining);
+    const forceKeep = remaining > 0 && candidate.priority >= 6;
+    const fitted = fitExecutionEvidenceCandidate(candidate, remaining, { forceKeep });
     if (!fitted) continue;
     kept.push({ ...candidate, record: fitted.record, shortened: fitted.shortened });
     estimatedTokens += fitted.tokens;
@@ -861,28 +881,64 @@ function buildExecutionEvidencePack(groups, maxTokens) {
   };
 }
 
-function buildCurrentTurnEvidencePack(groups = {}) {
+function buildCurrentTurnEvidencePack(groups = {}, maxTokens = Number.POSITIVE_INFINITY) {
   const sourceRecords = [
     ...dedupeSimilarToolResults(Array.isArray(groups.toolExecutionResults) ? groups.toolExecutionResults : []).map((item) => ({ kind: "tool", item })),
     ...dedupeSimilarToolResults(Array.isArray(groups.rejectedToolRequests) ? groups.rejectedToolRequests : []).map((item) => ({ kind: "rejected", item }))
   ];
-  const records = sourceRecords.map(({ kind, item }) => compactExecutionEvidenceRecord(kind, item, MAX_TOOL_CONTEXT_STRING_CHARS).record);
-  const toolExecutionResults = records.filter((_, index) => sourceRecords[index].kind === "tool");
-  const rejectedToolRequests = records.filter((_, index) => sourceRecords[index].kind === "rejected");
+  const candidates = sourceRecords.map(({ kind, item }, sequence) => executionEvidenceCandidate(kind, item, sequence));
+  markPriorityExecutionEvidence(candidates);
+  candidates.sort(compareExecutionEvidenceCandidate);
+  const kept = [];
+  let estimatedTokens = 0;
+  let shortenedCount = 0;
+  for (const candidate of candidates) {
+    const remaining = Math.max(0, maxTokens - estimatedTokens);
+    const forceKeep = remaining > 0 && (candidate.priority >= 6 || kept.length === 0);
+    const fitted = Number.isFinite(maxTokens)
+      ? fitExecutionEvidenceCandidate(candidate, remaining, { forceKeep })
+      : compactExecutionEvidenceRecord(candidate.kind, candidate.item, MAX_TOOL_CONTEXT_STRING_CHARS);
+    if (!fitted) continue;
+    const tokens = Number.isFinite(fitted.tokens) ? fitted.tokens : estimateTokens(JSON.stringify(fitted.record));
+    kept.push({ ...candidate, record: fitted.record, shortened: fitted.shortened, tokens });
+    estimatedTokens += tokens;
+    if (fitted.shortened) shortenedCount += 1;
+  }
+  kept.sort((a, b) => a.sequence - b.sequence);
+  const records = kept.map((item) => item.record);
+  const toolExecutionResults = kept.filter((item) => item.kind === "tool").map((item) => item.record);
+  const rejectedToolRequests = kept.filter((item) => item.kind === "rejected").map((item) => item.record);
   const sources = sourceRecords.map(({ kind, item }, index) => executionEvidenceSource(kind, item, index));
+  const keptBySequence = new Map(kept.map((item) => [item.sequence, item]));
+  const omittedCount = Math.max(0, sourceRecords.length - kept.length);
   return {
     records,
     toolExecutionResults,
     rejectedToolRequests,
     sourceRecords,
+    compression: {
+      maxTokens: Number.isFinite(maxTokens) ? maxTokens : null,
+      estimatedTokens,
+      originalCount: sourceRecords.length,
+      keptCount: kept.length,
+      omittedCount,
+      shortenedCount,
+      applied: omittedCount > 0 || shortenedCount > 0,
+      source: "complete raw results remain in session storage"
+    },
     receipt: {
       sources,
-      decisions: sources.map((source) => ({
-        section: "current_turn_tool_evidence",
-        source,
-        status: "injected",
-        reason: "protected_immediate_tool_result"
-      }))
+      decisions: sources.map((source, sequence) => {
+        const retained = keptBySequence.get(sequence);
+        return {
+          section: "current_turn_tool_evidence",
+          source,
+          status: retained ? (retained.shortened ? "shortened" : "injected") : "retrieved_but_omitted",
+          reason: retained
+            ? (retained.shortened ? "immediate_tool_result_compacted" : "protected_immediate_tool_result")
+            : "immediate_tool_result_token_budget"
+        };
+      })
     }
   };
 }
@@ -953,13 +1009,78 @@ function compareExecutionEvidenceCandidate(a, b) {
   return b.priority - a.priority || b.sequence - a.sequence;
 }
 
-function fitExecutionEvidenceCandidate(candidate, remainingTokens) {
+function fitExecutionEvidenceCandidate(candidate, remainingTokens, options = {}) {
   if (remainingTokens <= 0) return null;
-  for (const maxStringChars of [DEFAULT_EVIDENCE_STRING_CHARS, 800, 320, 120]) {
+  const charLadder = options.forceKeep
+    ? [DEFAULT_EVIDENCE_STRING_CHARS, 800, 320, 120, 48, 16]
+    : [DEFAULT_EVIDENCE_STRING_CHARS, 800, 320, 120];
+  for (const maxStringChars of charLadder) {
     const compacted = compactExecutionEvidenceRecord(candidate.kind, candidate.item, maxStringChars);
     const tokens = estimateTokens(JSON.stringify(compacted.record));
     if (tokens <= remainingTokens) return { ...compacted, tokens };
   }
+  if (options.forceKeep && remainingTokens >= 24) {
+    return minimalExecutionEvidenceRecord(candidate.kind, candidate.item, remainingTokens);
+  }
+  return null;
+}
+
+function minimalExecutionEvidenceRecord(kind, item = {}, remainingTokens) {
+  const base = kind === "file"
+    ? {
+      proposalId: item.proposalId || item.id,
+      op: item.op || item.operation || item.action,
+      path: item.path || item.targetPath,
+      status: item.status,
+      error: compactContextString(item.error || item.reason || "", 80)
+    }
+    : {
+      id: item.id,
+      tool: item.tool,
+      status: item.status || (kind === "rejected" ? "rejected" : undefined),
+      path: item.path,
+      command: item.command,
+      url: item.url,
+      query: item.query,
+      error: compactContextString(item.error || item.reason || "", 80),
+      result: slimToolResultForEvidence(item.result || {}, {}, { ultra: true })
+    };
+  let record = removeEmptyEvidenceValues(base);
+  let tokens = estimateTokens(JSON.stringify(record));
+  if (tokens <= remainingTokens) {
+    return { record, shortened: true, tokens };
+  }
+  // Strip result body entirely and keep only outcome facts.
+  if (kind !== "file") {
+    const result = item.result || {};
+    record = removeEmptyEvidenceValues({
+      id: item.id,
+      tool: item.tool,
+      status: item.status,
+      path: item.path,
+      command: compactContextString(item.command || "", 60),
+      error: compactContextString(item.error || "", 60),
+      result: removeEmptyEvidenceValues({
+        ok: result.ok,
+        exitCode: result.exitCode,
+        timedOut: result.timedOut,
+        stdoutChars: typeof result.stdout === "string" ? result.stdout.length : undefined,
+        stderrChars: typeof result.stderr === "string" ? result.stderr.length : undefined,
+        contentChars: typeof result.content === "string" ? result.content.length : undefined,
+        observedArtifacts: summarizeWorkspaceChangesForEvidence(result.workspaceChanges || {}).observedArtifacts
+      })
+    });
+    tokens = estimateTokens(JSON.stringify(record));
+    if (tokens <= remainingTokens) return { record, shortened: true, tokens };
+  }
+  record = removeEmptyEvidenceValues({
+    id: item.id || item.proposalId,
+    tool: item.tool || item.op || kind,
+    status: item.status,
+    note: "evidence_omitted_for_token_budget_see_session_storage"
+  });
+  tokens = estimateTokens(JSON.stringify(record));
+  if (tokens <= remainingTokens) return { record, shortened: true, tokens };
   return null;
 }
 
@@ -1037,8 +1158,57 @@ function toolEvidenceRecord(item = {}, rejected = false) {
     createdAt: item.createdAt
   });
   const rawResult = item.tool === "skill_read" ? skillReadEvidenceResult(item.result || {}) : item.result || {};
-  const result = removeDuplicateEvidenceValues(removeEmptyEvidenceValues(rawResult), request);
+  const result = slimToolResultForEvidence(rawResult, request);
   return removeEmptyEvidenceValues({ ...request, result });
+}
+
+function slimToolResultForEvidence(result = {}, request = {}, options = {}) {
+  if (!result || typeof result !== "object" || Array.isArray(result)) return result;
+  const ultra = Boolean(options.ultra);
+  // Preserve unknown tool-specific fields; only shrink known bulky structures.
+  const slim = { ...result };
+  if (typeof slim.stdout === "string" && ultra) slim.stdout = compactContextString(slim.stdout, 48);
+  if (typeof slim.stderr === "string" && ultra) slim.stderr = compactContextString(slim.stderr, 48);
+  if (Array.isArray(slim.entries)) slim.entries = slim.entries.slice(0, ultra ? 5 : 20);
+  if (slim.environment && typeof slim.environment === "object") {
+    slim.environment = removeEmptyEvidenceValues({
+      pathAdditions: Array.isArray(slim.environment.pathAdditions) ? slim.environment.pathAdditions.slice(0, 8) : undefined,
+      corrections: Array.isArray(slim.environment.corrections) ? slim.environment.corrections.slice(0, 8) : undefined
+    });
+  }
+  if (slim.workspaceChanges) {
+    slim.workspaceChanges = summarizeWorkspaceChangesForEvidence(slim.workspaceChanges);
+  }
+  // Drop nested snapshot blobs that are never useful in prompts.
+  if (slim.before && typeof slim.before === "object" && "scannedEntries" in slim.before) delete slim.before;
+  if (slim.after && typeof slim.after === "object" && "scannedEntries" in slim.after) delete slim.after;
+  return removeDuplicateEvidenceValues(removeEmptyEvidenceValues(slim), request);
+}
+
+function summarizeWorkspaceChangesForEvidence(changes = {}) {
+  if (!changes || typeof changes !== "object") return undefined;
+  const pickPaths = (value, limit = 20) => {
+    if (!Array.isArray(value)) return undefined;
+    return value.slice(0, limit).map((item) => {
+      if (typeof item === "string") return item;
+      if (item && typeof item === "object") {
+        return item.path || item.relativePath || item.absolutePath || item.name || item;
+      }
+      return item;
+    });
+  };
+  return removeEmptyEvidenceValues({
+    source: changes.source,
+    status: changes.status,
+    complete: changes.complete,
+    truncated: changes.truncated,
+    error: changes.error,
+    created: pickPaths(changes.created),
+    modified: pickPaths(changes.modified),
+    deleted: pickPaths(changes.deleted),
+    observedArtifacts: pickPaths(changes.observedArtifacts),
+    observedArtifactsComplete: changes.observedArtifactsComplete
+  });
 }
 
 function skillReadEvidenceResult(result = {}) {
@@ -1256,7 +1426,6 @@ function isStaleReviewerRoleText(value) {
 
 function contextMessagesFromCore(core) {
   return [
-    { role: "user", content: core.originalQuestion },
     { role: "user", content: core.latestBossInstruction },
     { role: "user", content: JSON.stringify(core.latestArtifacts) },
     { role: "user", content: JSON.stringify(core.unresolvedObjections) },

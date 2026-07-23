@@ -225,7 +225,10 @@ function permissionRank(value) {
 
 function isVerificationResult(item = {}) {
   if (item.tool === "run_tests") return true;
-  if (item.tool === "run_code") return Boolean(item.result?.verificationIntent);
+  if (item.tool === "run_code") {
+    return Boolean(item.result?.verificationIntent)
+      || /\b(?:verify|verification|validat(?:e|ion)?|test|check|parse|lint|smoke|assert(?:ion)?)/i.test(String(item.reason || ""));
+  }
   if (item.tool !== "execute_command") return false;
   const command = String(item.command || item.result?.command || "");
   const reason = String(item.reason || "");

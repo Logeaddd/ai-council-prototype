@@ -3,6 +3,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { capabilityEnabled } from "./capabilityPolicy.js";
+import { listCapabilityFacts, mergeCapabilityFacts } from "./capabilityFacts.js";
 
 const MODULE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -14,7 +15,7 @@ export function listCapabilities(options = {}) {
   const external = (ok) => ok ? "unverified" : "unavailable";
   const enabled = (family) => capabilityEnabled(normalizedSettings(options), family);
 
-  return [
+  const capabilities = [
     capability("web-search", "联网搜索", "tool", external(runtime.webRuntime), enabled("web"), "web", {
       provider: searchConfigured ? "Brave Search" : "Bing Web",
       source: searchConfigured ? keyInfo.source : "built_in_html",
@@ -122,6 +123,7 @@ export function listCapabilities(options = {}) {
       health: health(runtime.mcpMarketplaceRuntime, false, runtime.mcpMarketplaceDetail)
     })
   ];
+  return mergeCapabilityFacts(capabilities, options.capabilityFacts || listCapabilityFacts(options.groupPath));
 }
 
 export function probeCapabilityRuntime(options = {}) {

@@ -31,6 +31,7 @@ import { createObservationCache, hasMaterialWorkspaceChange } from "./observatio
 import { advanceExecutionState, createExecutionState, executionInstruction, isDeliveryTask, selectExecutionAgents } from "./executionState.js";
 import { nativeToolDefinitions } from "./nativeToolProtocol.js";
 import { readPublicEventHotCache } from "./publicEventJournal.js";
+import { appendTaskRunEvent, createTaskRun, readTaskRun, recordTaskRunArtifactVerification, recordTaskRunFileEvidence, recordTaskRunToolAttempts, syncTaskRunFromSession } from "./taskRuntime.js";
 
 export async function runCouncil(question, group, baseDir, options = {}) {
   let finalResult;
@@ -66,6 +67,9 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
     || (options.groupPath && memoryEnabled && automaticContinuationSource
       ? buildAutomaticContinuationContext(automaticContinuationSource)
       : null);
+  const continuationTaskRun = options.groupPath && continuationContext?.taskRunId
+    ? readTaskRun(options.groupPath, continuationContext.taskRunId)
+    : undefined;
   const authorizedProjectRoots = [...new Set([
     ...importedProjectRoots,
     ...userReferencedRoots,
@@ -137,10 +141,23 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
       question: executionQuestion,
       agents: enabledAgents,
       workspaceGroup,
-      previousState: automaticContinuationSource?.executionState
+      previousState: continuationTaskRun?.execution?.active
+        ? continuationTaskRun.execution
+        : automaticContinuationSource?.executionState
         || (isContinuationRequest(question) ? taskState?.executionCheckpoint : undefined)
     })
   };
+  session.taskRun = options.groupPath && session.executionState.active
+    ? createTaskRun({
+      groupPath: options.groupPath,
+      session,
+      question: executionQuestion,
+      authorizedProjectRoots,
+      attachments,
+      parentTaskRunId: continuationContext?.taskRunId || "",
+      resumeTaskRunId: continuationContext?.taskRunId || ""
+    })
+    : null;
   session.explicitMemoryUpdate = persistExplicitUserMemory(options.groupPath, question, {
     appSettings: options.appSettings,
     sourceSessionId: session.id,
@@ -151,6 +168,13 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
   // The history API reads this file directly, so update it only at real event boundaries.
   const persistRunningSession = () => {
     if (!options.groupPath) return undefined;
+    if (session.taskRun) {
+      session.taskRun = syncTaskRunFromSession({
+        groupPath: options.groupPath,
+        taskRun: session.taskRun,
+        session
+      });
+    }
     session.durationMs = elapsedMs(sessionStartMs);
     return writeGroupSession(session, options.groupPath);
   };
@@ -209,11 +233,14 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
         agentId: agent.id,
         agentName: agent.name,
         contextStatus,
+        taskRun: taskRunSnapshot(session.taskRun),
         createdAt: agentStartedAt
       };
 
       if (memberContext.coreOverflow) {
-        const message = buildUnavailableMessage(agent, round, `non_compressible_core_exceeds_input_limit:${contextStatus.nonCompressibleCoreTokens}/${contextStatus.effectiveInputLimit}`, contextStatus, {
+        const overflowReason = contextOverflowReason(contextStatus);
+        session.guardStopReason ||= overflowReason;
+        const message = buildUnavailableMessage(agent, round, overflowReason, contextStatus, {
           startedAt: agentStartedAt,
           durationMs: elapsedMs(agentStartMs)
         });
@@ -334,6 +361,15 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
         accumulatedFileOperationExecutionResults.push(...readListResults, ...autoFileExecutionResults);
         accumulatedPendingFileOperationProposals.push(...queueResult.queued);
         accumulatedRejectedFileOperationProposals.push(...fileOperationResult.rejected, ...queueResult.rejected);
+        if (session.taskRun && (readListResults.length || autoFileExecutionResults.length)) {
+          recordTaskRunFileEvidence({
+            groupPath: options.groupPath,
+            taskRun: session.taskRun,
+            agent,
+            round,
+            results: [...readListResults, ...autoFileExecutionResults]
+          });
+        }
         if (agent.id === session.executionState?.executorId) {
           advanceExecutionState({
             state: session.executionState,
@@ -435,6 +471,18 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
         session.toolRequests.push(...toolResult.accepted);
         session.toolExecutionResults.push(...toolResult.results);
         session.rejectedToolRequests.push(...toolResult.rejected);
+        if (session.taskRun) {
+          recordTaskRunToolAttempts({
+            groupPath: options.groupPath,
+            taskRun: session.taskRun,
+            agent,
+            round,
+            iteration: toolIterations,
+            accepted: toolResult.accepted,
+            results: toolResult.results,
+            rejected: toolResult.rejected
+          });
+        }
         if (agent.id === session.executionState?.executorId) {
           advanceExecutionState({
             state: session.executionState,
@@ -448,6 +496,13 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
           executionDirective = executionInstruction(session.executionState, agent);
         }
         persistRunningSession();
+        if (session.taskRun) {
+          yield {
+            type: "task_run",
+            taskRun: taskRunSnapshot(session.taskRun),
+            createdAt: nowIso()
+          };
+        }
         for (const event of toolResult.events || []) {
           yield event;
         }
@@ -495,6 +550,24 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
           currentTurnToolResults: toolResult.results,
           currentTurnRejectedToolRequests: toolResult.rejected
         });
+        if (followupContext.coreOverflow) {
+          const overflowReason = contextOverflowReason(summarizeContextStatus(followupContext, {
+            groupPath: options.groupPath,
+            seat,
+            agent
+          }));
+          session.guardStopReason ||= overflowReason;
+          response = {
+            status: "unavailable",
+            reason: overflowReason,
+            retryable: false,
+            objections: [overflowReason],
+            memory_candidates: []
+          };
+          rawTextForMessage = "";
+          errorForMessage = overflowReason;
+          break;
+        }
         const followupMessages = buildRoundPrompt(agent, question, session, round, {
           ...promptOptions,
           runtimeEnvironment: formatRuntimeEnvironment(discoverRuntimeEnvironment(options.groupPath || baseDir, {
@@ -799,6 +872,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
       contextSections: buildContextPromptSections(finalContext)
     });
     const contextReceipt = recordContextReceipt(session, finalContext, {
+      groupPath: options.groupPath,
       sessionId: session.id,
       modelCallIndex: session.modelCallCount,
       phase: "final",
@@ -870,15 +944,32 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
     });
     session.finalDecision.file_execution_state = fileExecution.state;
     session.finalDecision.file_execution_results = fileExecution.results;
-    applyDeliverableVerification(session, verifyFinalDeliverables({
+    if (session.taskRun && fileExecution.results.length) {
+      recordTaskRunFileEvidence({
+        groupPath: options.groupPath,
+        taskRun: session.taskRun,
+        agent: { id: "system", name: "Automatic file executor" },
+        round: 0,
+        results: fileExecution.results
+      });
+    }
+    const deliverableVerification = verifyFinalDeliverables({
       groupPath: options.groupPath,
       session
-    }));
-    enforceRequestedArtifactRequirements({
+    });
+    applyDeliverableVerification(session, deliverableVerification);
+    const requestedArtifactVerification = enforceRequestedArtifactRequirements({
       groupPath: options.groupPath,
       question: session.executionState?.taskQuestion || executionQuestion,
       session
     });
+    if (session.taskRun) {
+      recordTaskRunArtifactVerification({
+        groupPath: options.groupPath,
+        taskRun: session.taskRun,
+        reports: [deliverableVerification, requestedArtifactVerification]
+      });
+    }
   }
   session.finalDecision.memory_candidates = limitMemoryCandidates(session.finalDecision.memory_candidates);
   session.publicMemoryUpdate = persistSummarizerPublicMemory(options.groupPath, session.finalDecision.memory_candidates, {
@@ -914,6 +1005,13 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
     : [];
 
   const result = { session, sessionPath, contextArchive, memoryRecords, transcriptChunk, summaryUpdate, usageRecord, taskStateUpdate };
+  if (session.taskRun) {
+    yield {
+      type: "task_run",
+      taskRun: taskRunSnapshot(session.taskRun),
+      createdAt: nowIso()
+    };
+  }
   yield {
     type: "final_decision",
     agentId: judge.id,
@@ -1046,6 +1144,7 @@ async function* callRoundModel({ options, session, phase, round, agent, memberCo
     };
   }
   const contextReceipt = recordContextReceipt(session, memberContext, {
+    groupPath: options.groupPath,
     sessionId: session.id,
     modelCallIndex: session.modelCallCount,
     phase,
@@ -1415,7 +1514,47 @@ function recordContextReceipt(session, memberContext, details = {}) {
   const receipt = materializeContextReceipt(memberContext, details);
   if (!Array.isArray(session.contextReceipts)) session.contextReceipts = [];
   session.contextReceipts.push(receipt);
+  if (details.groupPath && session.taskRun?.id) {
+    appendTaskRunEvent(details.groupPath, session.taskRun.id, "context_compiled", compactTaskRunContextReceipt(receipt));
+  }
   return receipt;
+}
+
+function compactTaskRunContextReceipt(receipt = {}) {
+  const decisions = Array.isArray(receipt.decisions) ? receipt.decisions : [];
+  const nonInjected = decisions.filter((item) => item.status !== "injected");
+  return {
+    call: receipt.call || {},
+    budget: receipt.budget || {},
+    sections: (Array.isArray(receipt.sections) ? receipt.sections : []).map((item) => ({
+      id: item.id,
+      estimatedTokens: item.estimatedTokens,
+      retainedTokenShare: item.retainedTokenShare,
+      sourceCount: item.sourceCount
+    })),
+    omittedOrShortened: nonInjected.slice(-80).map((item) => ({
+      section: item.section,
+      status: item.status,
+      reason: item.reason,
+      source: item.source
+    })),
+    invalidatedSources: receipt.policy?.invalidatedSources || []
+  };
+}
+
+function taskRunSnapshot(taskRun) {
+  if (!taskRun?.id) return undefined;
+  return {
+    id: taskRun.id,
+    state: taskRun.state,
+    blockReason: taskRun.blockReason,
+    updatedAt: taskRun.updatedAt,
+    execution: {
+      phase: taskRun.execution?.phase || "",
+      nextAction: taskRun.execution?.nextAction || "",
+      artifactStatus: taskRun.execution?.artifactStatus || ""
+    }
+  };
 }
 
 function appendModelCallTrace(record, { event, raw } = {}) {
@@ -1449,7 +1588,14 @@ function summarizePromptMessages(messages = []) {
       : JSON.stringify(message.content || "");
     return `${message.role || "unknown"}: ${content}`;
   }).join("\n\n");
-  return summarizeText(combined);
+  const question = messages.map((message) => {
+    const content = typeof message.content === "string" ? message.content : "";
+    return content.match(/(?:^|\n)Question:\s*([\s\S]*?)(?=\n\nRound:|\nRound:|$)/)?.[1]?.trim() || "";
+  }).find(Boolean) || "";
+  return {
+    ...summarizeText(combined),
+    question: summarizeText(question)
+  };
 }
 
 function summarizeText(value) {
@@ -1574,7 +1720,8 @@ function normalizeContinuationContext(value) {
     recentMessages: normalizeContinuationMessages(value.recentMessages || value.recent_messages, 12),
     recentActivity: normalizeTextList(value.recentActivity || value.recent_activity).slice(0, 12),
     verifiedToolResults: normalizeVerifiedContinuationToolResults(value.verifiedToolResults || value.verified_tool_results, 12),
-    authorizedProjectRoots: normalizeContinuationProjectRoots(value.authorizedProjectRoots || value.authorized_project_roots)
+    authorizedProjectRoots: normalizeContinuationProjectRoots(value.authorizedProjectRoots || value.authorized_project_roots),
+    taskRunId: String(value.taskRunId || value.task_run_id || "").trim()
   };
   return Object.values(normalized).some((item) => Array.isArray(item) ? item.length : Boolean(item)) ? normalized : null;
 }
@@ -1629,7 +1776,8 @@ function buildAutomaticContinuationContext(previousSession) {
     authorizedProjectRoots: normalizeContinuationProjectRoots([
       ...(previousSession.authorizedProjectRoots || []),
       ...(inherited?.authorizedProjectRoots || [])
-    ])
+    ]),
+    taskRunId: String(previousSession.taskRun?.id || inherited?.taskRunId || "").trim()
   });
 }
 
@@ -1856,6 +2004,10 @@ function fallbackFinalDecision(session, consensus) {
   };
 }
 
+function contextOverflowReason(contextStatus = {}) {
+  return `non_compressible_core_exceeds_input_limit:${Number(contextStatus.nonCompressibleCoreTokens || 0)}/${Number(contextStatus.effectiveInputLimit || 0)}`;
+}
+
 function applyFinalizationFailure(session) {
   if (session.finalizationStatus?.status !== "failed") return;
   const reason = session.finalizationStatus.reason || "invalid_finalizer_response";
@@ -1872,6 +2024,7 @@ function applyFinalizationFailure(session) {
   if (session.finalDecision.final_state !== "failed_to_converge") session.finalDecision.final_state = "needs_revision";
   session.finalDecision.blocking_issues = mergeBlockingIssue(session.finalDecision.blocking_issues, issue);
   session.finalDecision.risks = mergeRiskTexts(session.finalDecision.risks, [issue], []);
+  session.finalDecision.answer = `The council could not complete: ${reason}. No valid final answer was produced.`;
 }
 
 function applyIncompleteExecutionState(session) {
@@ -1970,6 +2123,13 @@ function summarizeContextStatus(memberContext, options = {}) {
       keptCount: 0,
       droppedCount: 0,
       truncatedSnippets: 0
+    },
+    currentTurnEvidenceCompression: memberContext.currentTurnEvidenceCompression || {
+      applied: false,
+      originalCount: 0,
+      keptCount: 0,
+      omittedCount: 0,
+      shortenedCount: 0
     },
     executionEvidenceCompression: memberContext.executionEvidenceCompression || {
       applied: false,

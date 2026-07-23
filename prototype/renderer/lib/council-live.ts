@@ -95,6 +95,17 @@ export interface CouncilEvent {
   consensus?: unknown
   session?: CouncilSession
   finalDecision?: CouncilFinalDecision
+  taskRun?: {
+    id?: string
+    state?: string
+    blockReason?: string
+    updatedAt?: string
+    execution?: {
+      phase?: string
+      nextAction?: string
+      artifactStatus?: string
+    }
+  }
   result?: {
     session?: CouncilSession
   }
@@ -441,6 +452,15 @@ export interface CapabilityRecord {
     checkedAt?: string
     detail?: string
   }
+  lifecycle?: {
+    status?: string
+    source?: string
+    lastObservedAt?: string
+    lastSucceededAt?: string
+    lastError?: string
+    lastTool?: string
+    useCount?: number
+  }
 }
 
 export interface McpInstallCatalogItem {
@@ -626,8 +646,10 @@ export async function deleteCustomProvider(id: string) {
   return api<{ ok: boolean; id: string }>("/api/providers/delete", { id })
 }
 
-export async function fetchCapabilities() {
-  return api<{ capabilities: CapabilityRecord[]; toolAccess?: CapabilityAccess }>("/api/capabilities")
+export async function fetchCapabilities(groupPath?: string) {
+  const params = groupPath ? new URLSearchParams({ groupPath }) : undefined
+  const suffix = params ? `?${params}` : ""
+  return api<{ capabilities: CapabilityRecord[]; toolAccess?: CapabilityAccess }>(`/api/capabilities${suffix}`)
 }
 
 export async function fetchMcpServers() {

@@ -42,6 +42,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { hasMaterialWorkspaceChange, isObservationRequest, observationValueForConsumer } from "./observationCache.js";
 import { executeWorkspaceEdit } from "./workspaceEditTools.js";
+import { recordCapabilityToolResults } from "./capabilityFacts.js";
 
 const ALLOWED_TOOLS = new Set([
   "fetch_url",
@@ -295,6 +296,14 @@ export async function executeToolRequests(options = {}) {
     appendProcessAuditLog(options.groupPath, "completed", result);
   }
 
+  recordCapabilityToolResults({
+    groupPath: options.groupPath,
+    taskRun: options.currentSession?.taskRun,
+    agent: options.agent,
+    accepted,
+    rejected,
+    results
+  });
   return { accepted, rejected, results, events };
 }
 

@@ -166,7 +166,7 @@ export function SettingsSheet({
     try {
       const [providerResult, capabilityResult, catalogResult, serverResult, skillCatalogResult, skillsResult] = await Promise.all([
         fetchProviderPresets(),
-        fetchCapabilities(),
+        fetchCapabilities(groupPath),
         fetchMcpCatalog(),
         fetchMcpServers(),
         fetchSkillCatalog(),

@@ -236,6 +236,25 @@ test("assertion-bearing run_code results create a verification checkpoint withou
   assert.equal(state.lastAction, "verification_passed:inline-assertion");
 });
 
+test("explicit verification reasons make successful run_code a checkpoint without a private intent flag", () => {
+  const state = createExecutionState({ question: "Create and validate a source project.", agents, workspaceGroup });
+  const session = {
+    toolExecutionResults: [{
+      id: "reason-labeled-validation",
+      tool: "run_code",
+      reason: "Verify the generated document content.",
+      status: "completed",
+      result: { ok: true, exitCode: 0 }
+    }],
+    fileOperationExecutionResults: [],
+    groupSnapshot: { agents }
+  };
+
+  advanceExecutionState({ state, session, agent: agents[1], question: state.taskQuestion });
+  assert.equal(state.phase, "review");
+  assert.equal(state.lastAction, "verification_passed:reason-labeled-validation");
+});
+
 test("reviewer blocking evidence sends the same executor back to repair", () => {
   const state = createExecutionState({ question: "Create and test a source project.", agents, workspaceGroup });
   state.phase = "review";

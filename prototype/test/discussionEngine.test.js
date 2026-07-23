@@ -15,6 +15,7 @@ import { listPublicMemories, upsertPublicMemory } from "../src/publicMemory.js";
 import { readGroupSession, readMemoryPending, writeContextArchive, writeGroupSession } from "../src/storage.js";
 import { enableSkillForGroup, installSkillMarkdown } from "../src/skillPacks.js";
 import { writeTaskState } from "../src/taskState.js";
+import { createTaskRun, readTaskRun, readTaskRunEvents, syncTaskRunFromSession } from "../src/taskRuntime.js";
 
 
 test("running group sessions are saved before completion and refresh after each real message", async () => {
@@ -99,6 +100,53 @@ test("aborted runs persist an explicit interrupted session instead of staying ru
   assert.equal(saved.status, "interrupted");
   assert.equal(saved.interruptionReason, "stopped_by_user");
   assert.ok(saved.completedAt);
+});
+
+test("continuation restores the durable TaskRun checkpoint before older session caches", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-task-run-continuation-"));
+  const priorExecution = {
+    active: true,
+    executorId: "builder",
+    executorName: "Builder",
+    taskQuestion: "Create a real project file.",
+    phase: "repair",
+    nextAction: "Fix the recorded build failure.",
+    checkpointVersion: 3,
+    reviewedCheckpointVersion: 2,
+    artifactStatus: "needs_revision",
+    lastAction: "verification_failed:build",
+    lastError: "RECOVER_THIS_BUILD_ERROR",
+    checkpointEvidence: [{ id: "build-1", tool: "execute_command", status: "completed" }]
+  };
+  const priorRun = createTaskRun({
+    groupPath: tmp,
+    sessionId: "session-before-close",
+    question: priorExecution.taskQuestion,
+    session: { executionState: priorExecution }
+  });
+  syncTaskRunFromSession({
+    groupPath: tmp,
+    taskRun: priorRun,
+    session: { id: "session-before-close", status: "interrupted", interruptionReason: "client_closed", executionState: priorExecution }
+  });
+  const group = validateGroupConfig({
+    id: "task-run-continuation",
+    name: "TaskRun Continuation",
+    settings: { maxRounds: 1, minConsensusWeight: 1, stopWhenAllSkip: true, agentTimeoutMs: 1000, allowSoloCouncil: true },
+    agents: [{ id: "builder", name: "Builder", role: "Builder", provider: "mock", apiBaseUrl: "mock://local", model: "mock-builder", weight: 1, enabled: true }]
+  });
+
+  const { session } = await runCouncil("continue", group, tmp, {
+    groupPath: tmp,
+    continuationContext: { previousQuestion: priorExecution.taskQuestion, taskRunId: priorRun.id }
+  });
+
+  assert.equal(session.taskRun.id, priorRun.id);
+  assert.equal(session.executionState.resumed, true);
+  assert.equal(session.executionState.phase, "repair");
+  assert.equal(session.executionState.lastError, "RECOVER_THIS_BUILD_ERROR");
+  const resumed = readTaskRun(tmp, priorRun.id);
+  assert.equal(resumed.sessionIds.includes(session.id), true);
 });
 
 test("file delivery work stops after the configured real model-call budget without workspace progress", async () => {
@@ -2504,7 +2552,7 @@ test("group model call trace records prompt and output summaries without api key
     assert.deepEqual(persistedSession.contextReceipts, result.session.contextReceipts);
     assert.equal(result.session.contextReceipts.every((receipt) => receipt.schema === "ai-council.context-receipt.v1"), true);
     assert.ok(lines.some((line) => line.contextReceipt?.call?.sessionId === result.session.id));
-    assert.ok(lines.some((line) => line.event === "start" && `${line.input.head}${line.input.tail}`.includes("Trace this call.")));
+    assert.ok(lines.some((line) => line.event === "start" && `${line.input.question?.head}${line.input.question?.tail}`.includes("Trace this call.")));
     assert.ok(lines.some((line) => line.event === "complete" && `${line.output.head}${line.output.tail}`.includes("Traceable answer.")));
     assert.doesNotMatch(fs.readFileSync(traceFile, "utf8"), /secret-runtime-key/);
   } finally {
@@ -3580,7 +3628,7 @@ test("non-compressible core overflow marks an agent unavailable before API call"
       id: "core-overflow",
       name: "Core Overflow",
       settings: {
-        maxRounds: 1,
+        maxRounds: 100,
         minConsensusWeight: 0.75,
         stopWhenAllSkip: true,
         agentTimeoutMs: 1000,
@@ -3617,7 +3665,121 @@ test("non-compressible core overflow marks an agent unavailable before API call"
     assert.match(session.messages[0].response.reason, /non_compressible_core_exceeds_input_limit/);
     assert.equal(session.messages[0].contextStatus.coreOverflow, true);
     assert.equal(session.consensusByRound.at(-1).score, 0);
+    assert.equal(session.consensusByRound.length, 1);
+    assert.match(session.guardStopReason, /non_compressible_core_exceeds_input_limit/);
+    assert.equal(session.status, "guard_stopped");
+    assert.match(session.finalDecision.answer, /non_compressible_core_exceeds_input_limit/);
     assert.equal(requestCount, 0);
+  } finally {
+    await close(server);
+  }
+});
+
+test("large current-turn tool results are budgeted before the follow-up call", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-tool-context-overflow-"));
+  fs.writeFileSync(path.join(tmp, "group.json"), JSON.stringify({
+    permissions: { defaultTier: "full", seatTiers: { worker: "full" } }
+  }), "utf8");
+  let requestCount = 0;
+  const prompts = [];
+  const server = http.createServer(async (req, res) => {
+    requestCount += 1;
+    const body = JSON.parse(await readRequestBody(req));
+    const prompt = JSON.stringify(body.messages || []);
+    prompts.push(prompt);
+    if (prompt.includes("FinalDecision JSON object")) {
+      writeOpenAiStream(res, JSON.stringify({
+        answer: "The bounded command evidence was received and verified.",
+        consensus_score: 1,
+        supporting_agents: ["Worker"],
+        dissenting_agents: [],
+        minority_report: "",
+        risks: [],
+        next_actions: [],
+        selected_file_operation_ids: [],
+        memory_candidates: []
+      }));
+      return;
+    }
+    writeOpenAiStream(res, JSON.stringify(requestCount === 1
+      ? {
+        status: "speak",
+        argument: "Collecting a large real command result.",
+        tool_requests: [{
+          tool: "execute_command",
+          command: "node -e \"process.stdout.write('X'.repeat(12000))\"",
+          reason: "Produce evidence large enough to exercise follow-up context budgeting."
+        }],
+        objections: [],
+        memory_candidates: []
+      }
+      : {
+        status: "speak",
+        argument: "The bounded command result is available for synthesis.",
+        objections: [],
+        memory_candidates: []
+      }));
+  });
+  await listen(server);
+
+  try {
+    const group = validateGroupConfig({
+      id: "tool-context-overflow",
+      name: "Tool Context Overflow",
+      settings: {
+        maxRounds: 100,
+        minConsensusWeight: 1,
+        stopWhenAllSkip: true,
+        agentTimeoutMs: 3000,
+        maxToolOutputBytes: 20000,
+        allowSoloCouncil: true
+      },
+      agents: [{
+        id: "worker",
+        name: "Worker",
+        role: "Builder",
+        provider: "openai-compatible",
+        apiBaseUrl: `http://127.0.0.1:${server.address().port}/v1`,
+        allowUnsafePrivateNetwork: true,
+        apiKey: "secret-runtime-key",
+        model: "tool-context-overflow-model",
+        weight: 1,
+        enabled: true,
+        judge: true,
+        providerLimits: { contextWindow: 2300, maxOutputTokens: 300 },
+        tokenLimits: { maxInputTokensPerCall: 2000 }
+      }]
+    });
+
+    const events = [];
+    let session;
+    for await (const event of runCouncilEvents("Run one command and use its result.", group, tmp, { groupPath: tmp })) {
+      events.push(event);
+      if (event.session) session = event.session;
+      if (event.result?.session) session = event.result.session;
+    }
+
+    assert.equal(requestCount, 3);
+    assert.equal(session.modelCallCount, 3);
+    assert.equal(session.toolExecutionResults.length, 1);
+    assert.equal(String(session.toolExecutionResults[0].result?.stdout || "").length, 12000);
+    assert.equal(session.messages.length, 1);
+    assert.equal(session.messages[0].response.status, "speak");
+    assert.equal(session.messages[0].response.continuation_required, undefined);
+    assert.equal(session.consensusByRound.length, 1);
+    assert.equal(session.status, "completed");
+    assert.match(session.finalDecision.answer, /bounded command evidence/);
+
+    const followupPrompt = prompts[1] || "";
+    assert.match(followupPrompt, /Immediately preceding tool results|Current-turn tool evidence|execute_command/);
+    assert.ok(followupPrompt.length < 50000, "follow-up prompt must stay bounded");
+    assert.ok(!followupPrompt.includes("X".repeat(5000)), "raw 12k stdout must not be fully injected");
+    assert.match(followupPrompt, /X{16,}/);
+
+    const finalStart = events.find((event) => event.type === "final_start");
+    assert.ok(finalStart?.contextStatus?.executionEvidenceCompression?.originalCount >= 1);
+    assert.ok(finalStart.contextStatus.executionEvidenceCompression.keptCount >= 1);
+    assert.equal(finalStart.contextStatus.coreOverflow, false);
   } finally {
     await close(server);
   }
@@ -4576,6 +4738,11 @@ test("report delivery keeps one executor and recovers from a missing skill into 
     assert.equal(result.session.executionState.executorId, "executor");
     assert.equal(result.session.finalDecision.requested_artifact_verification.status, "verified");
     assert.equal(result.session.status, "completed");
+    const taskRun = readTaskRun(groupPath, result.session.taskRun.id);
+    assert.equal(taskRun.state, "completed");
+    assert.equal(taskRun.evidence.artifactVerification.status, "verified");
+    assert.equal(taskRun.evidence.verificationEvidenceIds.length > 0, true);
+    assert.equal(readTaskRunEvents(groupPath, taskRun.id).some((event) => event.type === "context_compiled"), true);
     assert.equal(roundAgents.includes("Designer"), false);
   } finally {
     await close(server);
