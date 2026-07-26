@@ -98,6 +98,21 @@ Completed on 2026-07-27:
   invalidation, duplicate-evidence, multi-member visibility and resumed
   `continue` receipt metrics. A persisted local run is at
   `eval/context-pressure/baseline-20260727-1785105953710/report.json`.
+* Explicit verification and execution requests now route to the durable
+  delivery owner in `a1c3f4e`, including Chinese and English verb forms. This
+  prevents a request to run, validate, or verify work from being stranded in
+  a discussion-only role.
+* Live tool-start events are persisted before command completion in
+  `e3b68f6`. A real HTTP/SSE observer can therefore disconnect while a tool is
+  actually running, explicitly stop the durable run, restart the server, and
+  continue from its checkpoint. The later generator pass skips the already
+  published start event, so reconnecting clients receive it exactly once.
+* Regression evidence after `e3b68f6`: the focused real-user HTTP/SSE suite
+  passed 17/17; the full suite passed 718 tests with 0 failures and 1
+  platform skip. `node ./src/cli.js harness-check` remains honestly
+  `incomplete`: T106 is 7/7 complete, while T105 and T117 await the configured
+  real-provider multi-task evidence window. The report is
+  `harness/reports/product-harness-2026-07-26T23-50-09-314Z.json`.
 
 Still open before the real-provider release gate:
 
