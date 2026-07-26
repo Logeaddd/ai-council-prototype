@@ -59,3 +59,28 @@ special-casing a PDF, Forge mod, or campaign fixture.
 * A Bing fallback response containing no useful target result is degraded, not
   successful search evidence.
 * A tiny file beginning `%PDF-` cannot verify an illustrated report request.
+
+## Progress record
+
+Completed on 2026-07-27:
+
+* Steps 1-6 are implemented in `712613f`, including the local API boundary,
+  durable run/SSE separation, real Electron drag/drop evidence, stronger
+  search and artifact verification, and focused UI repairs.
+* Step 7 now has provider-native continuous tool result turns and closed,
+  per-tool schemas in `2b91f01`. OpenAI-compatible and Anthropic payload
+  order is tested, as is the complete controller-to-tool-to-follow-up path.
+* Stream silence is treated as retryable, auditable provider failure in
+  `188532e`; this is an inactivity detector, not a tool, speech, or round
+  quota. It can be explicitly disabled with `streamIdleTimeoutMs: 0`.
+
+Still open before the real-provider release gate:
+
+* Calibrate token estimates and context limits from provider usage evidence.
+  The existing 16K fallback is not a verified provider limit and must not be
+  promoted to product truth.
+* Make delegation explicit beneath the durable delivery owner, then test
+  ownership transfer, review, and recovery across interruption.
+* Add PTY only where a real task proves it necessary; expand trusted unknown
+  tool acquisition and long-history pressure tests; then run the paid
+  real-provider campaign with its mechanical oracles.
