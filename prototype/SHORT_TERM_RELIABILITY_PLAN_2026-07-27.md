@@ -73,7 +73,7 @@ Completed on 2026-07-27:
 * Stream silence is treated as retryable, auditable provider failure in
   `188532e`; this is an inactivity detector, not a tool, speech, or round
   quota. It can be explicitly disabled with `streamIdleTimeoutMs: 0`.
-* Provider token calibration is implemented in the next commit: provider
+* Provider token calibration is implemented in `299e459`: provider
   usage is kept as a redacted count-only ledger per provider/model, and later
   prompt estimates use the most conservative observed input multiplier. The
   old unverified 16K fallback is removed. An unknown context window remains
@@ -81,14 +81,28 @@ Completed on 2026-07-27:
   evidence still gets a bounded result view. Usage counts do not prove a
   provider context-window size, so explicit provider/configured limits remain
   the only enforceable input limits.
+* Durable delivery ownership and checkpoint-review delegation are implemented
+  in `aacb5a6`. A replacement owner gets a recorded transfer rather than
+  silently inheriting work; every assigned reviewer must finish the current
+  checkpoint before that checkpoint can close. TaskRun emits a
+  `delivery_owner_transferred` event for recovery/audit.
+* Trusted managed-tool acquisition is implemented in `9f8ddd7`. Downloaded
+  artifacts use validated HTTPS or loopback-only test transport, each
+  redirect is revalidated, bytes are bounded while streamed to disk, optional
+  publisher SHA-256 values are verified, and a missing checksum remains a
+  durable `unverified` fact rather than a false trust claim. Safe archive
+  extraction and command verification remain mandatory before reuse.
+* Long-history pressure measurement is expanded in `061895e`. It builds a
+  140K-plus-character retained history through the real journal, index,
+  archive, hot-cache and context-builder paths, then records exact-anchor,
+  invalidation, duplicate-evidence, multi-member visibility and resumed
+  `continue` receipt metrics. A persisted local run is at
+  `eval/context-pressure/baseline-20260727-1785105953710/report.json`.
 
 Still open before the real-provider release gate:
 
-* Delivery ownership and checkpoint-review delegation are now explicit and
-  durable in the next commit. A replacement owner gets a recorded transfer
-  rather than silently inheriting work; every assigned reviewer must finish
-  the current checkpoint before that checkpoint can close. TaskRun emits a
-  `delivery_owner_transferred` event for recovery/audit.
-* Add PTY only where a real task proves it necessary; expand trusted unknown
-  tool acquisition and long-history pressure tests; then run the paid
-  real-provider campaign with its mechanical oracles.
+* Add PTY only where a real task proves interactive stdin is the blocker;
+  absence alone is not evidence for a parallel terminal system.
+* Run the paid real-provider campaign with its mechanical oracles, distinct
+  task families, and evidence window. Local tests and deterministic context
+  pressure reports do not satisfy this release gate.
