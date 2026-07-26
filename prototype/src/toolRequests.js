@@ -357,8 +357,18 @@ function isRepeatedFailedCommand(request, previousResults = []) {
     item?.tool === "execute_command"
     && item?.status === "failed"
     && commandSignature(item.command || item.result?.command) === signature
+    && !isRetryableCommandFailure(item)
     && !items.slice(index + 1).some(hasMaterialWorkspaceChange)
   ));
+}
+
+function isRetryableCommandFailure(item = {}) {
+  const code = String(item.code || item.result?.code || "").toLowerCase();
+  const details = [item.error, item.result?.error, item.result?.stderr]
+    .map((value) => String(value || "").toLowerCase())
+    .join("\n");
+  if (["command_timeout", "network_timeout", "network_error", "temporary_network_error"].includes(code)) return true;
+  return /\b(?:econnreset|econnrefused|etimedout|enotfound|eai_again|socket hang up|temporary failure|network is unreachable)\b/.test(details);
 }
 
 function isRepeatedFailedCapabilityRequest(request, previousResults = []) {

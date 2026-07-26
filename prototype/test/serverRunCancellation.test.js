@@ -7,6 +7,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 const root = path.resolve(".");
+const localApiToken = "test-local-api-token-0123456789abcdef";
 
 test("HTTP stop aborts the active backend council and persists interruption", async () => {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-server-stop-"));
@@ -26,7 +27,8 @@ test("HTTP stop aborts the active backend council and persists interruption", as
       ...process.env,
       AI_COUNCIL_DATA_DIR: dataDir,
       AI_COUNCIL_UI_PORT: String(port),
-      AI_COUNCIL_UI_HOST: "127.0.0.1"
+      AI_COUNCIL_UI_HOST: "127.0.0.1",
+      AI_COUNCIL_LOCAL_API_TOKEN: localApiToken
     },
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true
@@ -39,7 +41,7 @@ test("HTTP stop aborts the active backend council and persists interruption", as
     await waitForServer(port, child, () => output);
     const response = await fetch(`http://127.0.0.1:${port}/api/council/events`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "X-AI-Council-Token": localApiToken },
       body: JSON.stringify({
         question: "Build a real file.",
         workspaceGroupPath: groupPath,
@@ -106,7 +108,7 @@ async function waitForServer(port, child, output) {
 async function requestJson(port, pathname, body) {
   const response = await fetch(`http://127.0.0.1:${port}${pathname}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", "X-AI-Council-Token": localApiToken },
     body: JSON.stringify(body)
   });
   return { status: response.status, body: await response.json() };

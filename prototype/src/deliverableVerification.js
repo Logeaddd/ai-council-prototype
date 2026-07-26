@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { isInsidePath, normalizeWorkspacePathAlias, resolveInside } from "./pathGuards.js";
 import { nowIso } from "./types.js";
-import { inspectZipArchive } from "./archiveTools.js";
+import { inspectZipArchive, readZipArchiveEntries } from "./archiveTools.js";
 
 const MUTATING_TOOL_NAMES = new Set([
   "execute_command",
@@ -35,6 +35,7 @@ const DELIVERABLE_EXTENSION_PATTERN = [...DELIVERABLE_EXTENSIONS]
   .sort((a, b) => b.length - a.length)
   .join("|");
 const EVIDENCE_TIME_TOLERANCE_MS = 5000;
+const MAX_PDF_INSPECTION_BYTES = 64 * 1024 * 1024;
 
 export function normalizeDeliverableClaims(value) {
   if (!Array.isArray(value)) return [];
@@ -132,17 +133,49 @@ export function enforceRequestedArtifactRequirements(options = {}) {
 }
 
 export function verifyRequestedArtifactProgress(options = {}) {
-  const requested = requestedArtifactExtensions(options.question);
+  const requested = requestedArtifactRequirements(options.question, options.session);
   if (!requested.length) return { status: "not_requested", source: "explicit_user_artifact_requirement", verifiedAt: nowIso(), requirements: [] };
   const groupPath = path.resolve(options.groupPath || "");
   const evidence = collectSessionEvidence(options.session || {});
-  const requirements = requested.map((extension) => verifyRequestedArtifact(extension, groupPath, evidence, authorizedProjectRoots(options.session)));
+  const requirements = requested.map((requirement) => verifyRequestedArtifact(requirement, groupPath, evidence, authorizedProjectRoots(options.session)));
   return {
     status: requirements.every((item) => item.status === "verified") ? "verified" : "needs_revision",
     source: "explicit_user_artifact_requirement",
     verifiedAt: nowIso(),
     requirements
   };
+}
+
+export function normalizeRequestedArtifactRequirements(value) {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set();
+  const requirements = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const extension = normalizeArtifactExtension(item.extension || path.extname(String(item.path || item.file || "")));
+    if (!extension || !DELIVERABLE_EXTENSIONS.has(extension)) continue;
+    const key = `${extension}:${Boolean(item.requiresImages)}:${Math.max(0, Number(item.minimumPages || 0))}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    requirements.push({
+      extension,
+      source: "task_contract",
+      requiresImages: Boolean(item.requiresImages),
+      minimumPages: Math.max(0, Math.floor(Number(item.minimumPages || 0)))
+    });
+  }
+  return requirements.slice(0, 20);
+}
+
+function requestedArtifactRequirements(question, session = {}) {
+  const contractRequirements = normalizeRequestedArtifactRequirements(session?.taskContract?.artifacts);
+  if (contractRequirements.length) return contractRequirements;
+  return requestedArtifactExtensions(question).map((extension) => ({
+    extension,
+    source: "legacy_question_inference",
+    requiresImages: extension === ".pdf" && requestRequiresIllustrations(question),
+    minimumPages: 0
+  }));
 }
 
 function requestedArtifactExtensions(question) {
@@ -171,7 +204,18 @@ function requestedArtifactExtensions(question) {
   return [...new Set(requested)];
 }
 
-function verifyRequestedArtifact(extension, groupPath, evidence, projectRoots = []) {
+function normalizeArtifactExtension(value) {
+  const extension = String(value || "").trim().toLowerCase();
+  return extension.startsWith(".") ? extension : extension ? `.${extension}` : "";
+}
+
+function requestRequiresIllustrations(question) {
+  const text = String(question || "");
+  return /\b(?:illustrated|with\s+images?|include\s+images?|image-rich)\b|\u56fe\u6587|\u914d\u56fe|\u56fe\u7247/i.test(text);
+}
+
+function verifyRequestedArtifact(requirement, groupPath, evidence, projectRoots = []) {
+  const extension = requirement.extension;
   const candidates = evidence
     .filter((item) => item.kind === "tool")
     .flatMap((item) => workspaceArtifactPaths(item.item, projectRoots).map((relativePath) => ({ relativePath, evidenceId: item.id })))
@@ -185,18 +229,22 @@ function verifyRequestedArtifact(extension, groupPath, evidence, projectRoots = 
       continue;
     }
     if (!fs.existsSync(absolutePath) || !fs.statSync(absolutePath).isFile() || fs.statSync(absolutePath).size <= 0) continue;
-    if (!validArtifactFormat(extension, absolutePath)) continue;
+    const validation = inspectArtifactFormat(extension, absolutePath, requirement);
+    if (!validation.ok) continue;
     return {
       extension,
+      requirement_source: requirement.source,
       status: "verified",
       path: candidate.relativePath,
-      evidence_id: candidate.evidenceId
+      evidence_id: candidate.evidenceId,
+      format: validation.format
     };
   }
   return {
     extension,
+    requirement_source: requirement.source,
     status: "missing_or_invalid",
-    reason: `No valid ${extension} artifact was produced and observed by a successful command in this run.`
+    reason: `No valid ${extension} artifact satisfying its structural requirements was produced and observed by a successful command in this run.`
   };
 }
 
@@ -215,32 +263,99 @@ function normalizeAuthorizedArtifactPath(value, projectRoots = []) {
   return raw;
 }
 
-function validArtifactFormat(extension, absolutePath) {
+function inspectArtifactFormat(extension, absolutePath, requirement = {}) {
   try {
     if (extension === ".jar") {
-      const names = inspectZipArchive(absolutePath).entries.map((entry) => entry.name.toLowerCase());
-      return names.includes("meta-inf/manifest.mf") && names.some((name) => name.endsWith(".class"));
+      const entries = archiveEntriesByName(absolutePath);
+      const manifest = entries.get("meta-inf/manifest.mf");
+      const classEntry = [...entries.entries()].find(([name, content]) => name.endsWith(".class") && content.length > 0);
+      return formatResult(Boolean(manifest && /(?:^|\r?\n)manifest-version\s*:/i.test(manifest.toString("utf8")) && classEntry), "jar", {
+        entryCount: entries.size,
+        hasManifest: Boolean(manifest),
+        classCount: [...entries.keys()].filter((name) => name.endsWith(".class")).length
+      });
     }
     if ([".docx", ".xlsx", ".pptx"].includes(extension)) {
-      const names = inspectZipArchive(absolutePath).entries.map((entry) => entry.name.toLowerCase());
+      const entries = archiveEntriesByName(absolutePath);
       const required = extension === ".docx" ? "word/document.xml" : extension === ".xlsx" ? "xl/workbook.xml" : "ppt/presentation.xml";
-      return names.includes("[content_types].xml") && names.includes(required);
+      const document = entries.get(required);
+      const expectedElement = extension === ".docx" ? /<(?:\w+:)?document\b/i : extension === ".xlsx" ? /<(?:\w+:)?workbook\b/i : /<(?:\w+:)?presentation\b/i;
+      return formatResult(Boolean(entries.get("[content_types].xml") && document && expectedElement.test(document.toString("utf8"))), extension.slice(1), {
+        entryCount: entries.size,
+        requiredPart: required
+      });
     }
+    if (extension === ".zip" || extension === ".whl") {
+      const entries = archiveEntriesByName(absolutePath);
+      return formatResult(entries.size > 0, extension.slice(1), { entryCount: entries.size });
+    }
+    if (extension === ".pdf") return inspectPdfDocument(absolutePath, requirement);
     const head = readHead(absolutePath, 16);
-    if (extension === ".pdf") return head.toString("ascii", 0, 5) === "%PDF-";
-    if (extension === ".png") return head.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
-    if ([".jpg", ".jpeg"].includes(extension)) return head[0] === 0xff && head[1] === 0xd8;
-    if (extension === ".gif") return ["GIF87a", "GIF89a"].includes(head.toString("ascii", 0, 6));
-    if (extension === ".webp") return head.toString("ascii", 0, 4) === "RIFF" && head.toString("ascii", 8, 12) === "WEBP";
+    if (extension === ".png") return formatResult(head.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])), "png");
+    if ([".jpg", ".jpeg"].includes(extension)) return formatResult(head[0] === 0xff && head[1] === 0xd8, "jpeg");
+    if (extension === ".gif") return formatResult(["GIF87a", "GIF89a"].includes(head.toString("ascii", 0, 6)), "gif");
+    if (extension === ".webp") return formatResult(head.toString("ascii", 0, 4) === "RIFF" && head.toString("ascii", 8, 12) === "WEBP", "webp");
     if ([".json", ".jsonl"].includes(extension)) {
       const content = fs.readFileSync(absolutePath, "utf8");
       if (extension === ".json") JSON.parse(content);
-      else content.split(/\r?\n/).filter(Boolean).forEach((line) => JSON.parse(line));
+      else {
+        const lines = content.split(/\r?\n/).filter(Boolean);
+        if (!lines.length) throw new Error("JSONL is empty");
+        lines.forEach((line) => JSON.parse(line));
+      }
     }
-    return true;
+    return formatResult(true, extension.slice(1));
   } catch {
-    return false;
+    return formatResult(false, extension.slice(1));
   }
+}
+
+function archiveEntriesByName(absolutePath) {
+  inspectZipArchive(absolutePath);
+  return new Map(readZipArchiveEntries(absolutePath)
+    .map((entry) => [String(entry.name || "").toLowerCase(), entry.content]));
+}
+
+function inspectPdfDocument(absolutePath, requirement = {}) {
+  try {
+    const size = fs.statSync(absolutePath).size;
+    if (size > MAX_PDF_INSPECTION_BYTES) return formatResult(false, "pdf", { error: "pdf_too_large_to_inspect" });
+    const buffer = fs.readFileSync(absolutePath);
+    const text = buffer.toString("latin1");
+    const header = /^%PDF-1\.[0-9]/.test(text);
+    const eof = text.lastIndexOf("%%EOF");
+    const startXref = [...text.matchAll(/startxref\s+(\d+)/g)].at(-1);
+    const xrefOffset = Number(startXref?.[1]);
+    const validXrefOffset = Number.isInteger(xrefOffset) && xrefOffset > 0 && xrefOffset < buffer.length
+      && (/^xref(?:\r?\n|\s)/.test(text.slice(xrefOffset, xrefOffset + 16)) || /^\d+\s+\d+\s+obj\b/.test(text.slice(xrefOffset, xrefOffset + 32)));
+    const objects = [...text.matchAll(/(?:^|\s)(\d+\s+\d+)\s+obj\b([\s\S]*?)endobj/g)];
+    const objectCount = objects.length;
+    const pageCount = (text.match(/\/Type\s*\/Page\b/g) || []).length;
+    const imageObjectReferences = objects
+      .filter((item) => /\/Subtype\s*\/Image\b/.test(item[2]))
+      .map((item) => `${item[1]} R`);
+    const imageCount = imageObjectReferences.length;
+    const referencedImageCount = imageObjectReferences.filter((reference) => new RegExp(`/XObject\\s*<<[\\s\\S]{0,4096}?${reference.replace(/\\s/g, "\\\\s+")}`).test(text)).length;
+    const hasDocumentStructure = /\/Type\s*\/Catalog\b/.test(text) && /\/Type\s*\/Pages\b/.test(text) && pageCount > 0;
+    const baseValid = header && eof >= Math.max(0, text.length - 2048) && validXrefOffset && objectCount >= 3 && hasDocumentStructure;
+    const pagesValid = !requirement.minimumPages || pageCount >= requirement.minimumPages;
+    const imagesValid = !requirement.requiresImages || referencedImageCount > 0;
+    return formatResult(baseValid && pagesValid && imagesValid, "pdf", {
+      bytes: size,
+      objectCount,
+      pageCount,
+      imageCount,
+      referencedImageCount,
+      requiresImages: Boolean(requirement.requiresImages),
+      minimumPages: Number(requirement.minimumPages || 0)
+    });
+  } catch {
+    return formatResult(false, "pdf");
+  }
+}
+
+function formatResult(ok, format, details = {}) {
+  return { ok, format: { type: format, ...details } };
 }
 
 function readHead(filePath, bytes) {

@@ -233,8 +233,8 @@ test("web search can use a configured built-in HTML search endpoint", async () =
     return new Response(`
       <html><body>
         <li class="b_algo">
-          <h2><a href="https://example.com/custom-search">Custom Search</a></h2>
-          <p>Configured built-in endpoint result.</p>
+          <h2><a href="https://example.com/custom-search">Custom AI Council Search</a></h2>
+          <p>Configured AI council endpoint result.</p>
         </li>
       </body></html>
     `, {
@@ -249,7 +249,7 @@ test("web search can use a configured built-in HTML search endpoint", async () =
 
     assert.equal(result.ok, true);
     assert.equal(result.source, "public_html");
-    assert.equal(result.results[0].title, "Custom Search");
+    assert.equal(result.results[0].title, "Custom AI Council Search");
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -271,6 +271,90 @@ test("web search reports built-in search failure honestly", async () => {
   }
 });
 
+test("web search degrades an empty HTML result page instead of treating HTTP 200 as usable evidence", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response("<html><body>No matching results.</body></html>", {
+    status: 200,
+    headers: { "Content-Type": "text/html" }
+  });
+  try {
+    const result = await searchWeb("minecraft rabbit mod", { env: {} });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.code, "search_no_results");
+    assert.equal(result.health.status, "degraded");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("web search degrades challenge and consent pages", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => new Response("<html><body>Verify that you are human to continue.</body></html>", {
+      status: 200,
+      headers: { "Content-Type": "text/html" }
+    });
+    const challenge = await searchWeb("minecraft rabbit mod", { env: {} });
+    assert.equal(challenge.ok, false);
+    assert.equal(challenge.code, "search_challenge_required");
+
+    globalThis.fetch = async () => new Response("<html><body>Before you continue to Bing, accept cookie consent.</body></html>", {
+      status: 200,
+      headers: { "Content-Type": "text/html" }
+    });
+    const consent = await searchWeb("minecraft rabbit mod", { env: {} });
+    assert.equal(consent.ok, false);
+    assert.equal(consent.code, "search_consent_required");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("web search degrades site-constrained results that never reach the requested site", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(`
+    <html><body>
+      <li class="b_algo"><h2><a href="https://www.minecraft.net/en-us">Minecraft Official</a></h2><p>Minecraft game information and downloads.</p></li>
+      <li class="b_algo"><h2><a href="https://minecraft.wiki">Minecraft Wiki</a></h2><p>General Minecraft encyclopedia.</p></li>
+    </body></html>
+  `, {
+    status: 200,
+    headers: { "Content-Type": "text/html" }
+  });
+  try {
+    const result = await searchWeb("site:curseforge.com minecraft rabbit bunny mod", { env: {} });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.code, "search_site_constraint_unmet");
+    assert.equal(result.health.expectedDomain, "curseforge.com");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("web search preserves relevant multi-term results and records deterministic health evidence", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(`
+    <html><body>
+      <li class="b_algo"><h2><a href="https://www.curseforge.com/minecraft/mc-mods/rabbits">Minecraft Rabbit Mod</a></h2><p>A bunny mod that adds rabbit pets for Minecraft.</p></li>
+    </body></html>
+  `, {
+    status: 200,
+    headers: { "Content-Type": "text/html" }
+  });
+  try {
+    const result = await searchWeb("site:curseforge.com minecraft rabbit bunny mod", { env: {} });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.health.status, "healthy");
+    assert.equal(result.health.domainMatches, 1);
+    assert.equal(result.health.relevantResults, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("web search can use an explicit key without leaking it in the result", async () => {
   const originalFetch = globalThis.fetch;
   let receivedToken = "";
@@ -280,9 +364,9 @@ test("web search can use an explicit key without leaking it in the result", asyn
       web: {
         results: [
           {
-            title: "Real result",
+            title: "AI Council result",
             url: "https://example.com/real",
-            description: "A real response fixture"
+            description: "A real AI council response fixture"
           }
         ]
       }
@@ -297,7 +381,7 @@ test("web search can use an explicit key without leaking it in the result", asyn
     assert.equal(receivedToken, "brave-live-secret");
     assert.equal(result.ok, true);
     assert.equal(result.source, "real_response");
-    assert.equal(result.results[0].title, "Real result");
+    assert.equal(result.results[0].title, "AI Council result");
     assert.equal(JSON.stringify(result).includes("brave-live-secret"), false);
   } finally {
     globalThis.fetch = originalFetch;

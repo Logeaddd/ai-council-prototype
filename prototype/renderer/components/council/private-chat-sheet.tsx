@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { Lock, Send } from "lucide-react"
 import type { AgentMember } from "@/lib/council-data"
 import { api, type WorkspaceGroup } from "@/lib/council-live"
@@ -33,16 +33,28 @@ export function PrivateChatSheet({
   const [seatId, setSeatId] = useState("")
   const [messages, setMessages] = useState<PrivateMessage[]>([])
   const [value, setValue] = useState("")
+  const [loadedDraftKey, setLoadedDraftKey] = useState("")
   const [loading, setLoading] = useState(false)
   const [sending, setSending] = useState(false)
   const [error, setError] = useState("")
 
   const targetId = members.some((member) => member.id === seatId) ? seatId : members[0]?.id || ""
   const draftKey = `${DRAFT_PREFIX}${groupPath}:${targetId}`
+  const activeTargetId = useRef(targetId)
 
   useEffect(() => {
-    if (!open || !groupPath || !targetId) return
+    activeTargetId.current = targetId
+  }, [targetId])
+
+  useEffect(() => {
+    if (!open || !groupPath || !targetId) {
+      setLoadedDraftKey("")
+      return
+    }
     let cancelled = false
+    setLoadedDraftKey("")
+    setValue(readPrivateDraft(draftKey))
+    setLoadedDraftKey(draftKey)
     async function load() {
       setLoading(true)
       setError("")
@@ -55,33 +67,21 @@ export function PrivateChatSheet({
         if (!cancelled) setLoading(false)
       }
     }
-    const frame = window.requestAnimationFrame(() => {
-      try {
-        setValue(window.localStorage.getItem(draftKey) || "")
-      } catch {
-        setValue("")
-      }
-    })
     void load()
     return () => {
       cancelled = true
-      window.cancelAnimationFrame(frame)
     }
   }, [open, groupPath, targetId, draftKey])
 
   useEffect(() => {
-    if (!open || !draftKey) return
-    try {
-      if (value.trim()) window.localStorage.setItem(draftKey, value)
-      else window.localStorage.removeItem(draftKey)
-    } catch {
-      // Private drafts are a local convenience only.
-    }
-  }, [open, draftKey, value])
+    if (!open || !draftKey || loadedDraftKey !== draftKey) return
+    persistPrivateDraft(draftKey, value)
+  }, [open, draftKey, loadedDraftKey, value])
 
   async function send() {
     const text = value.trim()
     if (!text || !groupPath || !targetId || !runtimeGroup || sending) return
+    const sentTo = targetId
     setSending(true)
     setError("")
     try {
@@ -92,8 +92,8 @@ export function PrivateChatSheet({
         text,
         runtimeGroup,
       })
-      const result = await api<{ messages?: PrivateMessage[] }>(`/api/private-chat?groupPath=${encodeURIComponent(groupPath)}&seatId=${encodeURIComponent(targetId)}`)
-      setMessages((result.messages || []).slice().reverse())
+      const result = await api<{ messages?: PrivateMessage[] }>(`/api/private-chat?groupPath=${encodeURIComponent(groupPath)}&seatId=${encodeURIComponent(sentTo)}`)
+      if (activeTargetId.current === sentTo) setMessages((result.messages || []).slice().reverse())
     } catch (cause) {
       setError(errorMessage(cause))
     } finally {
@@ -109,7 +109,11 @@ export function PrivateChatSheet({
         <div className="flex min-h-[32rem] flex-col gap-3">
           <select
             value={targetId}
-            onChange={(event) => setSeatId(event.target.value)}
+            onChange={(event) => {
+              persistPrivateDraft(draftKey, value)
+              activeTargetId.current = event.target.value
+              setSeatId(event.target.value)
+            }}
             className="h-9 rounded-md border border-border bg-background px-2.5 text-sm text-foreground focus:border-ring focus:outline-none"
           >
             {members.map((member) => <option key={member.id} value={member.id}>{member.name} · {member.model}</option>)}
@@ -161,4 +165,21 @@ function formatTime(value: string) {
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error)
+}
+
+function readPrivateDraft(key: string) {
+  try {
+    return window.localStorage.getItem(key) || ""
+  } catch {
+    return ""
+  }
+}
+
+function persistPrivateDraft(key: string, value: string) {
+  try {
+    if (value.trim()) window.localStorage.setItem(key, value)
+    else window.localStorage.removeItem(key)
+  } catch {
+    // Private drafts are a local convenience only.
+  }
 }

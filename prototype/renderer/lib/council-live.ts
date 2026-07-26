@@ -75,6 +75,8 @@ export interface WorkspaceGroup {
 
 export interface CouncilEvent {
   type: string
+  runId?: string
+  eventSequence?: number
   round?: number
   agentId?: string
   agentName?: string
@@ -189,10 +191,10 @@ interface RawBlocker {
 
 export async function api<T>(path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
   const response = await fetch(path, body === undefined
-    ? { signal }
+    ? { signal, headers: localApiHeaders() }
     : {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: localApiHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify(body),
         signal,
       })
@@ -208,38 +210,89 @@ export async function streamCouncilEvents(
   onEvent: (event: CouncilEvent) => void,
   signal?: AbortSignal,
 ) {
-  const response = await fetch("/api/council/events", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
+  const start = await api<{ id?: string }>("/api/council/runs", body, signal)
+  const runId = String(start.id || "")
+  const groupPath = String((body as { workspaceGroupPath?: unknown })?.workspaceGroupPath || "")
+  if (!runId || !groupPath) throw new Error("讨论启动后没有返回可观察的任务运行记录")
+
+  let after = 0
+  let reconnects = 0
+  while (!signal?.aborted) {
+    try {
+      after = await observeCouncilRun(runId, groupPath, after, onEvent, signal)
+      return
+    } catch (error) {
+      if ((error as Error).name === "AbortError" || signal?.aborted) throw error
+      reconnects += 1
+      if (reconnects > 5) {
+        throw new Error(`任务仍在后台运行，但事件观察重连失败：${errorMessage(error)}`)
+      }
+      await waitForObserverReconnect(reconnects, signal)
+    }
+  }
+}
+
+async function observeCouncilRun(
+  runId: string,
+  groupPath: string,
+  after: number,
+  onEvent: (event: CouncilEvent) => void,
+  signal?: AbortSignal,
+) {
+  const params = new URLSearchParams({ groupPath, after: String(after) })
+  const response = await fetch(`/api/council/runs/${encodeURIComponent(runId)}/events?${params.toString()}`, {
+    headers: localApiHeaders(),
     signal,
   })
   if (!response.ok) {
     const data = await response.json().catch(() => ({}))
-    throw new Error(String((data as { error?: string }).error || "讨论启动失败"))
+    throw new Error(String((data as { error?: string }).error || "无法恢复任务事件流"))
   }
   if (!response.body) throw new Error("浏览器不支持流式读取")
 
   const reader = response.body.getReader()
   const decoder = new TextDecoder()
   let buffer = ""
+  let cursor = after
 
+  const consume = (chunk: string) => {
+    const event = parseSseChunk(chunk)
+    if (!event) return
+    cursor = Math.max(cursor, Number(event.eventSequence || 0))
+    onEvent(event)
+  }
   while (true) {
     const { value, done } = await reader.read()
     if (done) break
     buffer += decoder.decode(value, { stream: true })
     const chunks = buffer.split("\n\n")
     buffer = chunks.pop() || ""
-    for (const chunk of chunks) {
-      const event = parseSseChunk(chunk)
-      if (event) onEvent(event)
-    }
+    for (const chunk of chunks) consume(chunk)
   }
+  if (buffer.trim()) consume(buffer)
+  return cursor
+}
 
-  if (buffer.trim()) {
-    const event = parseSseChunk(buffer)
-    if (event) onEvent(event)
-  }
+function waitForObserverReconnect(attempt: number, signal?: AbortSignal) {
+  const delay = Math.min(2000, 200 * (2 ** Math.max(0, attempt - 1)))
+  return new Promise<void>((resolve, reject) => {
+    const timer = window.setTimeout(resolve, delay)
+    signal?.addEventListener("abort", () => {
+      window.clearTimeout(timer)
+      reject(signal.reason || new DOMException("Aborted", "AbortError"))
+    }, { once: true })
+  })
+}
+
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error)
+}
+
+function localApiHeaders(headers: Record<string, string> = {}) {
+  const token = typeof document === "undefined"
+    ? ""
+    : document.querySelector('meta[name="ai-council-local-api-token"]')?.getAttribute("content") || ""
+  return token ? { ...headers, "X-AI-Council-Token": token } : headers
 }
 
 export function groupRecordToUiGroup(record: GroupIndexRecord): Group & { path: string } {

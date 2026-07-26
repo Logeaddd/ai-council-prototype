@@ -70,7 +70,7 @@ test("requested artifact verification recognizes source data document and spread
   const files = {
     "output/result.json": Buffer.from('{"ok":true}', "utf8"),
     "output/tool.py": Buffer.from("print('ok')\n", "utf8"),
-    "output/report.pdf": Buffer.from("%PDF-1.7\nminimal", "ascii"),
+    "output/report.pdf": makeMinimalPdf(),
     "output/report.docx": makeStoredZip([
       { name: "[Content_Types].xml", content: "<Types/>" },
       { name: "word/document.xml", content: "<document/>" }
@@ -126,6 +126,50 @@ test("requested artifact verification rejects malformed structured artifacts", (
   assert.equal(report.requirements[0].status, "missing_or_invalid");
 });
 
+test("requested artifact verification rejects a PDF header stub that cannot describe a PDF document", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-required-pdf-stub-"));
+  fs.writeFileSync(path.join(root, "report.pdf"), "%PDF-1.7\nnot a document\n", "ascii");
+  const session = {
+    finalDecision: { answer: "Created report.pdf.", final_state: "ready_to_execute", blocking_issues: [], risks: [] },
+    toolExecutionResults: [{
+      id: "pdf-stub",
+      tool: "workspace_edit",
+      status: "completed",
+      result: { ok: true, workspaceChanges: { created: [{ path: "report.pdf" }] } }
+    }],
+    fileOperationExecutionResults: []
+  };
+
+  const report = enforceRequestedArtifactRequirements({ groupPath: root, question: "Create an illustrated PDF report.", session });
+
+  assert.equal(report.status, "needs_revision");
+  assert.equal(report.requirements[0].status, "missing_or_invalid");
+});
+
+test("structured PDF requirements enforce images without relying on the model's completion claim", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-required-pdf-images-"));
+  fs.writeFileSync(path.join(root, "report.pdf"), makeMinimalPdf());
+  const session = {
+    taskContract: { artifacts: [{ extension: ".pdf", requiresImages: true, minimumPages: 1 }] },
+    finalDecision: { answer: "Created an illustrated report.pdf.", final_state: "ready_to_execute", blocking_issues: [], risks: [] },
+    toolExecutionResults: [{
+      id: "text-only-pdf",
+      tool: "workspace_edit",
+      status: "completed",
+      result: { ok: true, workspaceChanges: { created: [{ path: "report.pdf" }] } }
+    }],
+    fileOperationExecutionResults: []
+  };
+
+  const rejected = enforceRequestedArtifactRequirements({ groupPath: root, question: "Create report.pdf.", session });
+  assert.equal(rejected.status, "needs_revision");
+
+  fs.writeFileSync(path.join(root, "report.pdf"), makeMinimalPdf({ includeImage: true }));
+  const accepted = enforceRequestedArtifactRequirements({ groupPath: root, question: "Create report.pdf.", session });
+  assert.equal(accepted.status, "verified");
+  assert.equal(accepted.requirements[0].format.imageCount, 1);
+});
+
 test("requested artifact verification accepts output in a retained user-authorized project root", () => {
   const groupPath = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-required-group-"));
   const project = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-required-project-"));
@@ -152,7 +196,7 @@ test("requested artifact verification accepts a current-run artifact in an autho
   const groupPath = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-required-output-group-"));
   const project = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-required-output-project-"));
   const pdfPath = path.join(project, "report.pdf");
-  fs.writeFileSync(pdfPath, "%PDF-1.7\nexternal report", "ascii");
+  fs.writeFileSync(pdfPath, makeMinimalPdf());
   const session = {
     authorizedProjectRoots: [project],
     finalDecision: { answer: "Created the requested PDF.", final_state: "ready_to_execute", blocking_issues: [], risks: [] },
@@ -183,7 +227,7 @@ test("requested artifact verification does not accept an old artifact from an au
   const groupPath = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-old-output-group-"));
   const project = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-old-output-project-"));
   const pdfPath = path.join(project, "old-report.pdf");
-  fs.writeFileSync(pdfPath, "%PDF-1.7\nold report", "ascii");
+  fs.writeFileSync(pdfPath, makeMinimalPdf());
   const old = new Date(Date.now() - 60 * 60_000);
   fs.utimesSync(pdfPath, old, old);
   const session = {
@@ -472,7 +516,7 @@ test("final deliverable claims accept absolute paths inside retained user-author
   const groupPath = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-final-external-group-"));
   const project = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-final-external-project-"));
   const pdfPath = path.join(project, "report.pdf");
-  fs.writeFileSync(pdfPath, "%PDF-1.7\nexternal report", "ascii");
+  fs.writeFileSync(pdfPath, makeMinimalPdf());
   const report = verifyFinalDeliverables({
     groupPath,
     session: {
@@ -509,7 +553,7 @@ test("final deliverable claims reject absolute paths outside retained user-autho
   const allowed = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-final-external-allowed-"));
   const outside = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-final-external-outside-"));
   const pdfPath = path.join(outside, "report.pdf");
-  fs.writeFileSync(pdfPath, "%PDF-1.7\noutside report", "ascii");
+  fs.writeFileSync(pdfPath, makeMinimalPdf());
   const report = verifyFinalDeliverables({
     groupPath,
     session: {
@@ -664,4 +708,31 @@ function makeStoredZip(entries) {
   eocd.writeUInt32LE(centralDir.length, 12);
   eocd.writeUInt32LE(offset, 16);
   return Buffer.concat([...localParts, centralDir, eocd]);
+}
+
+function makeMinimalPdf(options = {}) {
+  const objects = [
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    `<< /Type /Pages /Kids [${[...Array(Math.max(1, Number(options.pages || 1)))].map((_, index) => `${3 + index * 2} 0 R`).join(" ")}] /Count ${Math.max(1, Number(options.pages || 1))} >>`
+  ];
+  const pageCount = Math.max(1, Number(options.pages || 1));
+  for (let index = 0; index < pageCount; index += 1) {
+    const pageNumber = 3 + index * 2;
+    const contentNumber = pageNumber + 1;
+    const imageResource = options.includeImage ? " /Resources << /XObject << /Im1 5 0 R >> >>" : "";
+    objects.push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents ${contentNumber} 0 R${imageResource} >>`);
+    objects.push("<< /Length 0 >>\nstream\n\nendstream");
+  }
+  if (options.includeImage) objects.push("<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Length 3 >>\nstream\n\x00\x00\x00\nendstream");
+
+  const chunks = [Buffer.from("%PDF-1.4\n", "ascii")];
+  const offsets = [0];
+  for (const [index, object] of objects.entries()) {
+    offsets.push(Buffer.concat(chunks).length);
+    chunks.push(Buffer.from(`${index + 1} 0 obj\n${object}\nendobj\n`, "latin1"));
+  }
+  const xrefOffset = Buffer.concat(chunks).length;
+  const xref = ["xref", `0 ${objects.length + 1}`, "0000000000 65535 f ", ...offsets.slice(1).map((offset) => `${String(offset).padStart(10, "0")} 00000 n `)].join("\n");
+  chunks.push(Buffer.from(`${xref}\ntrailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF\n`, "ascii"));
+  return Buffer.concat(chunks);
 }

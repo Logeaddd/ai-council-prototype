@@ -2,7 +2,7 @@ import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
 import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { once } from "node:events";
 import zlib from "node:zlib";
@@ -47,6 +47,7 @@ export async function runSeededRealUserBaseline(options = {}) {
     });
     firstRun = await postCouncilEvents({
       port: server.port,
+      localApiToken: server.localApiToken,
       group,
       groupPath,
       question: scenario.initialQuestion,
@@ -57,7 +58,10 @@ export async function runSeededRealUserBaseline(options = {}) {
     });
     if (!firstRun.aborted) throw harnessFailure("initial_run_did_not_reach_action", "The initial task ended before any material action was observed.");
 
-    interruptedSession = await waitForSession(server.port, groupPath, (session) => session.status === "interrupted");
+    // Losing an SSE observer intentionally leaves the run alive. This separate,
+    // explicit stop creates the recoverable interruption before a server restart.
+    await stopCouncilRun(server.port, groupPath, server.localApiToken);
+    interruptedSession = await waitForSession(server.port, groupPath, (session) => session.status === "interrupted", server.localApiToken);
     await stopHarnessServer(server);
     server = await startHarnessServer({
       dataDir,
@@ -67,6 +71,7 @@ export async function runSeededRealUserBaseline(options = {}) {
 
     continueRun = await postCouncilEvents({
       port: server.port,
+      localApiToken: server.localApiToken,
       group,
       groupPath,
       question: scenario.continueQuestion,
@@ -74,10 +79,11 @@ export async function runSeededRealUserBaseline(options = {}) {
         events.push(compactEvent("continue", event));
       }
     });
-    continuedSession = await waitForSession(server.port, groupPath, (session) => session.question === scenario.continueQuestion);
+    continuedSession = await waitForSession(server.port, groupPath, (session) => session.question === scenario.continueQuestion, server.localApiToken);
 
     editRun = await postCouncilEvents({
       port: server.port,
+      localApiToken: server.localApiToken,
       group,
       groupPath,
       question: scenario.editQuestion,
@@ -85,7 +91,7 @@ export async function runSeededRealUserBaseline(options = {}) {
         events.push(compactEvent("edit", event));
       }
     });
-    editedSession = await waitForSession(server.port, groupPath, (session) => session.question === scenario.editQuestion);
+    editedSession = await waitForSession(server.port, groupPath, (session) => session.question === scenario.editQuestion, server.localApiToken);
   } catch (error) {
     failure = error;
     failureKind = error?.harnessInfrastructure ? "infrastructure_error" : "failed";
@@ -170,6 +176,7 @@ export async function runSeededRealUserCampaign(options = {}) {
       if (stage.kind === "user" || stage.kind === "initial" || stage.kind === "followup" || stage.kind === "reopen") {
         const run = await postCouncilEvents({
           port: server.port,
+          localApiToken: server.localApiToken,
           group,
           groupPath,
           question: stage.prompt,
@@ -180,13 +187,14 @@ export async function runSeededRealUserCampaign(options = {}) {
         continue;
       }
       if (stage.kind === "member_mutation") {
-        const mutation = await applyCampaignMutation(server.port, groupPath, group, stage.mutation);
+        const mutation = await applyCampaignMutation(server.port, groupPath, group, stage.mutation, server.localApiToken);
         timeline.push({ stageId: stage.id, kind: stage.kind, mutation: stage.mutation?.type || "", result: mutation.ok ? "completed" : "failed" });
         continue;
       }
       if (stage.kind === "interrupt") {
         const run = await postCouncilEvents({
           port: server.port,
+          localApiToken: server.localApiToken,
           group,
           groupPath,
           question: stage.prompt || "continue",
@@ -201,9 +209,10 @@ export async function runSeededRealUserCampaign(options = {}) {
           }
           throw harnessFailure("campaign_interrupt_did_not_reach_action", "Campaign interruption did not reach the requested activity boundary.");
         }
+        await stopCouncilRun(server.port, groupPath, server.localApiToken);
         const interruptedSession = await waitForSession(server.port, groupPath, (session) => (
           session.status === "interrupted" && !interruptedSessions.some((item) => item.id === session.id)
-        ));
+        ), server.localApiToken);
         interruptedSessions.push(interruptedSession);
         await stopHarnessServer(server);
         server = await startHarnessServer({ dataDir, workspaceRoot: dataDir, environment });
@@ -377,7 +386,7 @@ export async function postCouncilEvents(options = {}) {
   try {
     const response = await fetch(`http://127.0.0.1:${options.port}/api/council/events`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: localApiHeaders(options.localApiToken, { "Content-Type": "application/json" }),
       signal: controller.signal,
       body: JSON.stringify({
         question: options.question,
@@ -486,14 +495,14 @@ function assertCampaignBudget(options = {}, { allowMockProvider }) {
   }
 }
 
-async function applyCampaignMutation(port, groupPath, group, mutation = {}) {
+async function applyCampaignMutation(port, groupPath, group, mutation = {}, localApiToken = "") {
   const agents = group.agents || [];
   const stableSeatIds = campaignSeatIdentities.get(group) || agents.map((agent) => agent.id);
   if (!campaignSeatIdentities.has(group)) campaignSeatIdentities.set(group, stableSeatIds);
   const agentAt = (value) => stableSeatIds[seatIndex(value)];
   if (mutation.type === "reorder") {
     const seatIds = mutation.seatIds.map(agentAt);
-    const response = await postJson(port, "/api/group/seats/reorder", { groupPath, seatIds });
+    const response = await postJson(port, "/api/group/seats/reorder", { groupPath, seatIds }, localApiToken);
     const byId = new Map(agents.map((agent) => [agent.id, agent]));
     group.agents = seatIds.map((id) => byId.get(id));
     return response;
@@ -506,7 +515,7 @@ async function applyCampaignMutation(port, groupPath, group, mutation = {}) {
       : mutation.type === "restore"
         ? { enabled: true, role: mutation.role || "ordinary" }
         : { role: mutation.role || "ordinary" };
-  const response = await postJson(port, "/api/group/seat", { groupPath, seatId, patch });
+  const response = await postJson(port, "/api/group/seat", { groupPath, seatId, patch }, localApiToken);
   const agent = agents.find((item) => item.id === seatId);
   if (agent) applyRuntimeAgentMutation(agent, patch);
   return response;
@@ -535,14 +544,20 @@ function applyRuntimeAgentMutation(agent, patch) {
   }
 }
 
-async function postJson(port, pathname, body) {
+async function postJson(port, pathname, body, localApiToken = "") {
   const response = await fetch(`http://127.0.0.1:${port}${pathname}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: localApiHeaders(localApiToken, { "Content-Type": "application/json" }),
     body: JSON.stringify(body)
   });
   if (!response.ok) throw harnessFailure("campaign_mutation_failed", `Campaign mutation ${pathname} failed with HTTP ${response.status}.`, true);
   return response.json();
+}
+
+async function stopCouncilRun(port, groupPath, localApiToken) {
+  const result = await postJson(port, "/api/council/stop", { workspaceGroupPath: groupPath }, localApiToken);
+  if (!result?.stopped) throw harnessFailure("campaign_stop_failed", "The active run could not be stopped after its observer disconnected.", true);
+  return result;
 }
 
 function compactCampaignEvent(stage, event) {
@@ -1077,6 +1092,7 @@ export function prepareCampaignFixtures(groupPath, fixtures = []) {
 
 async function startHarnessServer(options = {}) {
   const port = await availablePort();
+  const localApiToken = randomBytes(32).toString("base64url");
   const child = spawn(process.execPath, [serverEntry], {
     cwd: prototypeRoot,
     env: {
@@ -1085,7 +1101,8 @@ async function startHarnessServer(options = {}) {
       AI_COUNCIL_DATA_DIR: options.dataDir,
       AI_COUNCIL_WORKSPACE_ROOT: options.workspaceRoot,
       AI_COUNCIL_UI_PORT: String(port),
-      AI_COUNCIL_UI_HOST: "127.0.0.1"
+      AI_COUNCIL_UI_HOST: "127.0.0.1",
+      AI_COUNCIL_LOCAL_API_TOKEN: localApiToken
     },
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true
@@ -1095,7 +1112,7 @@ async function startHarnessServer(options = {}) {
   child.stderr.on("data", (chunk) => { output += String(chunk); });
   try {
     await waitForHarnessHealth(port, child, () => output);
-    return { child, port };
+    return { child, port, localApiToken };
   } catch (error) {
     await stopHarnessServer({ child });
     throw error;
@@ -1145,21 +1162,30 @@ export async function waitForHarnessHealth(port, child, output, options = {}) {
   throw harnessFailure("server_start_timeout", `Harness server did not become healthy within ${timeoutMs}ms.${detail ? ` Output: ${detail}` : ""}`, true);
 }
 
-async function waitForSession(port, groupPath, predicate) {
+async function waitForSession(port, groupPath, predicate, localApiToken = "") {
   const deadline = Date.now() + 10000;
   while (Date.now() < deadline) {
-    const sessionsResponse = await fetch(`http://127.0.0.1:${port}/api/sessions?groupPath=${encodeURIComponent(groupPath)}`);
+    const sessionsResponse = await fetch(`http://127.0.0.1:${port}/api/sessions?groupPath=${encodeURIComponent(groupPath)}`, {
+      headers: localApiHeaders(localApiToken)
+    });
     if (sessionsResponse.ok) {
       const body = await sessionsResponse.json();
       const found = (body.sessions || []).find(predicate);
       if (found?.id) {
-        const detailResponse = await fetch(`http://127.0.0.1:${port}/api/session?groupPath=${encodeURIComponent(groupPath)}&sessionId=${encodeURIComponent(found.id)}`);
+        const detailResponse = await fetch(`http://127.0.0.1:${port}/api/session?groupPath=${encodeURIComponent(groupPath)}&sessionId=${encodeURIComponent(found.id)}`, {
+          headers: localApiHeaders(localApiToken)
+        });
         if (detailResponse.ok) return (await detailResponse.json()).session;
       }
     }
     await delay(50);
   }
   throw harnessFailure("session_persistence_timeout", "Expected persisted session was not available through the real history API.");
+}
+
+function localApiHeaders(token, headers = {}) {
+  const value = String(token || "").trim();
+  return value ? { ...headers, "X-AI-Council-Token": value } : headers;
 }
 
 async function availablePort() {

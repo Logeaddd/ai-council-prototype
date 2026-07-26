@@ -8,9 +8,10 @@ import { enforceRequestedArtifactRequirements } from "../src/deliverableVerifica
 
 test("general-purpose executor matrix provisions tools and verifies source data document and package outputs", async () => {
   const groupPath = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-general-matrix-"));
+  const minimalPdfBase64 = "JVBERi0xLjQKMSAwIG9iago8PCAvVHlwZSAvQ2F0YWxvZyAvUGFnZXMgMiAwIFIgPj4KZW5kb2JqCjIgMCBvYmoKPDwgL1R5cGUgL1BhZ2VzIC9LaWRzIFszIDAgUl0gL0NvdW50IDEgPj4KZW5kb2JqCjMgMCBvYmoKPDwgL1R5cGUgL1BhZ2UgL1BhcmVudCAyIDAgUiAvTWVkaWFCb3ggWzAgMCAyMDAgMjAwXSAvQ29udGVudHMgNCAwIFIgPj4KZW5kb2JqCjQgMCBvYmoKPDwgL0xlbmd0aCAwID4+CnN0cmVhbQoKZW5kc3RyZWFtCmVuZG9iagp4cmVmCjAgNQowMDAwMDAwMDAwIDY1NTM1IGYgCjAwMDAwMDAwMDkgMDAwMDAgbiAKMDAwMDAwMDA1OCAwMDAwMCBuIAowMDAwMDAwMTE1IDAwMDAwIG4gCjAwMDAwMDAyMDIgMDAwMDAgbiAKdHJhaWxlcgo8PCAvU2l6ZSA1IC9Sb290IDEgMCBSID4+CnN0YXJ0eHJlZgoyNTEKJSVFT0YK";
   const installCommand = process.platform === "win32"
-    ? "$p='shared/tools/docmaker/bin'; New-Item -ItemType Directory -Force -Path $p | Out-Null; Set-Content -Path \"$p/docmaker.cmd\" -Value @('@echo off','node -e \"require(''fs'').writeFileSync(process.argv[1],''%%PDF-1.7\\nAI Council report'')\" %1')"
-    : "mkdir -p shared/tools/docmaker/bin && printf '#!/bin/sh\\nprintf \"%%%%PDF-1.7\\nAI Council report\" > \"$1\"\\n' > shared/tools/docmaker/bin/docmaker && chmod +x shared/tools/docmaker/bin/docmaker";
+    ? `$p='shared/tools/docmaker/bin'; New-Item -ItemType Directory -Force -Path $p | Out-Null; Set-Content -Path "$p/docmaker.cmd" -Value @('@echo off','node -e "require(''fs'').writeFileSync(process.argv[1], Buffer.from(''${minimalPdfBase64}'',''base64''))" %1')`
+    : `mkdir -p shared/tools/docmaker/bin && printf '%s\\n' '#!/usr/bin/env node' 'require("fs").writeFileSync(process.argv[2], Buffer.from("${minimalPdfBase64}", "base64"));' > shared/tools/docmaker/bin/docmaker && chmod +x shared/tools/docmaker/bin/docmaker`;
 
   const provisioned = await executeToolRequests({
     permissionTier: "full",

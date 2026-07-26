@@ -4693,7 +4693,7 @@ test("report delivery keeps one executor and recovers from a missing skill into 
       writeOpenAiStream(res, JSON.stringify({
         status: "speak",
         argument: "The named skill is unavailable, so I am switching to a generic artifact path.",
-        tool_requests: [{ tool: "workspace_edit", action: "write", path: "report.pdf", code: "%PDF-1.7\nREAL_REPORT_CONTENT\n", reason: "Create the requested PDF artifact." }],
+        tool_requests: [{ tool: "workspace_edit", action: "write", path: "report.pdf", code: makeMinimalPdfText({ includeImage: true }), reason: "Create the requested PDF artifact." }],
         objections: [],
         confidence: 0.8,
         memory_candidates: []
@@ -4712,8 +4712,8 @@ test("report delivery keeps one executor and recovers from a missing skill into 
       tool_requests: [{
         tool: "run_code",
         language: "javascript",
-        code: "const fs=require('fs'); const head=fs.readFileSync('report.pdf').subarray(0,5).toString('ascii'); console.assert(head === '%PDF-', 'invalid PDF'); console.log('PDF_OK');",
-        reason: "Verify the PDF artifact header."
+        code: "const fs=require('fs'); const pdf=fs.readFileSync('report.pdf','latin1'); console.assert(/^%PDF-1\\.[0-9]/.test(pdf), 'invalid header'); console.assert(/\\/Type\\s*\\/Catalog\\b/.test(pdf) && /\\/Type\\s*\\/Pages\\b/.test(pdf) && /\\/Type\\s*\\/Page\\b/.test(pdf), 'missing document structure'); console.assert(/startxref\\s+\\d+/.test(pdf) && /%%EOF\\s*$/.test(pdf), 'missing PDF trailer'); console.log('PDF_STRUCTURE_OK');",
+        reason: "Verify the PDF document structure."
       }],
       objections: [],
       confidence: 0.9,
@@ -7625,6 +7625,26 @@ test("tool follow-up receives exact immediate API and file results before writin
 
 function close(server) {
   return new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+}
+
+function makeMinimalPdfText(options = {}) {
+  const objects = [
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents 4 0 R${options.includeImage ? " /Resources << /XObject << /Im1 5 0 R >> >>" : ""} >>`,
+    "<< /Length 0 >>\nstream\n\nendstream"
+  ];
+  if (options.includeImage) objects.push("<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Length 3 >>\nstream\nRGB\nendstream");
+  const chunks = [Buffer.from("%PDF-1.4\n", "ascii")];
+  const offsets = [0];
+  for (const [index, object] of objects.entries()) {
+    offsets.push(Buffer.concat(chunks).length);
+    chunks.push(Buffer.from(`${index + 1} 0 obj\n${object}\nendobj\n`, "ascii"));
+  }
+  const xrefOffset = Buffer.concat(chunks).length;
+  const xref = ["xref", `0 ${objects.length + 1}`, "0000000000 65535 f ", ...offsets.slice(1).map((offset) => `${String(offset).padStart(10, "0")} 00000 n `)].join("\n");
+  chunks.push(Buffer.from(`${xref}\ntrailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF\n`, "ascii"));
+  return Buffer.concat(chunks).toString("latin1");
 }
 
 function writeOpenAiNativeToolStream(res, requests) {

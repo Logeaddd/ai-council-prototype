@@ -84,7 +84,8 @@ test("renderer wires the real council APIs instead of mock-only UI state", () =>
   for (const endpoint of [
     "/api/groups-index",
     "/api/group?groupPath=",
-    "/api/council/events",
+    "/api/council/runs",
+    "/events?",
     "/api/private-chat",
     "/api/providers",
     "/api/models/discover",
@@ -281,6 +282,8 @@ test("private chat is wired through the renderer and backend API", () => {
   assert.match(privateChat, /\/api\/private-chat/);
   assert.match(privateChat, /ai-council:private-draft:/);
   assert.match(privateChat, /runtimeGroup/);
+  assert.match(privateChat, /loadedDraftKey !== draftKey/);
+  assert.match(privateChat, /persistPrivateDraft\(draftKey, value\)/);
   assert.match(server, /\/api\/private-chat/);
   assert.match(server, /status: "error"/);
 });

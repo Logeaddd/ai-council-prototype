@@ -434,13 +434,14 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
 
       while (response.status === "speak" && response.tool_requests?.length && toolIterations < maxToolIterations) {
         toolIterations += 1;
+        const requestedToolTimeoutMs = positiveDuration(group.settings.toolTimeoutMs);
         const toolResult = await executeToolRequests({
           requests: response.tool_requests || [],
           permissionTier: fileOperationPermissionTier,
           agent,
           round,
           baseDir,
-          timeoutMs: group.settings.toolTimeoutMs || 12000,
+          timeoutMs: requestedToolTimeoutMs,
           groupPath: options.groupPath,
           importedProjectRoots: fileOperationPermissionTier === "full"
             ? authorizedProjectRoots
@@ -1027,6 +1028,11 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
     result,
     createdAt: nowIso()
   };
+}
+
+function positiveDuration(value) {
+  const duration = Number(value);
+  return Number.isFinite(duration) && duration > 0 ? Math.floor(duration) : undefined;
 }
 
 function persistSummarizerPublicMemory(groupPath, candidates, options = {}) {

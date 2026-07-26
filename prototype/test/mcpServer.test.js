@@ -32,8 +32,8 @@ test("MCP web_search uses built-in search without a key", async () => {
   globalThis.fetch = async () => new Response(`
     <html><body>
       <li class="b_algo">
-        <h2><a href="https://example.com/mcp">MCP Search</a></h2>
-        <p>Built in MCP search result.</p>
+        <h2><a href="https://example.com/mcp">AI Council MCP Search</a></h2>
+        <p>Built in AI Council MCP search result.</p>
       </li>
     </body></html>
   `, {
@@ -56,7 +56,7 @@ test("MCP web_search uses built-in search without a key", async () => {
 
     assert.equal(reply.result.isError, false);
     assert.match(reply.result.content[0].text, /public_html/);
-    assert.match(reply.result.content[0].text, /MCP Search/);
+    assert.match(reply.result.content[0].text, /AI Council MCP Search/);
   } finally {
     globalThis.fetch = originalFetch;
   }

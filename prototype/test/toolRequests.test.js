@@ -1015,6 +1015,30 @@ test("execute_command rejects an identical command after it already failed in th
   assert.equal(fs.existsSync(marker), false);
 });
 
+test("execute_command allows a retry after a transient timeout while retaining deterministic failure protection", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-command-transient-retry-"));
+  const marker = path.join(tmp, "retried.txt");
+  const command = nodeCommand(`require('fs').writeFileSync(${JSON.stringify(marker)}, 'RETRIED')`);
+  const result = await executeToolRequests({
+    permissionTier: "full",
+    groupPath: tmp,
+    agent: { id: "full", name: "Full" },
+    round: 1,
+    previousResults: [{
+      tool: "execute_command",
+      command,
+      status: "failed",
+      code: "command_timeout",
+      result: { command, timedOut: true }
+    }],
+    requests: [{ tool: "execute_command", command, shell: shellForNodeCommand(), reason: "Retry after a transient timeout." }]
+  });
+
+  assert.equal(result.rejected.length, 0);
+  assert.equal(result.results[0].status, "completed");
+  assert.equal(fs.readFileSync(marker, "utf8"), "RETRIED");
+});
+
 test("an identical command can be retried after a real repair mutation", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-command-repair-retry-"));
   const command = nodeCommand("console.log('REPAIRED_COMMAND_RAN')");

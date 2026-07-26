@@ -8,6 +8,7 @@ import { app, BrowserWindow, Menu, shell } from "electron";
 const DEFAULT_PORT = Number(process.env.AI_COUNCIL_UI_PORT || 4317);
 const HOST = "127.0.0.1";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const composerDropProbePath = String(process.env.AI_COUNCIL_E2E_COMPOSER_DROP_FILE || "").trim();
 
 let mainWindow;
 
@@ -88,12 +89,67 @@ async function startDesktop() {
   });
 
   mainWindow.once("ready-to-show", () => {
-    mainWindow.show();
+    if (!composerDropProbePath) mainWindow.show();
   });
   mainWindow.on("closed", () => {
     mainWindow = null;
   });
   await mainWindow.loadURL(`http://${HOST}:${port}`);
+  if (composerDropProbePath) {
+    try {
+      const result = await runComposerDropProbe(mainWindow, composerDropProbePath);
+      console.log(`AI_COUNCIL_E2E_COMPOSER_DROP=${JSON.stringify(result)}`);
+      if (!result.ok) process.exitCode = 1;
+    } catch (error) {
+      process.exitCode = 1;
+      console.error("AI_COUNCIL_E2E_COMPOSER_DROP_FAILED", error);
+    } finally {
+      setTimeout(() => app.quit(), 50);
+    }
+  }
+}
+
+async function runComposerDropProbe(window, filePath) {
+  const resolved = path.resolve(filePath);
+  const text = fs.readFileSync(resolved, "utf8");
+  const payload = JSON.stringify({ name: path.basename(resolved), text });
+  return window.webContents.executeJavaScript(`
+    (async () => {
+      const payload = ${payload};
+      const deadline = Date.now() + 8000;
+      let textarea = null;
+      while (Date.now() < deadline) {
+        textarea = document.querySelector("textarea");
+        if (textarea) break;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      if (!textarea) return { ok: false, reason: "composer_textarea_missing" };
+      const target = textarea.parentElement;
+      const transfer = new DataTransfer();
+      transfer.items.add(new File([payload.text], payload.name, { type: "text/plain" }));
+      const dispatchResult = target.dispatchEvent(new DragEvent("drop", {
+        bubbles: true,
+        cancelable: true,
+        dataTransfer: transfer
+      }));
+      const attachmentDeadline = Date.now() + 8000;
+      while (Date.now() < attachmentDeadline) {
+        if (document.body.textContent?.includes(payload.name)) {
+          return {
+            ok: true,
+            defaultPrevented: !dispatchResult,
+            attachment: payload.name
+          };
+        }
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      return {
+        ok: false,
+        reason: "attachment_not_rendered",
+        defaultPrevented: !dispatchResult
+      };
+    })()
+  `, true);
 }
 
 function resolveAppIconPath() {

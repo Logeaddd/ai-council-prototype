@@ -107,13 +107,12 @@ export async function searchWeb(query, options = {}) {
         description: String(item.description || item.snippet || "").trim()
       }))
       .filter((item) => item.title || item.url || item.description);
-    return {
-      ok: true,
+    return buildSearchHealthResult({
       source: "real_response",
       provider: "Brave Search",
       query: text,
       results
-    };
+    });
   } finally {
     options.signal?.removeEventListener("abort", abortFromParent);
     clearTimeout(timeout);
@@ -143,22 +142,40 @@ async function searchBingHtml(query, options = {}) {
         source: "public_html",
         provider: "Bing Web",
         status: response.status,
+        code: "search_http_error",
         error: body.slice(0, 500),
         results: []
       };
     }
-    return {
-      ok: true,
+    const interruption = detectSearchInterruption(body);
+    if (interruption) {
+      return {
+        ok: false,
+        source: "public_html",
+        provider: "Bing Web",
+        query,
+        code: interruption.code,
+        error: interruption.error,
+        results: [],
+        health: {
+          status: "degraded",
+          code: interruption.code,
+          totalResults: 0
+        }
+      };
+    }
+    return buildSearchHealthResult({
       source: "public_html",
       provider: "Bing Web",
       query,
       results: parseBingResults(body).slice(0, Math.min(MAX_SEARCH_RESULTS, Math.max(1, Number(options.count || 5))))
-    };
+    });
   } catch (error) {
     return {
       ok: false,
       source: "public_html",
       provider: "Bing Web",
+      code: error?.name === "AbortError" ? "search_timeout" : "search_transport_error",
       error: error.message || "Built-in web search failed.",
       results: []
     };
@@ -166,6 +183,116 @@ async function searchBingHtml(query, options = {}) {
     options.signal?.removeEventListener("abort", abortFromParent);
     clearTimeout(timeout);
   }
+}
+
+function buildSearchHealthResult({ source, provider, query, results }) {
+  const health = evaluateSearchHealth(query, results);
+  return {
+    ok: health.status === "healthy",
+    source,
+    provider,
+    query,
+    ...(health.status === "healthy" ? {} : { code: health.code, error: health.error }),
+    results,
+    health
+  };
+}
+
+function evaluateSearchHealth(query, results) {
+  const safeResults = Array.isArray(results) ? results : [];
+  const expectedDomain = expectedSearchDomain(query);
+  const queryTerms = meaningfulSearchTerms(query);
+  const common = {
+    totalResults: safeResults.length,
+    expectedDomain: expectedDomain || undefined,
+    queryTerms
+  };
+  if (!safeResults.length) {
+    return {
+      status: "degraded",
+      code: "search_no_results",
+      error: "Search returned no parseable public results.",
+      ...common
+    };
+  }
+
+  const domainMatches = expectedDomain
+    ? safeResults.filter((item) => resultMatchesDomain(item, expectedDomain))
+    : safeResults;
+  if (expectedDomain && !domainMatches.length) {
+    return {
+      status: "degraded",
+      code: "search_site_constraint_unmet",
+      error: `Search returned results, but none matched the requested site:${expectedDomain} constraint.`,
+      ...common,
+      domainMatches: 0
+    };
+  }
+
+  const relevantResults = domainMatches.filter((item) => countMatchedTerms(item, queryTerms) >= 2);
+  if (queryTerms.length >= 2 && !relevantResults.length) {
+    return {
+      status: "degraded",
+      code: "search_results_not_relevant",
+      error: "Search returned results, but none matched at least two meaningful query terms.",
+      ...common,
+      domainMatches: domainMatches.length,
+      relevantResults: 0
+    };
+  }
+  return {
+    status: "healthy",
+    ...common,
+    domainMatches: domainMatches.length,
+    relevantResults: relevantResults.length
+  };
+}
+
+function detectSearchInterruption(html) {
+  const text = htmlToText(html);
+  if (/captcha|unusual traffic|verify (?:that )?you are human|security check|robot or human|complete the security check/i.test(text)) {
+    return {
+      code: "search_challenge_required",
+      error: "Public search returned a challenge page instead of results."
+    };
+  }
+  if (/cookie consent|consent\.microsoft\.com|before you continue to (?:bing|search)|privacy & cookies/i.test(text)) {
+    return {
+      code: "search_consent_required",
+      error: "Public search returned a consent page instead of results."
+    };
+  }
+  return null;
+}
+
+function expectedSearchDomain(query) {
+  const match = String(query || "").match(/(?:^|\s)site:([^\s/]+)/i);
+  return match ? match[1].replace(/^www\./i, "").toLowerCase() : "";
+}
+
+function meaningfulSearchTerms(query) {
+  const withoutOperators = String(query || "").replace(/(?:^|\s)site:[^\s]+/gi, " ");
+  const stopWords = new Set(["the", "and", "for", "with", "from", "about", "into", "that", "this", "what", "when", "where", "how", "are", "was", "were", "not", "but", "you", "your", "www", "com"]);
+  return [...new Set(withoutOperators.match(/[\p{L}\p{N}][\p{L}\p{N}_-]*/gu) || [])]
+    .map((term) => term.toLocaleLowerCase())
+    .filter((term) => [...term].length >= 2 && !stopWords.has(term))
+    .slice(0, 12);
+}
+
+function resultMatchesDomain(result, expectedDomain) {
+  try {
+    const hostname = new URL(String(result?.url || "")).hostname.replace(/^www\./i, "").toLowerCase();
+    return hostname === expectedDomain || hostname.endsWith(`.${expectedDomain}`);
+  } catch {
+    return false;
+  }
+}
+
+function countMatchedTerms(result, terms) {
+  const haystack = [result?.title, result?.description, result?.url]
+    .map((value) => String(value || "").toLocaleLowerCase())
+    .join(" ");
+  return terms.filter((term) => haystack.includes(term)).length;
 }
 
 function resolveBuiltInSearchUrl(options = {}) {

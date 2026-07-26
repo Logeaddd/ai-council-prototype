@@ -7,6 +7,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 const root = path.resolve(".");
+const localApiToken = "test-local-api-token-0123456789abcdef";
 
 test("persisted capability switches block direct server execution routes", async () => {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-server-capabilities-"));
@@ -17,7 +18,8 @@ test("persisted capability switches block direct server execution routes", async
       ...process.env,
       AI_COUNCIL_DATA_DIR: dataDir,
       AI_COUNCIL_UI_PORT: String(port),
-      AI_COUNCIL_UI_HOST: "127.0.0.1"
+      AI_COUNCIL_UI_HOST: "127.0.0.1",
+      AI_COUNCIL_LOCAL_API_TOKEN: localApiToken
     },
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true
@@ -87,6 +89,61 @@ test("persisted capability switches block direct server execution routes", async
   }
 });
 
+test("local API requires the per-server token and rejects cross-origin or non-JSON mutations", async () => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-server-auth-"));
+  const port = await availablePort();
+  const child = spawn(process.execPath, [path.join(root, "src", "server.js")], {
+    cwd: root,
+    env: {
+      ...process.env,
+      AI_COUNCIL_DATA_DIR: dataDir,
+      AI_COUNCIL_UI_PORT: String(port),
+      AI_COUNCIL_UI_HOST: "127.0.0.1",
+      AI_COUNCIL_LOCAL_API_TOKEN: localApiToken
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+    windowsHide: true
+  });
+  let output = "";
+  child.stdout.on("data", (chunk) => { output += chunk; });
+  child.stderr.on("data", (chunk) => { output += chunk; });
+
+  try {
+    await waitForServer(port, child, () => output);
+    const rootPage = await fetch(`http://127.0.0.1:${port}/`);
+    const html = await rootPage.text();
+    assert.match(html, new RegExp(`name="ai-council-local-api-token" content="${localApiToken}"`));
+
+    const missingToken = await fetch(`http://127.0.0.1:${port}/api/providers`);
+    assert.equal(missingToken.status, 401);
+    assert.equal((await missingToken.json()).code, "local_api_auth_required");
+
+    const crossOrigin = await fetch(`http://127.0.0.1:${port}/api/providers`, {
+      headers: {
+        "X-AI-Council-Token": localApiToken,
+        Origin: "https://untrusted.example"
+      }
+    });
+    assert.equal(crossOrigin.status, 403);
+    assert.equal((await crossOrigin.json()).code, "local_api_untrusted_origin");
+
+    const wrongContentType = await fetch(`http://127.0.0.1:${port}/api/providers`, {
+      method: "POST",
+      headers: {
+        "X-AI-Council-Token": localApiToken,
+        "Content-Type": "text/plain"
+      },
+      body: "{}"
+    });
+    assert.equal(wrongContentType.status, 415);
+    assert.equal((await wrongContentType.json()).code, "local_api_json_required");
+  } finally {
+    child.kill();
+    await waitForExit(child);
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
 async function availablePort() {
   const server = http.createServer();
   await new Promise((resolve, reject) => {
@@ -116,7 +173,7 @@ async function waitForServer(port, child, output) {
 async function requestJson(port, pathname, body, method = "POST") {
   const response = await fetch(`http://127.0.0.1:${port}${pathname}`, {
     method,
-    headers: body === undefined ? undefined : { "Content-Type": "application/json" },
+    headers: body === undefined ? { "X-AI-Council-Token": localApiToken } : { "Content-Type": "application/json", "X-AI-Council-Token": localApiToken },
     body: body === undefined ? undefined : JSON.stringify(body)
   });
   return {

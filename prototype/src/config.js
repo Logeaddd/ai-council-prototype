@@ -44,7 +44,9 @@ export function validateGroupConfig(group) {
     minConsensusWeight: 0.75,
     stopWhenAllSkip: true,
     agentTimeoutMs: 900000,
-    toolTimeoutMs: 12000,
+    // Zero delegates to each tool family's safe default. Build/package/test
+    // tools have longer defaults than a small file or network observation.
+    toolTimeoutMs: 0,
     maxToolIterations: 0,
     maxModelCalls: 0,
     noProgressModelCalls: 0,

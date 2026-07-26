@@ -7,6 +7,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 const root = path.resolve(".");
+const localApiToken = "test-local-api-token-0123456789abcdef";
 
 test("real server HTTP/SSE flow exposes durable TaskRun evidence from real local tools", async () => {
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-server-task-run-"));
@@ -30,7 +31,8 @@ test("real server HTTP/SSE flow exposes durable TaskRun evidence from real local
       AI_COUNCIL_DATA_DIR: path.join(sandbox, "data"),
       AI_COUNCIL_WORKSPACE_ROOT: sandbox,
       AI_COUNCIL_UI_PORT: String(port),
-      AI_COUNCIL_UI_HOST: "127.0.0.1"
+      AI_COUNCIL_UI_HOST: "127.0.0.1",
+      AI_COUNCIL_LOCAL_API_TOKEN: localApiToken
     },
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true
@@ -68,6 +70,77 @@ test("real server HTTP/SSE flow exposes durable TaskRun evidence from real local
   }
 });
 
+test("an observer disconnect does not abort the background run and cursor replay returns only missing events", async () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-server-run-replay-"));
+  const groupPath = path.join(sandbox, "group");
+  fs.mkdirSync(groupPath, { recursive: true });
+  fs.writeFileSync(path.join(groupPath, "group.json"), JSON.stringify({
+    id: "server-run-replay",
+    name: "Server Run Replay",
+    permissions: { defaultTier: "text", seatTiers: { builder: "full" } },
+    seats: [
+      { seatId: "builder", displayName: "Builder", enabled: true, privateFolder: "members/Builder" },
+      { seatId: "finalizer", displayName: "Finalizer", enabled: true, judge: true, privateFolder: "members/Finalizer" }
+    ]
+  }), "utf8");
+  const provider = await startProvider(160);
+  const port = await availablePort();
+  const child = spawn(process.execPath, [path.join(root, "src", "server.js")], {
+    cwd: root,
+    env: {
+      ...process.env,
+      AI_COUNCIL_DATA_DIR: path.join(sandbox, "data"),
+      AI_COUNCIL_WORKSPACE_ROOT: sandbox,
+      AI_COUNCIL_UI_PORT: String(port),
+      AI_COUNCIL_UI_HOST: "127.0.0.1",
+      AI_COUNCIL_LOCAL_API_TOKEN: localApiToken
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+    windowsHide: true
+  });
+  let output = "";
+  child.stdout.on("data", (chunk) => { output += chunk; });
+  child.stderr.on("data", (chunk) => { output += chunk; });
+
+  try {
+    await waitForServer(port, child, () => output);
+    const started = await requestJson(port, "/api/council/runs", {
+      question: "Create a small workspace document and verify it with a real command.",
+      workspaceGroupPath: groupPath,
+      runtimeGroup: runtimeGroup(provider.apiBaseUrl)
+    });
+    assert.equal(started.status, 202);
+    assert.ok(started.body.id);
+
+    const firstObserver = await fetch(`http://127.0.0.1:${port}/api/council/runs/${encodeURIComponent(started.body.id)}/events?groupPath=${encodeURIComponent(groupPath)}&after=0`, {
+      headers: { "X-AI-Council-Token": localApiToken }
+    });
+    assert.equal(firstObserver.status, 200);
+    const firstReader = firstObserver.body.getReader();
+    const firstChunk = await firstReader.read();
+    assert.equal(firstChunk.done, false);
+    await firstReader.cancel();
+
+    const allEvents = await requestRunEvents(port, groupPath, started.body.id, 0);
+    assert.equal(allEvents.some((event) => event.type === "run_completed"), true, JSON.stringify(allEvents));
+    assert.equal(allEvents.some((event) => event.type === "run_interrupted"), false, JSON.stringify(allEvents));
+    const sessionEvent = allEvents.find((event) => event.type === "task_run" && event.taskRun?.id);
+    assert.ok(sessionEvent);
+    const runDetails = await requestJson(port, `/api/task-runs/${encodeURIComponent(sessionEvent.taskRun.id)}?groupPath=${encodeURIComponent(groupPath)}`, undefined, "GET");
+    assert.equal(runDetails.body.taskRun.state, "completed");
+
+    const cursor = allEvents[Math.floor(allEvents.length / 2)].eventSequence;
+    const replay = await requestRunEvents(port, groupPath, started.body.id, cursor);
+    assert.deepEqual(replay.map((event) => event.eventSequence), allEvents.filter((event) => event.eventSequence > cursor).map((event) => event.eventSequence));
+    assert.equal(replay.every((event, index) => index === 0 || event.eventSequence > replay[index - 1].eventSequence), true);
+  } finally {
+    child.kill();
+    await waitForExit(child);
+    await provider.close();
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+});
+
 function runtimeGroup(apiBaseUrl) {
   const base = {
     provider: "openai-compatible",
@@ -89,7 +162,7 @@ function runtimeGroup(apiBaseUrl) {
   };
 }
 
-async function startProvider() {
+async function startProvider(responseDelayMs = 0) {
   let builderStep = 0;
   const server = http.createServer(async (req, res) => {
     const body = JSON.parse(await readBody(req));
@@ -101,10 +174,12 @@ async function startProvider() {
         : builderStep === 2
           ? verifyDocument()
           : { status: "speak", argument: "The real local verification passed.", objections: [], memory_candidates: [] };
-    const chunk = JSON.stringify({ choices: [{ delta: { content: JSON.stringify(payload) } }] });
-    res.writeHead(200, { "Content-Type": "text/event-stream" });
-    res.write(`data: ${chunk}\n\n`);
-    res.end("data: [DONE]\n\n");
+    setTimeout(() => {
+      const chunk = JSON.stringify({ choices: [{ delta: { content: JSON.stringify(payload) } }] });
+      res.writeHead(200, { "Content-Type": "text/event-stream" });
+      res.write(`data: ${chunk}\n\n`);
+      res.end("data: [DONE]\n\n");
+    }, responseDelayMs);
   });
   await new Promise((resolve, reject) => {
     server.once("error", reject);
@@ -155,8 +230,21 @@ function finalDecision() {
 async function requestSse(port, pathname, body) {
   const response = await fetch(`http://127.0.0.1:${port}${pathname}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", "X-AI-Council-Token": localApiToken },
     body: JSON.stringify(body)
+  });
+  assert.equal(response.status, 200);
+  const text = await response.text();
+  return text.split(/\r?\n\r?\n/).flatMap((block) => {
+    const data = block.split(/\r?\n/).find((line) => line.startsWith("data: "))?.slice(6);
+    if (!data || data === "[DONE]") return [];
+    try { return [JSON.parse(data)]; } catch { return []; }
+  });
+}
+
+async function requestRunEvents(port, groupPath, runId, after) {
+  const response = await fetch(`http://127.0.0.1:${port}/api/council/runs/${encodeURIComponent(runId)}/events?groupPath=${encodeURIComponent(groupPath)}&after=${after}`, {
+    headers: { "X-AI-Council-Token": localApiToken }
   });
   assert.equal(response.status, 200);
   const text = await response.text();
@@ -194,7 +282,7 @@ async function waitForServer(port, child, output) {
 async function requestJson(port, pathname, body, method = "POST") {
   const response = await fetch(`http://127.0.0.1:${port}${pathname}`, {
     method,
-    headers: body === undefined ? undefined : { "Content-Type": "application/json" },
+    headers: body === undefined ? { "X-AI-Council-Token": localApiToken } : { "Content-Type": "application/json", "X-AI-Council-Token": localApiToken },
     body: body === undefined ? undefined : JSON.stringify(body)
   });
   return { status: response.status, body: await response.json() };

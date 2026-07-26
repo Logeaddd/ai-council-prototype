@@ -6,7 +6,10 @@ import { buildCommandEnvironment, displayPath } from "./runtimeEnvironment.js";
 import { backgroundWorkspaceChanges, captureWorkspaceSnapshot, diffWorkspaceSnapshots } from "./workspaceChanges.js";
 import { startManagedBackgroundProcess } from "./processTools.js";
 
-const DEFAULT_TIMEOUT_MS = 60 * 1000;
+// General shell commands include builds and generators. A short timeout turns
+// normal project work into a false failure; callers may still choose a shorter
+// timeout or start an explicitly managed background process.
+const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
 const MIN_TIMEOUT_MS = 1000;
 const MAX_TIMEOUT_MS = 60 * 60 * 1000;
 const DEFAULT_MAX_OUTPUT_BYTES = 32 * 1024;

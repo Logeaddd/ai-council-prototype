@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import http from "node:http";
 import { execFile } from "node:child_process";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -66,6 +67,8 @@ const harnessAllowsLocalHttp = process.env.AI_COUNCIL_HARNESS_ALLOW_LOCAL_HTTP =
 const harnessCampaignBudget = readHarnessCampaignBudget(process.env);
 const execFileAsync = promisify(execFile);
 const activeCouncilRuns = createCouncilRunRegistry();
+const localApiToken = resolveLocalApiToken(process.env);
+const localApiOrigin = `http://${host}:${port}`;
 
 const server = http.createServer(async (req, res) => {
   try {
@@ -93,6 +96,8 @@ async function handleApi(req, res, url) {
     sendJson(res, 200, { ok: true, baseDir, host, allowedWorkspaceRoot });
     return;
   }
+
+  assertTrustedLocalApiRequest(req);
 
   if (req.method === "GET" && url.pathname === "/api/permissions") {
     sendJson(res, 200, {
@@ -794,20 +799,26 @@ async function handleApi(req, res, url) {
     const workspaceGroupPath = body.workspaceGroupPath
       ? resolveWorkspacePath(body.workspaceGroupPath, "workspaceGroupPath")
       : undefined;
-    await streamCouncilEvents(req, res, body.question, group, {
-      groupPath: workspaceGroupPath,
-      globalRequirement: body.globalRequirement || group.settings?.globalRequirement || "",
-      startAfterAgentId: body.startAfterAgentId || "",
-      startAtAgentId: body.startAtAgentId || "",
-      resumeInstruction: body.resumeInstruction || "",
-      continuationContext: body.continuationContext,
-      contextInvalidations: body.contextInvalidations,
-      allowUnsafePrivateNetwork: harnessAllowsLocalHttp,
-      allowHttp: harnessAllowsLocalHttp,
-      harnessCampaignBudget,
-      appSettings: readCurrentAppSettings(),
-      attachments: normalizeFileAttachments(body.attachments || [])
-    });
+    const run = startCouncilRun(body.question, group, councilRunOptions(body, group, workspaceGroupPath));
+    await streamCouncilRunEvents(req, res, workspaceGroupPath, run.id, 0);
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/council/runs") {
+    const body = await readBody(req);
+    const group = loadCouncilGroupFromRequest(body);
+    const workspaceGroupPath = body.workspaceGroupPath
+      ? resolveWorkspacePath(body.workspaceGroupPath, "workspaceGroupPath")
+      : undefined;
+    const run = startCouncilRun(body.question, group, councilRunOptions(body, group, workspaceGroupPath));
+    sendJson(res, 202, councilRunSnapshot(run));
+    return;
+  }
+
+  if (req.method === "GET" && /^\/api\/council\/runs\/[^/]+\/events$/.test(url.pathname)) {
+    const workspaceGroupPath = resolveWorkspacePath(url.searchParams.get("groupPath"), "groupPath");
+    const runId = decodeURIComponent(url.pathname.slice("/api/council/runs/".length, -"/events".length)).replace(/\/$/, "");
+    await streamCouncilRunEvents(req, res, workspaceGroupPath, runId, url.searchParams.get("after"));
     return;
   }
 
@@ -847,6 +858,15 @@ function serveStatic(res, pathname) {
     ".woff": "font/woff",
     ".woff2": "font/woff2"
   };
+  if (ext === ".html") {
+    const document = fs.readFileSync(filePath, "utf8");
+    res.writeHead(200, {
+      "Content-Type": types[ext],
+      "Cache-Control": "no-store"
+    });
+    res.end(injectLocalApiToken(document));
+    return;
+  }
   res.writeHead(200, { "Content-Type": types[ext] || "application/octet-stream" });
   fs.createReadStream(filePath).pipe(res);
 }
@@ -1205,6 +1225,60 @@ function sendJson(res, status, data) {
   res.end(JSON.stringify(data, null, 2));
 }
 
+function resolveLocalApiToken(env = process.env) {
+  const configured = String(env.AI_COUNCIL_LOCAL_API_TOKEN || "").trim();
+  if (configured.length >= 32) return configured;
+  const generated = randomBytes(32).toString("base64url");
+  process.env.AI_COUNCIL_LOCAL_API_TOKEN = generated;
+  return generated;
+}
+
+function assertTrustedLocalApiRequest(req) {
+  const suppliedToken = String(req.headers["x-ai-council-token"] || "");
+  if (!constantTimeTokenMatch(suppliedToken, localApiToken)) {
+    const error = new Error("Local API authentication required.");
+    error.code = "local_api_auth_required";
+    error.statusCode = 401;
+    throw error;
+  }
+
+  const origin = String(req.headers.origin || "").trim();
+  if (origin && origin !== localApiOrigin) {
+    const error = new Error("Local API request origin is not trusted.");
+    error.code = "local_api_untrusted_origin";
+    error.statusCode = 403;
+    throw error;
+  }
+  if (String(req.headers["sec-fetch-site"] || "").toLowerCase() === "cross-site") {
+    const error = new Error("Cross-site Local API requests are not allowed.");
+    error.code = "local_api_cross_site_request";
+    error.statusCode = 403;
+    throw error;
+  }
+  if (["POST", "PUT", "PATCH", "DELETE"].includes(String(req.method || "").toUpperCase())) {
+    const contentType = String(req.headers["content-type"] || "").toLowerCase();
+    if (!contentType.startsWith("application/json")) {
+      const error = new Error("Local API mutations require application/json.");
+      error.code = "local_api_json_required";
+      error.statusCode = 415;
+      throw error;
+    }
+  }
+}
+
+function constantTimeTokenMatch(value, expected) {
+  const actualBuffer = Buffer.from(String(value || ""));
+  const expectedBuffer = Buffer.from(String(expected || ""));
+  return actualBuffer.length === expectedBuffer.length
+    && actualBuffer.length > 0
+    && timingSafeEqual(actualBuffer, expectedBuffer);
+}
+
+function injectLocalApiToken(document) {
+  const meta = `<meta name="ai-council-local-api-token" content="${localApiToken}">`;
+  return String(document || "").replace(/<head(?=>|\s[^>]*>)/i, (tag) => `${tag}${meta}`);
+}
+
 function readCurrentAppSettings() {
   return readAppSettings(baseDir, { groupsRoot: defaultGroupsRoot });
 }
@@ -1253,39 +1327,172 @@ function buildAppSettingsPatch(body) {
   return patch;
 }
 
-async function streamCouncilEvents(req, res, question, group, options = {}) {
+function councilRunOptions(body, group, workspaceGroupPath) {
+  return {
+    groupPath: workspaceGroupPath,
+    globalRequirement: body.globalRequirement || group.settings?.globalRequirement || "",
+    startAfterAgentId: body.startAfterAgentId || "",
+    startAtAgentId: body.startAtAgentId || "",
+    resumeInstruction: body.resumeInstruction || "",
+    continuationContext: body.continuationContext,
+    contextInvalidations: body.contextInvalidations,
+    allowUnsafePrivateNetwork: harnessAllowsLocalHttp,
+    allowHttp: harnessAllowsLocalHttp,
+    harnessCampaignBudget,
+    appSettings: readCurrentAppSettings(),
+    attachments: normalizeFileAttachments(body.attachments || [])
+  };
+}
+
+function startCouncilRun(question, group, options = {}) {
   if (!options.groupPath) throw new Error("A group workspace is required for a council run.");
   const run = activeCouncilRuns.start(options.groupPath);
+  appendCouncilRunEvent(options.groupPath, run, {
+    type: "run_started",
+    createdAt: run.startedAt,
+    run: councilRunSnapshot(run)
+  });
   const budgetGuard = options.harnessCampaignBudget
     ? createPersistentCampaignBudgetGuard({ ...options.harnessCampaignBudget, group, groupPath: options.groupPath, controller: run.controller })
     : undefined;
-  const abortDisconnectedRun = () => activeCouncilRuns.stop(options.groupPath, "client_disconnected");
-  req.once("aborted", abortDisconnectedRun);
-  res.once("close", abortDisconnectedRun);
-  res.writeHead(200, {
-    "Content-Type": "text/event-stream; charset=utf-8",
-    "Cache-Control": "no-cache, no-transform",
-    "Connection": "keep-alive"
-  });
+  void executeCouncilRun(question, group, options, run, budgetGuard);
+  return run;
+}
+
+async function executeCouncilRun(question, group, options, run, budgetGuard) {
+  let failure;
   try {
     for await (const event of runCouncilEvents(question, group, baseDir, {
       ...options,
       onModelCall: budgetGuard?.onModelCall,
       signal: run.controller.signal
     })) {
-      if (run.controller.signal.aborted || res.destroyed || res.writableEnded) break;
-      writeSse(res, event.type, event);
+      appendCouncilRunEvent(options.groupPath, run, event);
     }
   } catch (error) {
-    if (error.name !== "AbortError" && !run.controller.signal.aborted && !res.destroyed) {
-      writeSse(res, "error", { type: "error", error: error.message, createdAt: new Date().toISOString() });
+    failure = error;
+    if (error.name !== "AbortError" && !run.controller.signal.aborted) {
+      appendCouncilRunEvent(options.groupPath, run, {
+        type: "error",
+        error: error.message,
+        createdAt: new Date().toISOString()
+      });
     }
   } finally {
-    req.off("aborted", abortDisconnectedRun);
-    res.off("close", abortDisconnectedRun);
+    if (run.controller.signal.aborted) {
+      appendCouncilRunEvent(options.groupPath, run, {
+        type: "run_interrupted",
+        reason: run.controller.signal.reason?.code || run.controller.signal.reason?.message || "stopped_by_user",
+        createdAt: new Date().toISOString()
+      });
+    } else if (failure) {
+      appendCouncilRunEvent(options.groupPath, run, {
+        type: "run_failed",
+        error: failure.message || "Council run failed.",
+        createdAt: new Date().toISOString()
+      });
+    } else {
+      appendCouncilRunEvent(options.groupPath, run, {
+        type: "run_completed",
+        createdAt: new Date().toISOString()
+      });
+    }
     activeCouncilRuns.finish(options.groupPath, run.id);
-    if (!res.destroyed && !res.writableEnded) res.end();
   }
+}
+
+async function streamCouncilRunEvents(req, res, groupPath, runId, after = 0) {
+  const normalizedRunId = normalizeCouncilRunId(runId);
+  const run = activeCouncilRuns.getById(normalizedRunId);
+  const replay = readCouncilRunEvents(groupPath, normalizedRunId, after);
+  if (!run && !replay.length) {
+    const error = new Error("Unknown council run");
+    error.statusCode = 404;
+    throw error;
+  }
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream; charset=utf-8",
+    "Cache-Control": "no-cache, no-transform",
+    "Connection": "keep-alive"
+  });
+  for (const event of replay) writeSse(res, event.type, event);
+  if (!run || run.state !== "running") {
+    res.end();
+    return;
+  }
+  let unsubscribe = activeCouncilRuns.subscribe(normalizedRunId, {
+    event: (event) => {
+      if (!res.destroyed && !res.writableEnded) writeSse(res, event.type, event);
+    },
+    finish: () => {
+      if (!res.destroyed && !res.writableEnded) res.end();
+    }
+  });
+  const detachObserver = () => {
+    unsubscribe?.();
+    unsubscribe = undefined;
+  };
+  req.once("aborted", detachObserver);
+  res.once("close", detachObserver);
+}
+
+function appendCouncilRunEvent(groupPath, run, event) {
+  const record = activeCouncilRuns.publish(run.id, event);
+  if (!record) return undefined;
+  try {
+    const filePath = councilRunEventPath(groupPath, run.id);
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.appendFileSync(filePath, `${JSON.stringify(record)}\n`, "utf8");
+  } catch {
+    // In-memory observers still receive events; TaskRun persistence remains authoritative.
+  }
+  return record;
+}
+
+function readCouncilRunEvents(groupPath, runId, after = 0) {
+  const cursor = normalizeCouncilEventCursor(after);
+  const cached = activeCouncilRuns.replay(runId, cursor);
+  let persisted = [];
+  try {
+    const filePath = councilRunEventPath(groupPath, runId);
+    if (fs.existsSync(filePath)) {
+      persisted = fs.readFileSync(filePath, "utf8")
+        .split(/\r?\n/)
+        .filter(Boolean)
+        .flatMap((line) => {
+          try { return [JSON.parse(line)]; } catch { return []; }
+        })
+        .filter((item) => Number(item?.eventSequence || 0) > cursor);
+    }
+  } catch {}
+  const bySequence = new Map();
+  for (const event of [...persisted, ...cached]) bySequence.set(Number(event.eventSequence || 0), event);
+  return [...bySequence.values()].sort((left, right) => Number(left.eventSequence || 0) - Number(right.eventSequence || 0));
+}
+
+function councilRunEventPath(groupPath, runId) {
+  return path.join(groupPath, "shared", "logs", "council-runs", `${normalizeCouncilRunId(runId)}.jsonl`);
+}
+
+function normalizeCouncilRunId(value) {
+  const id = String(value || "").trim();
+  if (!/^[A-Za-z0-9_.-]+$/.test(id)) throw new Error("Invalid council run id");
+  return id;
+}
+
+function normalizeCouncilEventCursor(value) {
+  const parsed = Number.parseInt(String(value || 0), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
+function councilRunSnapshot(run = {}) {
+  return {
+    id: run.id,
+    state: run.state || "running",
+    startedAt: run.startedAt,
+    completedAt: run.completedAt,
+    eventSequence: Number(run.eventSequence || 0)
+  };
 }
 
 function readHarnessCampaignBudget(env = process.env) {
@@ -1296,6 +1503,7 @@ function readHarnessCampaignBudget(env = process.env) {
 }
 
 function writeSse(res, eventName, data) {
+  if (Number(data?.eventSequence || 0) > 0) res.write(`id: ${data.eventSequence}\n`);
   res.write(`event: ${eventName}\n`);
   res.write(`data: ${JSON.stringify(data)}\n\n`);
 }

@@ -30,7 +30,7 @@ test("API paths are constrained by an allowed workspace root", () => {
   assert.match(serverJs, /resolveWorkspaceRoot/);
 });
 
-test("server exposes an SSE council events endpoint", () => {
+test("server exposes a durable council run endpoint and observer SSE endpoint", () => {
   const serverJs = fs.readFileSync(path.join(root, "src", "server.js"), "utf8");
   assert.match(serverJs, /\/api\/council\/events/);
   assert.match(serverJs, /text\/event-stream/);
@@ -41,8 +41,10 @@ test("server exposes an SSE council events endpoint", () => {
   assert.match(serverJs, /attachments: normalizeFileAttachments\(body\.attachments \|\| \[\]\)/);
   assert.match(serverJs, /\/api\/council\/stop/);
   assert.match(serverJs, /activeCouncilRuns\.start\(options\.groupPath\)/);
-  assert.match(serverJs, /req\.once\("aborted", abortDisconnectedRun\)/);
-  assert.match(serverJs, /res\.once\("close", abortDisconnectedRun\)/);
+  assert.match(serverJs, /\/api\/council\/runs/);
+  assert.match(serverJs, /eventSequence/);
+  assert.match(serverJs, /unsubscribe\?\.\(\)/);
+  assert.doesNotMatch(serverJs, /res\.once\("close", abortDisconnectedRun\)/);
   assert.match(serverJs, /activeCouncilRuns\.finish\(options\.groupPath, run\.id\)/);
 });
 
