@@ -340,3 +340,70 @@ test("delivery classification requires an explicit delivery action", () => {
   assert.equal(isDeliveryTask("Analyze whether the final JSON must include active fields."), false);
   assert.equal(isDeliveryTask("请修改代码并构建 jar 包。"), true);
 });
+
+test("delivery ownership transfers explicitly when the previous owner is unavailable on resume", () => {
+  const initial = createExecutionState({
+    question: "Create a PDF report.",
+    agents: [{ id: "builder", name: "Builder", role: "Builder", enabled: true }],
+    workspaceGroup
+  });
+  const resumed = createExecutionState({
+    question: "Continue the current requested file.",
+    agents: [{ id: "replacement", name: "Replacement", role: "Builder", enabled: true }],
+    workspaceGroup: {
+      permissions: { defaultTier: "text", seatTiers: { replacement: "full" } }
+    },
+    previousState: initial
+  });
+
+  assert.equal(resumed.executorId, "replacement");
+  assert.equal(resumed.ownership.ownerId, "replacement");
+  assert.equal(resumed.ownership.version, 2);
+  assert.deepEqual(resumed.ownership.transfers[0], {
+    fromId: "builder",
+    fromName: "Builder",
+    toId: "replacement",
+    toName: "Replacement",
+    reason: "previous_owner_unavailable_during_resume",
+    version: 2
+  });
+});
+
+test("checkpoint reviews are durable delegated work and complete only after every assigned reviewer responds", () => {
+  const executor = { id: "builder", name: "Builder", role: "Builder", enabled: true };
+  const reviewerA = { id: "reviewer-a", name: "Reviewer A", role: "Red Team", mandatoryRedTeam: true, enabled: true };
+  const reviewerB = { id: "reviewer-b", name: "Reviewer B", role: "Red Team", mandatoryRedTeam: true, enabled: true };
+  const state = createExecutionState({
+    question: "Create a PDF report.",
+    agents: [executor, reviewerA, reviewerB],
+    workspaceGroup: {
+      permissions: { defaultTier: "text", seatTiers: { builder: "full", "reviewer-a": "tool", "reviewer-b": "tool" } }
+    }
+  });
+  state.phase = "review";
+  state.checkpointVersion = 1;
+  state.artifactStatus = "verified";
+
+  const selected = selectExecutionAgents(state, [executor, reviewerA, reviewerB]);
+  assert.deepEqual(selected.map((agent) => agent.id), ["reviewer-a", "reviewer-b"]);
+  assert.equal(state.ownership.delegations.filter((item) => item.status === "pending").length, 2);
+  assert.match(executionInstruction(state, reviewerA), /Delegated checkpoint review/);
+
+  advanceExecutionState({
+    state,
+    session: { groupSnapshot: { agents: [executor, reviewerA, reviewerB] } },
+    agent: reviewerA,
+    response: { status: "speak", objection_items: [] }
+  });
+  assert.equal(state.phase, "review");
+  assert.equal(state.ownership.delegations.find((item) => item.assigneeId === "reviewer-a").status, "completed");
+
+  advanceExecutionState({
+    state,
+    session: { groupSnapshot: { agents: [executor, reviewerA, reviewerB] } },
+    agent: reviewerB,
+    response: { status: "speak", objection_items: [] }
+  });
+  assert.equal(state.phase, "complete");
+  assert.equal(state.reviewedCheckpointVersion, 1);
+});

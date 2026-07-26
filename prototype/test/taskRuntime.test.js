@@ -162,6 +162,50 @@ test("an interrupted delivery resumes the same task record and retains its sessi
   assert.equal(resumed.resumeCount, 1);
 });
 
+test("task run records an explicit durable delivery-owner transfer", () => {
+  const groupPath = workspace();
+  const taskRun = createTaskRun({
+    groupPath,
+    sessionId: "session-owner-before",
+    question: "Create a report.",
+    session: { executionState: activeExecution() }
+  });
+  const transferred = syncTaskRunFromSession({
+    groupPath,
+    taskRun,
+    session: {
+      id: "session-owner-after",
+      status: "running",
+      executionState: {
+        ...activeExecution("repair"),
+        executorId: "replacement",
+        executorName: "Replacement",
+        ownership: {
+          ownerId: "replacement",
+          ownerName: "Replacement",
+          version: 2,
+          transfers: [{
+            fromId: "builder",
+            fromName: "Builder",
+            toId: "replacement",
+            toName: "Replacement",
+            reason: "previous_owner_unavailable_during_resume",
+            version: 2
+          }],
+          delegations: []
+        }
+      }
+    }
+  });
+  const event = readTaskRunEvents(groupPath, taskRun.id, { limit: null })
+    .find((item) => item.type === "delivery_owner_transferred");
+
+  assert.equal(transferred.execution.ownership.ownerId, "replacement");
+  assert.equal(event.payload.fromId, "builder");
+  assert.equal(event.payload.toId, "replacement");
+  assert.equal(event.payload.reason, "previous_owner_unavailable_during_resume");
+});
+
 test("background process and artifact verification are durable TaskRun evidence", () => {
   const groupPath = workspace();
   const taskRun = createTaskRun({

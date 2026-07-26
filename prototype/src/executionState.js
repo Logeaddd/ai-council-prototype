@@ -7,11 +7,13 @@ export function createExecutionState({ question, agents = [], workspaceGroup, pr
     const executor = agents.find((agent) => agent.id === previousState.executorId && agent.enabled !== false)
       || chooseExecutor(agents, workspaceGroup);
     if (executor) {
+      const ownership = resumeOwnership(previousState.ownership, previousState, executor);
       return {
         ...previousState,
         active: true,
         executorId: executor.id,
         executorName: executor.name,
+        ownership,
         taskQuestion: String(previousState.taskQuestion || question || ""),
         processedToolResults: 0,
         processedFileResults: 0,
@@ -27,6 +29,7 @@ export function createExecutionState({ question, agents = [], workspaceGroup, pr
     active: true,
     executorId: executor.id,
     executorName: executor.name,
+    ownership: initialOwnership(executor),
     taskQuestion: String(question || ""),
     phase: "inspect",
     nextAction: "Inspect only the minimum files required, then perform a real workspace mutation.",
@@ -50,9 +53,12 @@ export function selectExecutionAgents(state, agents = []) {
   const reviewers = agents.filter((agent) => (
     agent.id !== executor.id && agent.enabled !== false && !agent.judge && isReviewerLike(agent)
   ));
-  if (state.phase === "review" && state.checkpointVersion > state.reviewedCheckpointVersion) {
-    return reviewers.length ? reviewers : [];
+  if (state.phase === "review") {
+    const pendingReviewers = pendingReviewersForCheckpoint(state, reviewers);
+    if (pendingReviewers.length) return pendingReviewers;
+    return [];
   }
+  if (state.phase === "repair") return [executor];
   const selected = [executor];
   if (state.checkpointVersion > state.reviewedCheckpointVersion) selected.push(...reviewers);
   return selected;
@@ -70,8 +76,9 @@ export function executionInstruction(state, agent) {
     ].filter(Boolean).join("\n");
   }
   if (isReviewerLike(agent)) {
+    const delegation = reviewDelegationFor(state, agent, true);
     return [
-      `[Checkpoint review] Review checkpoint ${state.checkpointVersion}. Use the recorded diff, command, test, or artifact evidence. Do not repeat an unchanged objection without new evidence.`,
+      `[Delegated checkpoint review] You are reviewing checkpoint ${state.checkpointVersion} for delivery owner ${state.ownership?.ownerName || state.executorName}. Delegation: ${delegation?.id || "review"}. Use the recorded diff, command, test, or artifact evidence. Do not repeat an unchanged objection without new evidence.`,
       formatCheckpointEvidence(state.checkpointEvidence)
     ].filter(Boolean).join("\n");
   }
@@ -82,14 +89,19 @@ export function advanceExecutionState({ state, session, agent, groupPath, questi
   if (!state?.active) return state;
   if (agent.id !== state.executorId) {
     if (isReviewerLike(agent)) {
-      state.reviewedCheckpointVersion = state.checkpointVersion;
+      const delegation = reviewDelegationFor(state, agent, true);
+      if (delegation) {
+        delegation.status = "completed";
+        delegation.result = response?.status || "reviewed";
+      }
       state.lastAction = `checkpoint_reviewed_by:${agent.id}`;
       const blockingItems = (response?.objection_items || []).filter((item) => item?.blocks_final !== false && item?.in_scope !== false);
       if (blockingItems.length) {
         state.phase = "repair";
         state.lastError = blockingItems.map((item) => item.issue || item.id).filter(Boolean).join("; ").slice(0, 1200);
         state.nextAction = "A reviewer found a blocking issue. Inspect its evidence, patch the responsible files, and rerun verification.";
-      } else if (state.phase === "review" && state.artifactStatus !== "missing_or_invalid") {
+      } else if (state.phase === "review" && state.artifactStatus !== "missing_or_invalid" && reviewCheckpointComplete(state)) {
+        state.reviewedCheckpointVersion = state.checkpointVersion;
         state.phase = "complete";
         state.nextAction = "All execution and review gates are complete; proceed to final synthesis.";
       }
@@ -140,6 +152,7 @@ export function advanceExecutionState({ state, session, agent, groupPath, questi
       state.nextAction = "The build command passed but the requested artifact is missing or invalid. Locate the real output, fix packaging, and rerun the build.";
     } else {
       state.phase = "review";
+      prepareReviewDelegations(state, session.groupSnapshot?.agents || []);
       state.lastError = "";
       state.nextAction = "A real verification checkpoint exists. Preserve the evidence and address any reviewer finding.";
       const hasReviewers = (session.groupSnapshot?.agents || []).some((item) => item.enabled !== false && !item.judge && isReviewerLike(item));
@@ -215,6 +228,99 @@ function chooseExecutor(agents, workspaceGroup) {
   const tiers = workspaceGroup?.permissions?.seatTiers || {};
   const fallbackTier = workspaceGroup?.permissions?.defaultTier || "text";
   return candidates.sort((a, b) => permissionRank(tiers[b.id] || fallbackTier) - permissionRank(tiers[a.id] || fallbackTier))[0];
+}
+
+function initialOwnership(executor) {
+  return {
+    ownerId: executor.id,
+    ownerName: executor.name,
+    version: 1,
+    transfers: [],
+    delegations: []
+  };
+}
+
+function resumeOwnership(value, previousState, executor) {
+  const ownership = normalizeOwnership(value, previousState);
+  if (ownership.ownerId === executor.id) {
+    ownership.ownerName = executor.name;
+    return ownership;
+  }
+  const fromId = ownership.ownerId || previousState.executorId || "";
+  const fromName = ownership.ownerName || previousState.executorName || "";
+  ownership.ownerId = executor.id;
+  ownership.ownerName = executor.name;
+  ownership.version += 1;
+  ownership.transfers = [...ownership.transfers, {
+    fromId,
+    fromName,
+    toId: executor.id,
+    toName: executor.name,
+    reason: "previous_owner_unavailable_during_resume",
+    version: ownership.version
+  }].slice(-20);
+  return ownership;
+}
+
+function normalizeOwnership(value, state = {}) {
+  const source = value && typeof value === "object" ? value : {};
+  return {
+    ownerId: String(source.ownerId || state.executorId || ""),
+    ownerName: String(source.ownerName || state.executorName || ""),
+    version: Math.max(1, Number(source.version || 1)),
+    transfers: Array.isArray(source.transfers) ? source.transfers.filter((item) => item && typeof item === "object").slice(-20) : [],
+    delegations: Array.isArray(source.delegations) ? source.delegations.filter((item) => item && typeof item === "object").slice(-40) : []
+  };
+}
+
+function prepareReviewDelegations(state, agents = []) {
+  const ownership = state.ownership = normalizeOwnership(state.ownership, state);
+  const reviewerIds = new Set(agents
+    .filter((agent) => agent.id !== state.executorId && agent.enabled !== false && !agent.judge && isReviewerLike(agent))
+    .map((agent) => agent.id));
+  for (const delegation of ownership.delegations) {
+    if (delegation.type === "checkpoint_review" && delegation.checkpointVersion === state.checkpointVersion && !reviewerIds.has(delegation.assigneeId) && delegation.status === "pending") {
+      delegation.status = "superseded";
+    }
+  }
+  for (const agent of agents) {
+    if (!reviewerIds.has(agent.id)) continue;
+    reviewDelegationFor(state, agent, true);
+  }
+}
+
+function reviewDelegationFor(state, agent, create = false) {
+  const ownership = state.ownership = normalizeOwnership(state.ownership, state);
+  const existing = ownership.delegations.find((item) => (
+    item.type === "checkpoint_review"
+    && item.checkpointVersion === state.checkpointVersion
+    && item.assigneeId === agent.id
+  ));
+  if (existing || !create) return existing;
+  const delegation = {
+    id: `review:${state.checkpointVersion}:${agent.id}`,
+    type: "checkpoint_review",
+    checkpointVersion: state.checkpointVersion,
+    assignedBy: ownership.ownerId,
+    assigneeId: agent.id,
+    assigneeName: agent.name,
+    status: "pending"
+  };
+  ownership.delegations = [...ownership.delegations, delegation].slice(-40);
+  return delegation;
+}
+
+function pendingReviewersForCheckpoint(state, reviewers) {
+  prepareReviewDelegations(state, reviewers);
+  return reviewers.filter((agent) => reviewDelegationFor(state, agent, false)?.status === "pending");
+}
+
+function reviewCheckpointComplete(state) {
+  const ownership = normalizeOwnership(state.ownership, state);
+  const delegates = ownership.delegations.filter((item) => (
+    item.type === "checkpoint_review" && item.checkpointVersion === state.checkpointVersion
+  ));
+  return delegates.length > 0 && delegates.every((item) => item.status === "completed" || item.status === "superseded");
 }
 
 function permissionRank(value) {

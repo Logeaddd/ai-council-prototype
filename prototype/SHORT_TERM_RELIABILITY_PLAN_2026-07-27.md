@@ -84,8 +84,11 @@ Completed on 2026-07-27:
 
 Still open before the real-provider release gate:
 
-* Make delegation explicit beneath the durable delivery owner, then test
-  ownership transfer, review, and recovery across interruption.
+* Delivery ownership and checkpoint-review delegation are now explicit and
+  durable in the next commit. A replacement owner gets a recorded transfer
+  rather than silently inheriting work; every assigned reviewer must finish
+  the current checkpoint before that checkpoint can close. TaskRun emits a
+  `delivery_owner_transferred` event for recovery/audit.
 * Add PTY only where a real task proves it necessary; expand trusted unknown
   tool acquisition and long-history pressure tests; then run the paid
   real-provider campaign with its mechanical oracles.

@@ -157,6 +157,10 @@ export function syncTaskRunFromSession(options = {}) {
   const previousFingerprint = current.execution?.checkpointFingerprint || "";
   next.execution.checkpointFingerprint = checkpointFingerprint;
   writeTaskRun(groupPath, next);
+  const ownerTransfer = latestOwnerTransfer(current.execution?.ownership, next.execution?.ownership);
+  if (ownerTransfer) {
+    appendTaskRunEvent(groupPath, id, "delivery_owner_transferred", ownerTransfer);
+  }
   if (previousFingerprint !== checkpointFingerprint) {
     appendTaskRunEvent(groupPath, id, "checkpoint_updated", {
       execution: next.execution,
@@ -513,6 +517,7 @@ function normalizeExecution(value = {}) {
     active: Boolean(source.active),
     executorId: String(source.executorId || ""),
     executorName: String(source.executorName || ""),
+    ownership: normalizeOwnership(source.ownership, source),
     phase: String(source.phase || ""),
     nextAction: String(source.nextAction || ""),
     checkpointVersion: Math.max(0, Number(source.checkpointVersion || 0)),
@@ -529,6 +534,53 @@ function normalizeExecution(value = {}) {
     processes: normalizeProcesses(source.processes),
     resumed: Boolean(source.resumed)
   };
+}
+
+function normalizeOwnership(value = {}, execution = {}) {
+  const source = value && typeof value === "object" ? value : {};
+  return {
+    ownerId: String(source.ownerId || execution.executorId || ""),
+    ownerName: String(source.ownerName || execution.executorName || ""),
+    version: Math.max(1, Number(source.version || 1)),
+    transfers: Array.isArray(source.transfers)
+      ? source.transfers.filter((item) => item && typeof item === "object").map(compactOwnershipTransfer).slice(-20)
+      : [],
+    delegations: Array.isArray(source.delegations)
+      ? source.delegations.filter((item) => item && typeof item === "object").map(compactDelegation).slice(-40)
+      : []
+  };
+}
+
+function compactOwnershipTransfer(value = {}) {
+  return {
+    fromId: String(value.fromId || ""),
+    fromName: String(value.fromName || ""),
+    toId: String(value.toId || ""),
+    toName: String(value.toName || ""),
+    reason: String(value.reason || "").slice(0, 300),
+    version: Math.max(1, Number(value.version || 1))
+  };
+}
+
+function compactDelegation(value = {}) {
+  return {
+    id: String(value.id || ""),
+    type: String(value.type || ""),
+    checkpointVersion: Math.max(0, Number(value.checkpointVersion || 0)),
+    assignedBy: String(value.assignedBy || ""),
+    assigneeId: String(value.assigneeId || ""),
+    assigneeName: String(value.assigneeName || ""),
+    status: String(value.status || "pending"),
+    result: String(value.result || "").slice(0, 120)
+  };
+}
+
+function latestOwnerTransfer(previous = {}, next = {}) {
+  const priorVersion = Number(previous?.version || 1);
+  const nextVersion = Number(next?.version || 1);
+  if (nextVersion <= priorVersion || !next?.ownerId) return undefined;
+  const transfer = Array.isArray(next.transfers) ? next.transfers.at(-1) : undefined;
+  return transfer && transfer.toId === next.ownerId ? compactOwnershipTransfer(transfer) : undefined;
 }
 
 function mergeExecution(previous = {}, current = {}) {
