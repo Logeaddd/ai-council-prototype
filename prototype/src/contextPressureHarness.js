@@ -25,7 +25,8 @@ export function runContextPressureBaseline(options = {}) {
       runSupersededInstructionScenario(groupPath, fixture),
       runPersistedInvalidationScenario(groupPath, fixture),
       runRepeatedEvidenceScenario(groupPath, fixture),
-      runContinuationCacheScenario(groupPath, fixture)
+      runContinuationCacheScenario(groupPath, fixture),
+      runMultiMemberResumeScenario(groupPath, fixture)
     ];
     const report = {
       schema: "ai-council.context-pressure-baseline.v1",
@@ -66,13 +67,13 @@ function createRetainedHistoryFixture(groupPath, seed) {
   const historySession = completeSession({
     id: `history_${seed}`,
     question: `Historical project context containing ${anchor}.`,
-    messages: Array.from({ length: 130 }, (_, index) => message({
+    messages: Array.from({ length: 160 }, (_, index) => message({
       id: `history_message_${index}`,
       round: Math.floor(index / 3) + 1,
       modelCallIndex: index + 1,
       text: index === 11
         ? `${anchor} is the exact historical source that must remain retrievable after long filler.`
-        : `FILLER_${index}_${seed} ${fillerText(seed + index, 720)}`
+        : `FILLER_${index}_${seed} ${fillerText(seed + index, 900)}`
     }))
   });
   writeGroupSession(historySession, groupPath);
@@ -90,6 +91,7 @@ function createRetainedHistoryFixture(groupPath, seed) {
     anchor,
     historySession,
     rebuiltIndex,
+    retainedCharacters: historySession.messages.reduce((total, item) => total + String(item?.response?.argument || "").length, 0),
     journalHits,
     archiveHits,
     hotCache,
@@ -115,6 +117,7 @@ function runBuriedSourceScenario(groupPath, fixture) {
     rebuiltIndexEvents: fixture.rebuiltIndex.events.length,
     archiveSearchHits: fixture.archiveHits.length,
     journalSearchHits: fixture.journalHits.length,
+    retainedCharacters: fixture.retainedCharacters,
     exactEventId: target.id,
     exactSourceInjected: injected,
     receiptTokens: context.contextReceipt.budget.estimatedContextTokens,
@@ -239,8 +242,78 @@ function runContinuationCacheScenario(groupPath, fixture) {
   }, continuation && Boolean(cache?.sourceCount));
 }
 
+function runMultiMemberResumeScenario(groupPath, fixture) {
+  const architectureMarker = `T115_ARCHITECTURE_MARKER_${fixture.anchor}`;
+  const ownershipMarker = `T115_DELIVERY_OWNER_MARKER_${fixture.anchor}`;
+  const reviewMarker = `T115_REVIEW_MARKER_${fixture.anchor}`;
+  const session = activeSession("multi_member_resume", "continue", [
+    message({
+      id: "architect_public_record",
+      round: 1,
+      modelCallIndex: 1,
+      agentId: "architect",
+      agentName: "Architect",
+      text: `Architecture decision: ${architectureMarker}.`
+    }),
+    message({
+      id: "delivery_owner_public_record",
+      round: 2,
+      modelCallIndex: 2,
+      agentId: "delivery_owner",
+      agentName: "Delivery Owner",
+      text: `Execution checkpoint: ${ownershipMarker}.`
+    }),
+    message({
+      id: "reviewer_public_record",
+      round: 3,
+      modelCallIndex: 3,
+      agentId: "reviewer",
+      agentName: "Reviewer",
+      text: `Review checkpoint: ${reviewMarker}.`
+    })
+  ]);
+  const members = [
+    { id: "architect", name: "Architect", role: "Architecture" },
+    { id: "delivery_owner", name: "Delivery Owner", role: "Delivery owner" },
+    { id: "reviewer", name: "Reviewer", role: "Reviewer", isReviewer: true }
+  ];
+  const contexts = members.map((member) => buildRealContext(session, fixture, {
+    agent: member,
+    continuationContext: {
+      previousSessionId: fixture.historySession.id,
+      previousQuestion: fixture.historySession.question,
+      sourcePath: `sessions/${fixture.historySession.id}.json`,
+      summary: `Resume ${architectureMarker}, ${ownershipMarker}, and ${reviewMarker}.`
+    },
+    recentMessageLimit: 6
+  }));
+  const memberMetrics = contexts.map((context, index) => {
+    const prompt = contextPrompt(context);
+    return {
+      memberId: members[index].id,
+      seesArchitecture: prompt.includes(architectureMarker),
+      seesOwnerCheckpoint: prompt.includes(ownershipMarker),
+      seesReviewCheckpoint: prompt.includes(reviewMarker),
+      continuationInjected: context.contextReceipt.decisions.some((item) => item.source.type === "continuation" && item.source.sessionId === fixture.historySession.id),
+      receipt: receiptMetrics(context.contextReceipt)
+    };
+  });
+  const valid = memberMetrics.every((item) => (
+    item.seesArchitecture
+      && item.seesOwnerCheckpoint
+      && item.seesReviewCheckpoint
+      && item.continuationInjected
+      && item.receipt.injectedSources > 0
+  ));
+  return measured("multi_member_visibility_and_resume", {
+    members: memberMetrics,
+    retainedHistorySessionId: fixture.historySession.id,
+    publicMarkers: [architectureMarker, ownershipMarker, reviewMarker]
+  }, valid);
+}
+
 function buildRealContext(session, fixture, options = {}) {
-  return buildMemberContext(baseAgent(), session, {
+  return buildMemberContext(baseAgent(options.agent), session, {
     groupSettings: {
       recentMessageLimit: options.recentMessageLimit ?? 6,
       contextArchiveInjectionLimit: 6,
@@ -262,13 +335,14 @@ function buildRealContext(session, fixture, options = {}) {
   });
 }
 
-function baseAgent() {
+function baseAgent(overrides = {}) {
   return {
     id: "pressure_agent",
     name: "Pressure Agent",
     role: "General delivery member",
     providerLimits: { contextWindow: 18000, maxOutputTokens: 1200 },
-    tokenLimits: { maxInputTokensPerCall: 15000 }
+    tokenLimits: { maxInputTokensPerCall: 15000 },
+    ...overrides
   };
 }
 
@@ -297,13 +371,13 @@ function completeSession({ id, question, messages }) {
   };
 }
 
-function message({ id, round, modelCallIndex, text }) {
+function message({ id, round, modelCallIndex, text, agentId = "writer", agentName = "Writer" }) {
   return {
     id,
     round,
     modelCallIndex,
-    agentId: "writer",
-    agentName: "Writer",
+    agentId,
+    agentName,
     createdAt: `2026-07-14T00:${String(Math.floor(modelCallIndex / 60)).padStart(2, "0")}:${String(modelCallIndex % 60).padStart(2, "0")}.000Z`,
     response: { status: "speak", argument: text }
   };
@@ -340,7 +414,19 @@ function aggregateScenarios(scenarios) {
     measured: scenarios.filter((scenario) => scenario.status === "measured").length,
     failed: scenarios.filter((scenario) => scenario.status !== "measured").map((scenario) => scenario.id),
     staleInstructionVisibility: scenarios.find((scenario) => scenario.id === "superseded_instruction_visibility")?.metrics || {},
-    duplicateEvidence: scenarios.find((scenario) => scenario.id === "repeated_execution_evidence")?.metrics || {}
+    duplicateEvidence: scenarios.find((scenario) => scenario.id === "repeated_execution_evidence")?.metrics || {},
+    multiMemberResume: scenarios.find((scenario) => scenario.id === "multi_member_visibility_and_resume")?.metrics || {}
+  };
+}
+
+function receiptMetrics(receipt = {}) {
+  const decisions = Array.isArray(receipt.decisions) ? receipt.decisions : [];
+  const policy = receipt.policy || {};
+  return {
+    injectedSources: decisions.filter((item) => item.status === "injected" || item.status === "shortened").length,
+    omittedSources: decisions.filter((item) => item.status === "omitted" || item.status === "deduplicated" || item.status === "invalidated").length,
+    invalidatedSources: Array.isArray(policy.invalidatedSources) ? policy.invalidatedSources.length : 0,
+    estimatedContextTokens: Number(receipt.budget?.estimatedContextTokens || 0)
   };
 }
 

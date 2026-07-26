@@ -11,13 +11,14 @@ test("context pressure baseline uses retained sessions, a rebuilt public index, 
     const run = runContextPressureBaseline({ outputDir, seed: 20260714 });
     assert.equal(run.report.status, "passed", JSON.stringify(run.report, null, 2));
     assert.equal(run.report.scope, "deterministic_context_pipeline_only");
-    assert.equal(run.report.scenarios.length, 5);
+    assert.equal(run.report.scenarios.length, 6);
     assert.equal(run.report.scenarios.every((scenario) => scenario.status === "measured"), true);
 
     const buried = run.report.scenarios.find((scenario) => scenario.id === "buried_exact_source");
     assert.equal(buried.metrics.exactSourceInjected, true);
     assert.equal(buried.metrics.journalSearchHits > 0, true);
     assert.equal(buried.metrics.rebuiltIndexEvents > 100, true);
+    assert.equal(buried.metrics.retainedCharacters >= 140000, true);
 
     const stale = run.report.scenarios.find((scenario) => scenario.id === "superseded_instruction_visibility");
     assert.equal(stale.metrics.currentInstructionPresent, true);
@@ -33,6 +34,12 @@ test("context pressure baseline uses retained sessions, a rebuilt public index, 
     assert.equal(repeated.metrics.deduplicated, 95);
     assert.equal(repeated.metrics.injected, 1);
     assert.equal(repeated.metrics.latestEvidenceVisible, true);
+
+    const multiMember = run.report.scenarios.find((scenario) => scenario.id === "multi_member_visibility_and_resume");
+    assert.equal(multiMember.metrics.members.length, 3);
+    assert.equal(multiMember.metrics.members.every((member) => member.seesArchitecture && member.seesOwnerCheckpoint && member.seesReviewCheckpoint), true);
+    assert.equal(multiMember.metrics.members.every((member) => member.continuationInjected), true);
+    assert.equal(multiMember.metrics.members.every((member) => member.receipt.injectedSources > 0), true);
     assert.equal(fs.existsSync(path.join(run.runDir, "report.json")), true);
   } finally {
     fs.rmSync(outputDir, { recursive: true, force: true });
