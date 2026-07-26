@@ -26,6 +26,17 @@ test("delivery tasks choose one highest-permission executor", () => {
   assert.match(executionInstruction(state, agents[1]), /primary executor/);
 });
 
+test("explicit rerun and verification requests remain delivery work after recovery", () => {
+  const english = "Run the current deliverable once more to verify its current state after recovery.";
+  const chinese = "恢复后请运行当前产物并验证其当前状态。";
+  assert.equal(isDeliveryTask(english), true);
+  assert.equal(isDeliveryTask(chinese), true);
+  const state = createExecutionState({ question: english, agents, workspaceGroup });
+  assert.equal(state.active, true);
+  assert.equal(state.executorId, "builder");
+  assert.match(state.nextAction, /real workspace mutation/);
+});
+
 test("Chinese report requests are delivery work owned by one full-permission executor", () => {
   const question = "帮我做一个关于我的世界兔子模组的调查报告，要完整全面，图文并茂，编辑在1个pdf文件里面，放在桌面上";
   const state = createExecutionState({ question, agents, workspaceGroup });

@@ -192,7 +192,7 @@ export function isDeliveryTask(question) {
   const explicitReview = /\b(review|analy[sz]e|assess|evaluate|inspect|what\s+do\s+you\s+think)\b|\u5e2e\u6211\u770b\u770b|\u770b\u770b|\u68c0\u67e5|\u5206\u6790|\u8bc4\u4ef7|\u8bc4\u5ba1|\u5ba1\u67e5|\u600e\u4e48\u6837|\u7ed9\u5efa\u8bae|\u53ea\u7ed9\u5efa\u8bae|\u4e0d\u8981\u6539\u52a8/i;
   if (explicitNoChange && explicitReview.test(directive.leading)) return false;
   if (continuationWork && !explicitNoChange) return true;
-  const explicitDirectiveDelivery = /\b(build|create|implement|write|modify|fix|generate|package|compile|assemble|install|delete|rename|move|commit|push)\b|\u6784\u5efa|\u751f\u6210|\u5236\u4f5c|\u5f00\u53d1|\u5b9e\u73b0|\u7f16\u5199|\u5199\u5165|\u4fee\u6539|\u4fee\u590d|\u6253\u5305|\u5b89\u88c5|\u5220\u9664|\u91cd\u547d\u540d|\u79fb\u52a8|\u63d0\u4ea4|\u63a8\u9001/i;
+  const explicitDirectiveDelivery = /\b(build|create|implement|write|modify|fix|generate|package|compile|assemble|install|delete|rename|move|commit|push|run|execute|test|validate|verify)\b|\u6784\u5efa|\u751f\u6210|\u5236\u4f5c|\u5f00\u53d1|\u5b9e\u73b0|\u7f16\u5199|\u5199\u5165|\u4fee\u6539|\u4fee\u590d|\u6253\u5305|\u5b89\u88c5|\u5220\u9664|\u91cd\u547d\u540d|\u79fb\u52a8|\u63d0\u4ea4|\u63a8\u9001|\u8fd0\u884c|\u6267\u884c|\u6d4b\u8bd5|\u9a8c\u8bc1|\u6821\u9a8c/i;
   if (explicitReview.test(directive.leading) && !explicitDirectiveDelivery.test(directive.leading)) return false;
   if (explicitDirectiveDelivery.test(directive.combined)) return true;
   if (/^(?:update|edit|change|adjust|extend|refactor)\b/i.test(directive.leading)) return true;
