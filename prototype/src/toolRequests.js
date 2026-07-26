@@ -266,7 +266,9 @@ export async function executeToolRequests(options = {}) {
 
     accepted.push(safeRequestForStorage(base));
     const start = Date.now();
-    events.push(toolEvent("tool_start", base, { status: "running" }));
+    const startEvent = toolEvent("tool_start", base, { status: "running" });
+    events.push(startEvent);
+    publishLiveToolStart(options, startEvent);
     const result = await executeOne(base, options);
     results.push(result);
     if (result.status === "completed" && isObservationRequest(base)) {
@@ -1277,6 +1279,16 @@ function toolEvent(type, request, extra = {}) {
     createdAt: nowIso(),
     ...extra
   };
+}
+
+function publishLiveToolStart(options, event) {
+  if (typeof options?.onToolEvent !== "function") return;
+  try {
+    Object.defineProperty(event, "__livePublished", { value: true, enumerable: false });
+    options.onToolEvent(event);
+  } catch {
+    // Live observers are optional; a broken observer must not stop the real tool.
+  }
 }
 
 function summarizeToolResult(record = {}) {

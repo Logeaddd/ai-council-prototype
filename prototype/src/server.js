@@ -1365,9 +1365,10 @@ async function executeCouncilRun(question, group, options, run, budgetGuard) {
     for await (const event of runCouncilEvents(question, group, baseDir, {
       ...options,
       onModelCall: budgetGuard?.onModelCall,
+      onToolEvent: (event) => appendCouncilRunEvent(options.groupPath, run, event),
       signal: run.controller.signal
     })) {
-      appendCouncilRunEvent(options.groupPath, run, event);
+      if (!event.__livePublished) appendCouncilRunEvent(options.groupPath, run, event);
     }
   } catch (error) {
     failure = error;

@@ -469,6 +469,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
           maxWorkspaceSnapshotEntries: group.settings.maxWorkspaceSnapshotEntries,
           maxWorkspaceChanges: group.settings.maxWorkspaceChanges,
           managedToolRoots: runtimeDiscoveryOptions.managedToolRoots,
+          onToolEvent: options.onToolEvent,
           signal: options.signal,
           observationCache,
           previousResults: [

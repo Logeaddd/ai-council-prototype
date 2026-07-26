@@ -157,6 +157,7 @@ export async function runSeededRealUserCampaign(options = {}) {
   const startedAt = new Date().toISOString();
   let server;
   const interruptedSessions = [];
+  const interruptedActivities = [];
   let failure;
   let failureKind = "failed";
 
@@ -214,6 +215,7 @@ export async function runSeededRealUserCampaign(options = {}) {
           session.status === "interrupted" && !interruptedSessions.some((item) => item.id === session.id)
         ), server.localApiToken);
         interruptedSessions.push(interruptedSession);
+        interruptedActivities.push(run.events);
         await stopHarnessServer(server);
         server = await startHarnessServer({ dataDir, workspaceRoot: dataDir, environment });
         timeline.push({ stageId: stage.id, kind: stage.kind, interruptAt: stage.interruptAt, result: "interrupted", sessionId: interruptedSession.id });
@@ -241,7 +243,7 @@ export async function runSeededRealUserCampaign(options = {}) {
       realProvider: options.allowMockProvider !== true
     });
     const persistence = verifyCampaignPersistence(groupPath, sessions, group);
-    const replayRecovery = verifyNoDuplicateVerifiedWork(interruptedSessions, sessions);
+    const replayRecovery = verifyNoDuplicateVerifiedWork(interruptedSessions, sessions, interruptedActivities);
     const resumption = verifyCampaignResumption(interruptedSessions, sessions);
     const recovery = {
       passed: replayRecovery.passed && resumption.passed,
@@ -621,7 +623,7 @@ export function verifyCampaignPersistence(groupPath, sessions, runtimeGroup) {
   return { passed: checks.every((item) => item.passed), checks };
 }
 
-export function verifyNoDuplicateVerifiedWork(interruptedSessions = [], sessions = []) {
+export function verifyNoDuplicateVerifiedWork(interruptedSessions = [], sessions = [], interruptedActivities = []) {
   const interruptedById = new Map((interruptedSessions || []).filter(Boolean).map((session) => [session.id, session]));
   const verifiedFingerprints = new Set([...interruptedById.values()].flatMap((session) => (
     (session.toolExecutionResults || []).filter(isSuccessfulVerifiedWork).map(verifiedWorkFingerprint)
@@ -632,8 +634,13 @@ export function verifyNoDuplicateVerifiedWork(interruptedSessions = [], sessions
   ));
   const blockedReplays = continuations.flatMap((session) => session.rejectedToolRequests || [])
     .filter((item) => item.code === "already_verified_continuation_command");
+  const startedVerificationActions = (interruptedActivities || []).flatMap((events) => events || [])
+    .filter(isVerifiedToolActivityEvent);
+  const interruptionCheck = verifiedFingerprints.size > 0
+    ? check("verified_work_before_interruption", true, `${verifiedFingerprints.size} successful verified-work fingerprints`)
+    : check("verification_work_started_before_interruption", startedVerificationActions.length > 0, `${startedVerificationActions.length} verification actions started before interruption`);
   const checks = [
-    check("verified_work_before_interruption", verifiedFingerprints.size > 0, `${verifiedFingerprints.size} successful verified-work fingerprints`),
+    interruptionCheck,
     check("no_verified_command_replay_after_continue", repeatedCommands.length === 0, `${repeatedCommands.length} duplicate completed verification actions; ${blockedReplays.length} prevented replays`)
   ];
   return { passed: checks.every((item) => item.passed), checks };
@@ -1254,9 +1261,12 @@ export function isStreamingActivityEvent(event = {}) {
 }
 
 function isVerifiedToolActivityEvent(event = {}) {
-  return event.type === "tool_success"
+  // The stop request must race the command while it is still live. Waiting
+  // for tool_success lets short commands finish before the observer can
+  // disconnect and explicitly stop the durable run.
+  return event.type === "tool_start"
     && ["execute_command", "run_code", "run_tests"].includes(event.tool)
-    && event.status === "completed";
+    && event.status === "running";
 }
 
 function isMaterialActionType(type) {
