@@ -516,6 +516,32 @@ test("OpenAI-compatible client falls back to JSON protocol when tools are reject
   }
 });
 
+test("OpenAI-compatible client reports a silent stream as a retryable idle timeout", async () => {
+  const server = http.createServer(async (req, res) => {
+    for await (const _ of req) {}
+    res.writeHead(200, { "Content-Type": "text/event-stream; charset=utf-8" });
+    res.flushHeaders();
+    setTimeout(() => res.end(), 2000);
+  });
+  await listen(server);
+  try {
+    await assert.rejects(() => callAgentResult({
+      id: "idle-openai",
+      provider: "openai-compatible",
+      apiBaseUrl: `http://127.0.0.1:${server.address().port}/v1`,
+      apiKey: "test-key",
+      model: "test-model",
+      streamIdleTimeoutMs: 1000,
+      retry: { maxRetries: 0 }
+    }, [{ role: "user", content: "Question" }], {
+      timeoutMs: 5000,
+      allowUnsafePrivateNetwork: true
+    }), (error) => error?.code === "stream_idle_timeout");
+  } finally {
+    await close(server);
+  }
+});
+
 test("Anthropic client returns native tool_use blocks", async () => {
   const server = http.createServer(async (req, res) => {
     for await (const _ of req) {}

@@ -123,6 +123,17 @@ async function callOpenAiCompatibleOnce({ agent, apiBaseUrl, apiKey, model, mess
   const abortFromParent = () => controller.abort();
   options.signal?.addEventListener("abort", abortFromParent, { once: true });
   const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? 60000);
+  const idleTimeoutMs = resolveStreamIdleTimeoutMs(agent, options);
+  let idleTimeout;
+  let idleTimedOut = false;
+  const resetIdleTimeout = () => {
+    if (!idleTimeoutMs) return;
+    clearTimeout(idleTimeout);
+    idleTimeout = setTimeout(() => {
+      idleTimedOut = true;
+      controller.abort();
+    }, idleTimeoutMs);
+  };
   const payload = buildOpenAiCompatiblePayload(agent, {
     model,
     messages,
@@ -131,6 +142,7 @@ async function callOpenAiCompatibleOnce({ agent, apiBaseUrl, apiKey, model, mess
     nativeToolConversation: options.nativeToolConversation
   });
   try {
+    resetIdleTimeout();
     const response = await fetch(`${apiBaseUrl.replace(/\/$/, "")}/chat/completions`, {
       method: "POST",
       signal: controller.signal,
@@ -141,10 +153,15 @@ async function callOpenAiCompatibleOnce({ agent, apiBaseUrl, apiKey, model, mess
       body: JSON.stringify(payload)
     });
     if (!response.ok) throw await httpError(response);
-    return await readOpenAiStream(response, options.onDelta);
+    resetIdleTimeout();
+    return await readOpenAiStream(response, options.onDelta, resetIdleTimeout);
+  } catch (error) {
+    if (idleTimedOut) throw streamIdleTimeoutError(idleTimeoutMs);
+    throw error;
   } finally {
     options.signal?.removeEventListener("abort", abortFromParent);
     clearTimeout(timeout);
+    clearTimeout(idleTimeout);
   }
 }
 
@@ -324,7 +341,7 @@ async function httpError(response) {
   return error;
 }
 
-async function readOpenAiStream(response, onDelta) {
+async function readOpenAiStream(response, onDelta, onActivity = undefined) {
   if (!response.body) return { text: "", nativeToolCalls: [], usage: undefined };
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
@@ -336,6 +353,7 @@ async function readOpenAiStream(response, onDelta) {
   while (true) {
     const { value, done } = await reader.read();
     if (done) break;
+    onActivity?.();
     buffer += decoder.decode(value, { stream: true });
     const frames = buffer.split("\n\n");
     buffer = frames.pop() || "";
@@ -569,7 +587,24 @@ function resolveMaybeEnv(value) {
 }
 
 function isRetryableError(error) {
-  return [429, 500, 502, 503, 504].includes(Number(error.status));
+  return error?.code === "stream_idle_timeout" || [429, 500, 502, 503, 504].includes(Number(error.status));
+}
+
+function resolveStreamIdleTimeoutMs(agent = {}, options = {}) {
+  const configured = options.streamIdleTimeoutMs
+    ?? agent.streamIdleTimeoutMs
+    ?? agent.providerLimits?.streamIdleTimeoutMs;
+  if (configured === 0 || configured === "0") return 0;
+  const value = Number(configured);
+  if (!Number.isFinite(value)) return 120000;
+  return Math.max(1000, Math.min(15 * 60 * 1000, Math.floor(value)));
+}
+
+function streamIdleTimeoutError(timeoutMs) {
+  const error = new Error(`stream_idle_timeout:${timeoutMs}ms`);
+  error.code = "stream_idle_timeout";
+  error.retryable = true;
+  return error;
 }
 
 function isNativeToolUnsupported(error) {
