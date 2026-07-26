@@ -7,7 +7,7 @@ import { isConsensusParticipant, scoreConsensus, shouldStop, updateUnresolvedObj
 import { appendMemoryCandidates, listSessionHistoryCatalogue, readRecentGroupSessions, searchSessionContextArchive, writeContextArchive, writeGroupSession, writeSession } from "./storage.js";
 import { assessBudgetUsage, assessSizeUsage } from "./tokenLimits.js";
 import { appendSessionTranscriptChunk, readSummaryCache, updateDeterministicSummaries } from "./summaryCache.js";
-import { appendSessionUsage, estimateCost, estimateMemberAccruedCost } from "./usageStats.js";
+import { appendProviderUsageSample, appendSessionUsage, estimateCost, estimateMemberAccruedCost, readProviderUsageCalibration } from "./usageStats.js";
 import { appendAgentSemanticPublicMemories, appendSummarizerPublicMemories, formatPublicMemoriesForPrompt, rememberExplicitUserMemory } from "./publicMemory.js";
 import { applyObjectionLedger, isReviewerLike } from "./objectionLedger.js";
 import { computeFinalState } from "./finalState.js";
@@ -220,7 +220,8 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
         enabledSkills: loadEnabledSkills(baseDir, options.groupPath, options.appSettings),
         ...loadSummaryContext(options.groupPath, agent, options.appSettings),
         privateBossMessages: loadPrivateBossMessages(options.groupPath, agent, options.appSettings),
-        contextInvalidations
+        contextInvalidations,
+        providerUsageCalibration: loadProviderUsageCalibration(options.groupPath, agent)
       });
       const contextStatus = summarizeContextStatus(memberContext, {
         groupPath: options.groupPath,
@@ -564,6 +565,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
           ...loadSummaryContext(options.groupPath, agent, options.appSettings),
           privateBossMessages: loadPrivateBossMessages(options.groupPath, agent, options.appSettings),
           contextInvalidations,
+          providerUsageCalibration: loadProviderUsageCalibration(options.groupPath, agent),
           currentTurnToolResults: toolResult.results,
           currentTurnRejectedToolRequests: toolResult.rejected
         });
@@ -844,7 +846,8 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
     enabledSkills: loadEnabledSkills(baseDir, options.groupPath, options.appSettings),
     ...loadSummaryContext(options.groupPath, judge, options.appSettings),
     privateBossMessages: loadPrivateBossMessages(options.groupPath, judge, options.appSettings),
-    contextInvalidations
+    contextInvalidations,
+    providerUsageCalibration: loadProviderUsageCalibration(options.groupPath, judge)
   });
   const finalContextStatus = summarizeContextStatus(finalContext, {
     groupPath: options.groupPath,
@@ -1544,6 +1547,15 @@ function completeModelCall(record, raw = {}) {
   if (raw.error) record.error = raw.error;
   else record.rawText = raw.text || "";
   if (raw.usage) record.usage = raw.usage;
+  if (raw.usage && record.__trace?.groupPath) {
+    try {
+      appendProviderUsageSample(record.__trace.groupPath, record, raw.usage);
+    } catch (error) {
+      // Usage calibration is observability. A local accounting write failure
+      // must not rewrite a completed provider response into a fake failure.
+      record.usageCalibrationError = String(error?.message || error).slice(0, 300);
+    }
+  }
   appendModelCallTrace(record, { event: "complete", raw });
 }
 
@@ -1615,6 +1627,7 @@ function appendModelCallTrace(record, { event, raw } = {}) {
   if (raw?.error) payload.error = String(raw.error).slice(0, 500);
   if (raw?.text != null) payload.output = summarizeText(raw.text);
   if (raw?.usage) payload.usage = raw.usage;
+  if (record.usageCalibrationError) payload.usageCalibrationError = record.usageCalibrationError;
   fs.appendFileSync(filePath, `${JSON.stringify(payload)}\n`, "utf8");
 }
 
@@ -2177,9 +2190,14 @@ function summarizeContextStatus(memberContext, options = {}) {
     reservedOutputTokens: memberContext.limits.reservedOutputTokens
   });
   return {
+    contextWindow: memberContext.limits.contextWindow ?? null,
     effectiveInputLimit: memberContext.limits.effectiveInputLimit,
+    inputLimitKnown: Boolean(memberContext.limits.inputLimitKnown),
+    inputLimitSource: memberContext.limits.inputLimitSource || "unknown",
     effectiveOutputLimit: memberContext.limits.effectiveOutputLimit,
     reservedOutputTokens: memberContext.limits.reservedOutputTokens,
+    inputEstimateMultiplier: memberContext.limits.inputEstimateMultiplier || 1,
+    inputEstimateCalibration: memberContext.limits.inputEstimateCalibration || { status: "unavailable", sampleCount: 0 },
     totalTokens: memberContext.tokenEstimate.total,
     nonCompressibleCoreTokens: memberContext.tokenEstimate.nonCompressibleCore,
     compressionApplied: Boolean(memberContext.compression?.applied),
@@ -2303,6 +2321,20 @@ function findWorkspaceSeat(group, agent) {
 
 function formatCost(value) {
   return Number(value).toFixed(6).replace(/0+$/, "").replace(/\.$/, "");
+}
+
+function loadProviderUsageCalibration(groupPath, agent = {}) {
+  if (!groupPath) return undefined;
+  try {
+    return readProviderUsageCalibration(groupPath, {
+      provider: agent.provider,
+      model: agent.model
+    });
+  } catch {
+    // Calibration informs an estimate only. Treat an unreadable local ledger
+    // as unknown; never invent a provider context limit as a fallback.
+    return undefined;
+  }
 }
 
 function loadSummaryContext(groupPath, agent, appSettings) {

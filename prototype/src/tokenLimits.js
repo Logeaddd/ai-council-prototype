@@ -1,4 +1,3 @@
-const DEFAULT_CONTEXT_WINDOW = 16000;
 const DEFAULT_WARNING_THRESHOLD = 0.6;
 const DEFAULT_COMPRESSION_THRESHOLD = 0.75;
 const DEFAULT_HARD_STOP_THRESHOLD = 0.9;
@@ -9,8 +8,9 @@ export function estimateTokens(text, options = {}) {
   if (!value) return 0;
 
   const safetyMargin = numberOr(options.safetyMargin, DEFAULT_SAFETY_MARGIN);
+  const calibration = calibrationMultiplier(options.calibrationMultiplier);
   const base = estimateBaseTokens(value, options.contentType);
-  return Math.ceil(base * (1 + safetyMargin));
+  return Math.ceil(base * (1 + safetyMargin) * calibration);
 }
 
 export function estimateMessagesTokens(messages, options = {}) {
@@ -24,28 +24,40 @@ export function estimateMessagesTokens(messages, options = {}) {
   return Math.ceil(base);
 }
 
-export function resolveEffectiveLimits(agent = {}, groupSettings = {}) {
+export function resolveEffectiveLimits(agent = {}, groupSettings = {}, providerUsageCalibration = undefined) {
   const provider = agent.providerLimits || {};
   const soft = {
     ...(groupSettings.tokenLimits || {}),
     ...(agent.tokenLimits || {})
   };
 
-  const providerContextWindow = positiveNumber(provider.contextWindow) ?? DEFAULT_CONTEXT_WINDOW;
+  const providerContextWindow = positiveNumber(provider.contextWindow);
   const providerMaxOutput = positiveNumber(provider.maxOutputTokens);
   const softMaxOutput = positiveNumber(soft.maxOutputTokensPerCall);
   const effectiveOutputLimit = minKnown(providerMaxOutput, softMaxOutput) ?? 0;
   const requestedReserved = positiveNumber(soft.reservedOutputTokens) ?? 0;
   const reservedOutputTokens = Math.max(requestedReserved, effectiveOutputLimit);
-  const providerInputLimit = Math.max(1, providerContextWindow - reservedOutputTokens);
-  const softInputLimit = positiveNumber(soft.maxInputTokensPerCall) ?? providerInputLimit;
-  const effectiveInputLimit = Math.max(1, Math.min(providerInputLimit, softInputLimit));
+  const providerInputLimit = providerContextWindow
+    ? Math.max(1, providerContextWindow - reservedOutputTokens)
+    : undefined;
+  const softInputLimit = positiveNumber(soft.maxInputTokensPerCall);
+  const effectiveInputLimit = minKnown(providerInputLimit, softInputLimit);
+  const inputLimitSource = effectiveInputLimit === undefined
+    ? "unknown"
+    : providerInputLimit !== undefined && effectiveInputLimit === providerInputLimit
+      ? "provider_context_window"
+      : "configured_input_cap";
+  const inputEstimateMultiplier = calibrationMultiplier(providerUsageCalibration?.inputEstimateMultiplier);
 
   return {
     contextWindow: providerContextWindow,
     effectiveInputLimit,
+    inputLimitSource,
+    inputLimitKnown: effectiveInputLimit !== undefined,
     effectiveOutputLimit,
     reservedOutputTokens,
+    inputEstimateMultiplier,
+    inputEstimateCalibration: normalizeCalibration(providerUsageCalibration),
     warningThreshold: clampRatio(soft.warningThreshold, DEFAULT_WARNING_THRESHOLD),
     compressionThreshold: clampRatio(soft.compressionThreshold, DEFAULT_COMPRESSION_THRESHOLD),
     hardStopThreshold: clampRatio(soft.hardStopThreshold, DEFAULT_HARD_STOP_THRESHOLD),
@@ -84,7 +96,8 @@ export function assessBudgetUsage(value, budget, thresholds = {}) {
 }
 
 export function hasCoreOverflow(coreTokens, limits) {
-  return coreTokens > limits.effectiveInputLimit;
+  const limit = positiveNumber(limits?.effectiveInputLimit);
+  return limit !== undefined && coreTokens > limit;
 }
 
 function estimateBaseTokens(value, contentType) {
@@ -135,4 +148,23 @@ function numberOr(value, fallback) {
 function clampRatio(value, fallback) {
   if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
   return Math.max(0.01, Math.min(0.99, value));
+}
+
+function calibrationMultiplier(value) {
+  const numeric = positiveNumber(value);
+  // Never make the existing safety estimate less conservative merely because
+  // one provider sample happened to tokenize more efficiently.
+  return numeric === undefined ? 1 : Math.max(1, numeric);
+}
+
+function normalizeCalibration(value) {
+  if (!value || typeof value !== "object") return { status: "unavailable", sampleCount: 0 };
+  const sampleCount = Math.max(0, Math.floor(Number(value.sampleCount) || 0));
+  return {
+    status: sampleCount ? "observed" : "unavailable",
+    sampleCount,
+    freshestAt: typeof value.freshestAt === "string" ? value.freshestAt : "",
+    provider: typeof value.provider === "string" ? value.provider : "",
+    model: typeof value.model === "string" ? value.model : ""
+  };
 }

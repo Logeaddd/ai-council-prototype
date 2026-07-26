@@ -1052,3 +1052,40 @@ test("explicit invalidation excludes attributed summaries and compressed caches 
   assert.equal(context.contextReceipt.decisions.some((item) => item.status === "invalidated" && item.reason === "source_invalidated_in_continuation"), true);
   assert.equal(context.contextReceipt.decisions.some((item) => item.reason === "summary_provenance_missing_under_invalidation"), true);
 });
+
+test("unknown provider capacity remains explicit and retains bounded immediate tool evidence", () => {
+  const unknownAgent = {
+    ...agent,
+    providerLimits: {},
+    tokenLimits: {}
+  };
+  const context = buildMemberContext(unknownAgent, {
+    id: "session_unknown_provider_limit",
+    question: "Use the most recent command result to continue the task.",
+    unresolvedObjections: {},
+    artifacts: [],
+    messages: []
+  }, {
+    currentTurnToolResults: [{
+      id: "fresh-build",
+      tool: "execute_command",
+      status: "completed",
+      command: "npm run build",
+      result: { ok: true, stdout: "BUILD_OK\n".repeat(200) }
+    }]
+  });
+  const receipt = materializeContextReceipt(context, {
+    sessionId: "session_unknown_provider_limit",
+    modelCallIndex: 1,
+    inputMessages: buildContextPromptSections(context).map((section) => ({ role: "system", content: section.content }))
+  });
+
+  assert.equal(context.limits.inputLimitKnown, false);
+  assert.equal(context.limits.inputLimitSource, "unknown");
+  assert.equal(context.coreOverflow, false);
+  assert.equal(context.currentTurnEvidence.toolExecutionResults.length, 1);
+  assert.equal(context.currentTurnEvidenceCompression.maxTokens, 2400);
+  assert.equal(receipt.budget.effectiveInputLimit, null);
+  assert.equal(receipt.budget.inputLimitKnown, false);
+  assert.equal(receipt.call.inputEstimateMultiplier, 1);
+});

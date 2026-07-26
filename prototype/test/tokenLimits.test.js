@@ -58,7 +58,32 @@ test("unknown output capacity does not create an application speech limit or res
 
   assert.equal(limits.effectiveOutputLimit, 0);
   assert.equal(limits.reservedOutputTokens, 0);
-  assert.equal(limits.effectiveInputLimit, 16000);
+  assert.equal(limits.contextWindow, undefined);
+  assert.equal(limits.effectiveInputLimit, undefined);
+  assert.equal(limits.inputLimitKnown, false);
+  assert.equal(limits.inputLimitSource, "unknown");
+  assert.equal(hasCoreOverflow(1_000_000, limits), false);
+});
+
+test("observed provider calibration only adjusts estimates and does not invent a context window", () => {
+  // 72 ASCII characters yield an integral uncalibrated base estimate, so the
+  // assertion does not accidentally compare different rounding stages.
+  const raw = "a".repeat(72);
+  const baseline = estimateTokens(raw, { safetyMargin: 0 });
+  const calibrated = estimateTokens(raw, { safetyMargin: 0, calibrationMultiplier: 1.6 });
+  const limits = resolveEffectiveLimits({}, {}, {
+    provider: "openai-compatible",
+    model: "example-model",
+    sampleCount: 3,
+    freshestAt: "2026-07-27T10:00:00.000Z",
+    inputEstimateMultiplier: 1.6
+  });
+
+  assert.equal(calibrated, Math.ceil(baseline * 1.6));
+  assert.equal(limits.inputEstimateMultiplier, 1.6);
+  assert.equal(limits.inputEstimateCalibration.status, "observed");
+  assert.equal(limits.contextWindow, undefined);
+  assert.equal(limits.effectiveInputLimit, undefined);
 });
 
 test("explicit member output settings are preserved without an application ceiling", () => {

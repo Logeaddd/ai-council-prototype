@@ -5,10 +5,12 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   appendSessionUsage,
+  appendProviderUsageSample,
   estimateCost,
   estimateMemberAccruedCost,
   readGroupUsage,
   readMemberUsage,
+  readProviderUsageCalibration,
   readUsageSnapshot,
   summarizeSessionUsage
 } from "../src/usageStats.js";
@@ -145,4 +147,42 @@ test("usage stats can estimate accrued member cost from private usage", () => {
   const cost = estimateMemberAccruedCost(group.groupPath, group.seats[0], { inputPerMillion: 1, outputPerMillion: 0 });
 
   assert.equal(cost, 1);
+});
+
+test("provider usage calibration persists redacted counts and conservatively adjusts later estimates", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-provider-usage-"));
+  const groupPath = path.join(root, "usage-group");
+  const first = appendProviderUsageSample(groupPath, {
+    sessionId: "session_provider_1",
+    phase: "round",
+    round: 1,
+    agentId: "builder",
+    provider: "openai-compatible",
+    model: "evidence-model",
+    rawText: "A concise result.",
+    inputMessages: [{ role: "user", content: "secret prompt must not be written here" }],
+    contextReceipt: { call: { estimatedInputTokens: 100 } }
+  }, { input_tokens: 160, output_tokens: 40, total_tokens: 200 });
+  appendProviderUsageSample(groupPath, {
+    sessionId: "session_provider_2",
+    phase: "final",
+    agentId: "builder",
+    provider: "openai-compatible",
+    model: "evidence-model",
+    contextReceipt: { call: { estimatedInputTokens: 200 } }
+  }, { input_tokens: 250, output_tokens: 50, total_tokens: 300 });
+
+  const calibration = readProviderUsageCalibration(groupPath, {
+    provider: "openai-compatible",
+    model: "evidence-model"
+  });
+  const ledger = fs.readFileSync(path.join(groupPath, "shared", "usage", "provider-usage.jsonl"), "utf8");
+
+  assert.equal(first.estimated.inputTokens, 100);
+  assert.equal(calibration.status, "observed");
+  assert.equal(calibration.sampleCount, 2);
+  assert.equal(calibration.inputEstimateMultiplier, 1.6);
+  assert.equal(calibration.outputEstimateMultiplier >= 1, true);
+  assert.equal(ledger.includes("secret prompt must not be written here"), false);
+  assert.equal(ledger.includes("A concise result."), false);
 });

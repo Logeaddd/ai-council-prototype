@@ -73,12 +73,17 @@ Completed on 2026-07-27:
 * Stream silence is treated as retryable, auditable provider failure in
   `188532e`; this is an inactivity detector, not a tool, speech, or round
   quota. It can be explicitly disabled with `streamIdleTimeoutMs: 0`.
+* Provider token calibration is implemented in the next commit: provider
+  usage is kept as a redacted count-only ledger per provider/model, and later
+  prompt estimates use the most conservative observed input multiplier. The
+  old unverified 16K fallback is removed. An unknown context window remains
+  explicitly unknown: it cannot create a core-overflow stop, while fresh tool
+  evidence still gets a bounded result view. Usage counts do not prove a
+  provider context-window size, so explicit provider/configured limits remain
+  the only enforceable input limits.
 
 Still open before the real-provider release gate:
 
-* Calibrate token estimates and context limits from provider usage evidence.
-  The existing 16K fallback is not a verified provider limit and must not be
-  promoted to product truth.
 * Make delegation explicit beneath the durable delivery owner, then test
   ownership transfer, review, and recovery across interruption.
 * Add PTY only where a real task proves it necessary; expand trusted unknown

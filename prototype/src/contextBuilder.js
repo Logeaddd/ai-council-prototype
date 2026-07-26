@@ -10,9 +10,13 @@ const MAX_TOOL_CONTEXT_STRING_CHARS = 4000;
 const DEFAULT_EVIDENCE_STRING_CHARS = 1600;
 const MAX_EXECUTION_EVIDENCE_TOKEN_RATIO = 0.45;
 const EXECUTION_EVIDENCE_RESERVE_TOKENS = 160;
+// This is a result-view safeguard, not a claimed provider context capacity.
+// Unknown provider limits must not erase fresh tool evidence or create an
+// artificial core-overflow failure.
+const UNKNOWN_LIMIT_EVIDENCE_TOKENS = 2400;
 
 export function buildMemberContext(agent, session, options = {}) {
-  const limits = resolveEffectiveLimits(agent, options.groupSettings || {});
+  const limits = resolveEffectiveLimits(agent, options.groupSettings || {}, options.providerUsageCalibration);
   const originalQuestion = session.question || options.question || "";
   const latestBossInstruction = options.latestBossInstruction || "";
   const transcriptVisibility = normalizeTranscriptVisibility(options.transcriptVisibility);
@@ -73,7 +77,8 @@ export function buildMemberContext(agent, session, options = {}) {
     continuationContextSelection: continuationSelection,
     retrievedContext: buildRetrievedContextPack(retrievedSelection.items, {
       maxItems: options.retrievedContextLimit || options.groupSettings?.contextArchiveInjectionLimit || options.groupSettings?.contextSearchLimit,
-      maxTokens: options.retrievedContextMaxTokens || options.groupSettings?.contextArchiveInjectionTokens
+      maxTokens: options.retrievedContextMaxTokens || options.groupSettings?.contextArchiveInjectionTokens,
+      tokenEstimateOptions: limits
     }),
     historyCatalogue: normalizeHistoryCatalogue(options.historyCatalogue),
     publicEventHotCache: normalizePublicEventHotCache({ ...(options.publicEventHotCache || {}), events: hotCacheSelection.items }, options.groupSettings?.publicEventHotCacheLimit),
@@ -87,7 +92,7 @@ export function buildMemberContext(agent, session, options = {}) {
     coreBase,
     summaries
   });
-  const currentTurnEvidence = buildCurrentTurnEvidencePack(currentTurnGroups, currentTurnEvidenceBudget);
+  const currentTurnEvidence = buildCurrentTurnEvidencePack(currentTurnGroups, currentTurnEvidenceBudget, limits);
   const currentTurnSignatures = new Set(currentTurnEvidence.sourceRecords.map((item) => currentTurnEvidenceIdentity(item.kind, item.item)));
   const currentTurnMessages = contextMessagesFromCurrentTurnEvidence(currentTurnEvidence);
   const executionEvidenceBudget = resolveExecutionEvidenceBudget({
@@ -101,7 +106,7 @@ export function buildMemberContext(agent, session, options = {}) {
     fileOperationExecutionResults: visibleFileOperationExecutionResults,
     toolExecutionResults: visibleToolExecutionResults.filter((item) => !currentTurnSignatures.has(currentTurnEvidenceIdentity("tool", item))),
     rejectedToolRequests: visibleRejectedToolRequests.filter((item) => !currentTurnSignatures.has(currentTurnEvidenceIdentity("rejected", item)))
-  }, executionEvidenceBudget);
+  }, executionEvidenceBudget, limits);
   const core = {
     ...coreBase,
     fileOperationExecutionResults: executionEvidence.fileOperationExecutionResults,
@@ -125,11 +130,11 @@ export function buildMemberContext(agent, session, options = {}) {
     content: formatTranscriptMessage(message)
   }));
   const tokenEstimate = {
-    stable: estimateMessagesTokens(stableMessages),
-    currentTurnEvidence: estimateMessagesTokens(currentTurnMessages),
-    core: estimateMessagesTokens(coreMessages),
-    summaries: estimateMessagesTokens(summaryMessages),
-    recentTranscript: estimateMessagesTokens(recentMessages)
+    stable: estimateMessagesTokens(stableMessages, limits),
+    currentTurnEvidence: estimateMessagesTokens(currentTurnMessages, limits),
+    core: estimateMessagesTokens(coreMessages, limits),
+    summaries: estimateMessagesTokens(summaryMessages, limits),
+    recentTranscript: estimateMessagesTokens(recentMessages, limits)
   };
   const nonCompressibleCoreTokens = tokenEstimate.stable + tokenEstimate.currentTurnEvidence + tokenEstimate.core;
 
@@ -200,7 +205,8 @@ export function materializeContextReceipt(context, details = {}) {
       agentId: String(details.agentId || context?.agentId || ""),
       inputMessageCount: inputMessages.length,
       inputChars,
-      estimatedInputTokens: estimateMessagesTokens(inputMessages)
+      estimatedInputTokens: estimateMessagesTokens(inputMessages, context?.limits || {}),
+      inputEstimateMultiplier: Number(context?.limits?.inputEstimateMultiplier || 1)
     }
   };
 }
@@ -208,10 +214,10 @@ export function materializeContextReceipt(context, details = {}) {
 function buildContextReceiptDraft({ agent, session, options, context, visibleMessages, requestedRecentTranscript, recentTranscript, executionEvidence, currentTurnEvidence, invalidatedSources = [] }) {
   const sections = buildContextPromptSections(context);
   const sourcesBySection = contextSourcesBySection({ agent, session, options, context, recentTranscript, executionEvidence });
-  const totalTokens = sections.reduce((total, section) => total + estimateTokens(section.content), 0);
+  const totalTokens = sections.reduce((total, section) => total + estimateTokens(section.content, context.limits), 0);
   const targetTokens = compressionTargetTokens(context.limits) || context.limits.effectiveInputLimit;
   const sectionReceipts = sections.map((section) => {
-    const tokens = estimateTokens(section.content);
+    const tokens = estimateTokens(section.content, context.limits);
     const id = contextSectionId(section.title);
     return {
       id,
@@ -243,8 +249,13 @@ function buildContextReceiptDraft({ agent, session, options, context, visibleMes
     agentId: String(agent?.id || ""),
     transcriptVisibility: context.transcriptVisibility,
     budget: {
-      effectiveInputLimit: Number(context.limits.effectiveInputLimit || 0),
-      compressionTargetTokens: Number(targetTokens || 0),
+      contextWindow: context.limits.contextWindow ?? null,
+      effectiveInputLimit: context.limits.effectiveInputLimit ?? null,
+      inputLimitKnown: Boolean(context.limits.inputLimitKnown),
+      inputLimitSource: context.limits.inputLimitSource || "unknown",
+      compressionTargetTokens: targetTokens ?? null,
+      inputEstimateMultiplier: Number(context.limits.inputEstimateMultiplier || 1),
+      inputEstimateCalibration: context.limits.inputEstimateCalibration || { status: "unavailable", sampleCount: 0 },
       estimatedContextTokens: Number(context.tokenEstimate.total || 0),
       nonCompressibleCoreTokens: Number(context.tokenEstimate.nonCompressibleCore || 0),
       coreOverflow: Boolean(context.coreOverflow)
@@ -774,31 +785,46 @@ function normalizeExecutionCheckpointEvidence(value) {
 }
 
 function resolveExecutionEvidenceBudget({ limits, stableMessages, currentTurnMessages, coreBase, summaries }) {
-  const targetTokens = compressionTargetTokens(limits) || limits.effectiveInputLimit;
+  if (!limits?.inputLimitKnown) return UNKNOWN_LIMIT_EVIDENCE_TOKENS;
+  const targetTokens = evidenceTargetTokens(limits);
   const mandatoryTokens = estimateMessagesTokens([
     ...stableMessages,
     ...currentTurnMessages,
     ...contextMessagesFromCore(coreBase),
     ...contextMessagesFromSummaries(summaries)
-  ]);
+  ], limits);
   const available = Math.max(0, targetTokens - mandatoryTokens - EXECUTION_EVIDENCE_RESERVE_TOKENS);
-  const ratioLimit = Math.max(0, Math.floor(limits.effectiveInputLimit * MAX_EXECUTION_EVIDENCE_TOKEN_RATIO));
+  const ratioLimit = evidenceRatioLimit(limits);
   return Math.max(0, Math.min(available, ratioLimit));
 }
 
 function resolveCurrentTurnEvidenceBudget({ limits, stableMessages, coreBase, summaries }) {
-  const targetTokens = compressionTargetTokens(limits) || limits.effectiveInputLimit;
+  if (!limits?.inputLimitKnown) return UNKNOWN_LIMIT_EVIDENCE_TOKENS;
+  const targetTokens = evidenceTargetTokens(limits);
   const mandatoryTokens = estimateMessagesTokens([
     ...stableMessages,
     ...contextMessagesFromCore(coreBase),
     ...contextMessagesFromSummaries(summaries)
-  ]);
+  ], limits);
   const available = Math.max(0, targetTokens - mandatoryTokens - EXECUTION_EVIDENCE_RESERVE_TOKENS);
-  const ratioLimit = Math.max(0, Math.floor(limits.effectiveInputLimit * MAX_EXECUTION_EVIDENCE_TOKEN_RATIO));
+  const ratioLimit = evidenceRatioLimit(limits);
   return Math.max(0, Math.min(available, ratioLimit));
 }
 
-function buildExecutionEvidencePack(groups, maxTokens) {
+function evidenceTargetTokens(limits) {
+  return compressionTargetTokens(limits)
+    || limits?.effectiveInputLimit
+    || UNKNOWN_LIMIT_EVIDENCE_TOKENS;
+}
+
+function evidenceRatioLimit(limits) {
+  const inputLimit = Number(limits?.effectiveInputLimit || 0);
+  return inputLimit
+    ? Math.max(0, Math.floor(inputLimit * MAX_EXECUTION_EVIDENCE_TOKEN_RATIO))
+    : UNKNOWN_LIMIT_EVIDENCE_TOKENS;
+}
+
+function buildExecutionEvidencePack(groups, maxTokens, tokenEstimateOptions = {}) {
   const rawFileResults = Array.isArray(groups.fileOperationExecutionResults) ? groups.fileOperationExecutionResults : [];
   const rawToolResults = Array.isArray(groups.toolExecutionResults) ? groups.toolExecutionResults : [];
   const rawRejected = Array.isArray(groups.rejectedToolRequests) ? groups.rejectedToolRequests : [];
@@ -820,7 +846,7 @@ function buildExecutionEvidencePack(groups, maxTokens) {
   for (const candidate of candidates) {
     const remaining = Math.max(0, maxTokens - estimatedTokens);
     const forceKeep = remaining > 0 && candidate.priority >= 6;
-    const fitted = fitExecutionEvidenceCandidate(candidate, remaining, { forceKeep });
+    const fitted = fitExecutionEvidenceCandidate(candidate, remaining, { forceKeep, tokenEstimateOptions });
     if (!fitted) continue;
     kept.push({ ...candidate, record: fitted.record, shortened: fitted.shortened });
     estimatedTokens += fitted.tokens;
@@ -881,7 +907,7 @@ function buildExecutionEvidencePack(groups, maxTokens) {
   };
 }
 
-function buildCurrentTurnEvidencePack(groups = {}, maxTokens = Number.POSITIVE_INFINITY) {
+function buildCurrentTurnEvidencePack(groups = {}, maxTokens = Number.POSITIVE_INFINITY, tokenEstimateOptions = {}) {
   const sourceRecords = [
     ...dedupeSimilarToolResults(Array.isArray(groups.toolExecutionResults) ? groups.toolExecutionResults : []).map((item) => ({ kind: "tool", item })),
     ...dedupeSimilarToolResults(Array.isArray(groups.rejectedToolRequests) ? groups.rejectedToolRequests : []).map((item) => ({ kind: "rejected", item }))
@@ -896,10 +922,10 @@ function buildCurrentTurnEvidencePack(groups = {}, maxTokens = Number.POSITIVE_I
     const remaining = Math.max(0, maxTokens - estimatedTokens);
     const forceKeep = remaining > 0 && (candidate.priority >= 6 || kept.length === 0);
     const fitted = Number.isFinite(maxTokens)
-      ? fitExecutionEvidenceCandidate(candidate, remaining, { forceKeep })
+      ? fitExecutionEvidenceCandidate(candidate, remaining, { forceKeep, tokenEstimateOptions })
       : compactExecutionEvidenceRecord(candidate.kind, candidate.item, MAX_TOOL_CONTEXT_STRING_CHARS);
     if (!fitted) continue;
-    const tokens = Number.isFinite(fitted.tokens) ? fitted.tokens : estimateTokens(JSON.stringify(fitted.record));
+    const tokens = Number.isFinite(fitted.tokens) ? fitted.tokens : estimateTokens(JSON.stringify(fitted.record), tokenEstimateOptions);
     kept.push({ ...candidate, record: fitted.record, shortened: fitted.shortened, tokens });
     estimatedTokens += tokens;
     if (fitted.shortened) shortenedCount += 1;
@@ -1016,16 +1042,16 @@ function fitExecutionEvidenceCandidate(candidate, remainingTokens, options = {})
     : [DEFAULT_EVIDENCE_STRING_CHARS, 800, 320, 120];
   for (const maxStringChars of charLadder) {
     const compacted = compactExecutionEvidenceRecord(candidate.kind, candidate.item, maxStringChars);
-    const tokens = estimateTokens(JSON.stringify(compacted.record));
+    const tokens = estimateTokens(JSON.stringify(compacted.record), options.tokenEstimateOptions);
     if (tokens <= remainingTokens) return { ...compacted, tokens };
   }
   if (options.forceKeep && remainingTokens >= 24) {
-    return minimalExecutionEvidenceRecord(candidate.kind, candidate.item, remainingTokens);
+    return minimalExecutionEvidenceRecord(candidate.kind, candidate.item, remainingTokens, options.tokenEstimateOptions);
   }
   return null;
 }
 
-function minimalExecutionEvidenceRecord(kind, item = {}, remainingTokens) {
+function minimalExecutionEvidenceRecord(kind, item = {}, remainingTokens, tokenEstimateOptions = {}) {
   const base = kind === "file"
     ? {
       proposalId: item.proposalId || item.id,
@@ -1046,7 +1072,7 @@ function minimalExecutionEvidenceRecord(kind, item = {}, remainingTokens) {
       result: slimToolResultForEvidence(item.result || {}, {}, { ultra: true })
     };
   let record = removeEmptyEvidenceValues(base);
-  let tokens = estimateTokens(JSON.stringify(record));
+  let tokens = estimateTokens(JSON.stringify(record), tokenEstimateOptions);
   if (tokens <= remainingTokens) {
     return { record, shortened: true, tokens };
   }
@@ -1070,7 +1096,7 @@ function minimalExecutionEvidenceRecord(kind, item = {}, remainingTokens) {
         observedArtifacts: summarizeWorkspaceChangesForEvidence(result.workspaceChanges || {}).observedArtifacts
       })
     });
-    tokens = estimateTokens(JSON.stringify(record));
+    tokens = estimateTokens(JSON.stringify(record), tokenEstimateOptions);
     if (tokens <= remainingTokens) return { record, shortened: true, tokens };
   }
   record = removeEmptyEvidenceValues({
@@ -1079,7 +1105,7 @@ function minimalExecutionEvidenceRecord(kind, item = {}, remainingTokens) {
     status: item.status,
     note: "evidence_omitted_for_token_budget_see_session_storage"
   });
-  tokens = estimateTokens(JSON.stringify(record));
+  tokens = estimateTokens(JSON.stringify(record), tokenEstimateOptions);
   if (tokens <= remainingTokens) return { record, shortened: true, tokens };
   return null;
 }
@@ -1368,15 +1394,15 @@ function selectRecentTranscript(messages, limit = DEFAULT_RECENT_MESSAGES) {
 function fitRecentTranscriptToLimit({ stableMessages, currentTurnMessages = [], coreMessages, summaryMessages, recentTranscript, limits }) {
   const targetTokens = compressionTargetTokens(limits);
   if (!targetTokens) return recentTranscript;
-  const stableTokens = estimateMessagesTokens([...stableMessages, ...currentTurnMessages]);
-  const coreTokens = estimateMessagesTokens(coreMessages);
-  const summaryTokens = estimateMessagesTokens(summaryMessages);
+  const stableTokens = estimateMessagesTokens([...stableMessages, ...currentTurnMessages], limits);
+  const coreTokens = estimateMessagesTokens(coreMessages, limits);
+  const summaryTokens = estimateMessagesTokens(summaryMessages, limits);
   let kept = [...recentTranscript];
   while (kept.length) {
     const recentTokens = estimateMessagesTokens(kept.map((message) => ({
       role: "user",
       content: formatTranscriptMessage(message)
-    })));
+    })), limits);
     if (stableTokens + coreTokens + summaryTokens + recentTokens <= targetTokens) break;
     kept = kept.slice(1);
   }
@@ -1536,6 +1562,7 @@ function buildRetrievedContextPack(items, options = {}) {
   const omitted = [];
   let estimatedTokens = 0;
   let truncatedSnippets = 0;
+  const tokenEstimateOptions = options.tokenEstimateOptions || {};
 
   for (const item of deduped) {
     if (kept.length >= maxItems) {
@@ -1545,14 +1572,14 @@ function buildRetrievedContextPack(items, options = {}) {
     let candidate = { ...item };
     let snippetWasTrimmed = false;
     let formatted = formatRetrievedContextItem(candidate, kept.length + 1);
-    let tokens = estimateTokens(formatted);
+    let tokens = estimateTokens(formatted, tokenEstimateOptions);
     if (estimatedTokens + tokens > maxTokens) {
-      const remaining = maxTokens - estimatedTokens - estimateTokens(formatRetrievedContextItem({ ...candidate, snippet: "" }, kept.length + 1));
+      const remaining = maxTokens - estimatedTokens - estimateTokens(formatRetrievedContextItem({ ...candidate, snippet: "" }, kept.length + 1), tokenEstimateOptions);
       if (remaining <= 40) {
         omitted.push({ item, reason: "archive_token_budget" });
         continue;
       }
-      const trimmed = trimTextToEstimatedTokens(candidate.snippet, remaining);
+      const trimmed = trimTextToEstimatedTokens(candidate.snippet, remaining, tokenEstimateOptions);
       if (!trimmed || trimmed === candidate.snippet) {
         omitted.push({ item, reason: "archive_token_budget" });
         continue;
@@ -1560,7 +1587,7 @@ function buildRetrievedContextPack(items, options = {}) {
       candidate = { ...candidate, snippet: trimmed, snippetTruncated: true };
       snippetWasTrimmed = true;
       formatted = formatRetrievedContextItem(candidate, kept.length + 1);
-      tokens = estimateTokens(formatted);
+      tokens = estimateTokens(formatted, tokenEstimateOptions);
       if (estimatedTokens + tokens > maxTokens && kept.length) {
         omitted.push({ item, reason: "archive_token_budget" });
         continue;
@@ -1679,16 +1706,16 @@ function retrievedContextKey(item = {}) {
   ].join("|");
 }
 
-function trimTextToEstimatedTokens(text, maxTokens) {
+function trimTextToEstimatedTokens(text, maxTokens, tokenEstimateOptions = {}) {
   const value = String(text || "").trim();
-  if (!value || estimateTokens(value) <= maxTokens) return value;
+  if (!value || estimateTokens(value, tokenEstimateOptions) <= maxTokens) return value;
   let low = 0;
   let high = value.length;
   let best = "";
   while (low <= high) {
     const mid = Math.floor((low + high) / 2);
     const candidate = value.slice(0, mid).trimEnd();
-    if (estimateTokens(`${candidate}...`) <= maxTokens) {
+    if (estimateTokens(`${candidate}...`, tokenEstimateOptions) <= maxTokens) {
       best = candidate;
       low = mid + 1;
     } else {

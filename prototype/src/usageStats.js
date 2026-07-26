@@ -1,7 +1,9 @@
 import fs from "node:fs";
 import path from "node:path";
-import { estimateTokens } from "./tokenLimits.js";
+import { estimateMessagesTokens, estimateTokens } from "./tokenLimits.js";
 import { nowIso } from "./types.js";
+
+const PROVIDER_USAGE_SCHEMA = "ai-council.provider-usage.v1";
 
 export function appendSessionUsage(groupPath, session, group = undefined) {
   if (!groupPath || !session) return undefined;
@@ -54,6 +56,74 @@ export function readUsageSnapshot(groupPath, group = undefined) {
     totals: sumGroupRecords(groupRecords),
     recent: groupRecords.slice(-10),
     members
+  };
+}
+
+// Provider reports are deliberately separate from the human-facing transcript:
+// the record contains counts and model identity, never prompt/output text or
+// credentials. It is both a durable audit trail and the input to estimation
+// calibration for later calls to the same provider/model.
+export function appendProviderUsageSample(groupPath, record = {}, usage = undefined) {
+  if (!groupPath) return undefined;
+  const actual = normalizeProviderUsage(usage);
+  if (!actual) return undefined;
+
+  const estimatedInputTokens = positiveNumber(record.contextReceipt?.call?.estimatedInputTokens)
+    ?? estimateMessagesTokens(record.inputMessages || [], {
+      calibrationMultiplier: record.contextReceipt?.inputEstimateMultiplier
+    });
+  const estimatedOutputTokens = estimateTokens(record.rawText || "", {
+    calibrationMultiplier: record.contextReceipt?.outputEstimateMultiplier
+  });
+  const payload = {
+    schema: PROVIDER_USAGE_SCHEMA,
+    createdAt: nowIso(),
+    sessionId: String(record.sessionId || ""),
+    phase: String(record.phase || ""),
+    round: finiteInteger(record.round),
+    toolIteration: finiteInteger(record.toolIteration),
+    agentId: String(record.agentId || ""),
+    provider: String(record.provider || ""),
+    model: String(record.model || ""),
+    estimated: {
+      inputTokens: estimatedInputTokens,
+      outputTokens: estimatedOutputTokens
+    },
+    actual,
+    multiplier: {
+      input: observedMultiplier(actual.input_tokens, estimatedInputTokens),
+      output: observedMultiplier(actual.output_tokens, estimatedOutputTokens)
+    }
+  };
+  appendJsonl(providerUsagePath(path.resolve(groupPath)), payload);
+  return payload;
+}
+
+export function readProviderUsageCalibration(groupPath, identity = {}) {
+  if (!groupPath) return unavailableCalibration(identity);
+  const provider = String(identity.provider || "");
+  const model = String(identity.model || "");
+  const records = readJsonlIfExists(providerUsagePath(path.resolve(groupPath)))
+    .filter((record) => record?.schema === PROVIDER_USAGE_SCHEMA)
+    .filter((record) => record.provider === provider && record.model === model);
+  const inputSamples = records
+    .map((record) => positiveNumber(record?.multiplier?.input))
+    .filter((value) => value !== undefined);
+  const outputSamples = records
+    .map((record) => positiveNumber(record?.multiplier?.output))
+    .filter((value) => value !== undefined);
+  if (!inputSamples.length) return unavailableCalibration({ provider, model });
+
+  return {
+    status: "observed",
+    provider,
+    model,
+    sampleCount: inputSamples.length,
+    freshestAt: records.map((record) => String(record.createdAt || "")).sort().at(-1) || "",
+    // The maximum observed ratio is intentionally conservative. It does not
+    // claim a context-window size; it only compensates for under-estimation.
+    inputEstimateMultiplier: Math.max(1, ...inputSamples),
+    outputEstimateMultiplier: outputSamples.length ? Math.max(1, ...outputSamples) : 1
   };
 }
 
@@ -125,6 +195,49 @@ function positiveNumber(value) {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
 }
 
+function normalizeProviderUsage(value) {
+  if (!value || typeof value !== "object") return undefined;
+  const inputTokens = nonNegativeNumber(value.input_tokens ?? value.prompt_tokens);
+  const outputTokens = nonNegativeNumber(value.output_tokens ?? value.completion_tokens);
+  const totalTokens = nonNegativeNumber(value.total_tokens);
+  if (inputTokens === undefined && outputTokens === undefined && totalTokens === undefined) return undefined;
+  return {
+    input_tokens: inputTokens ?? 0,
+    output_tokens: outputTokens ?? 0,
+    total_tokens: totalTokens ?? (inputTokens ?? 0) + (outputTokens ?? 0)
+  };
+}
+
+function nonNegativeNumber(value) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && numeric >= 0 ? numeric : undefined;
+}
+
+function finiteInteger(value) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? Math.floor(numeric) : undefined;
+}
+
+function observedMultiplier(actual, estimated) {
+  const actualTokens = positiveNumber(actual);
+  const estimatedTokens = positiveNumber(estimated);
+  return actualTokens !== undefined && estimatedTokens !== undefined
+    ? actualTokens / estimatedTokens
+    : undefined;
+}
+
+function unavailableCalibration(identity = {}) {
+  return {
+    status: "unavailable",
+    provider: String(identity.provider || ""),
+    model: String(identity.model || ""),
+    sampleCount: 0,
+    freshestAt: "",
+    inputEstimateMultiplier: 1,
+    outputEstimateMultiplier: 1
+  };
+}
+
 function estimateResponseTokens(message) {
   const response = message.response || {};
   const text = [
@@ -155,6 +268,10 @@ function memberUsagePath(root, seat) {
 
 function groupUsagePath(root) {
   return path.join(root, "shared", "usage", "usage.jsonl");
+}
+
+function providerUsagePath(root) {
+  return path.join(root, "shared", "usage", "provider-usage.jsonl");
 }
 
 function appendJsonl(filePath, record) {

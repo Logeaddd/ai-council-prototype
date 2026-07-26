@@ -7512,13 +7512,85 @@ function writeDiscussionFakeMcpPackage(root) {
   return packageDir;
 }
 
+test("provider-reported usage is durably recorded and calibrates later contexts without inventing a window", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-provider-usage-engine-"));
+  const server = http.createServer(async (req, res) => {
+    const body = JSON.parse(await readRequestBody(req));
+    const prompt = JSON.stringify(body.messages || []);
+    if (prompt.includes("FinalDecision JSON object")) {
+      writeOpenAiStream(res, JSON.stringify({
+        answer: "Provider usage was recorded.",
+        consensus_score: 1,
+        supporting_agents: ["Builder"],
+        dissenting_agents: [],
+        minority_report: "",
+        risks: [],
+        next_actions: [],
+        selected_file_operation_ids: [],
+        memory_candidates: []
+      }), { prompt_tokens: 240, completion_tokens: 60, total_tokens: 300 });
+      return;
+    }
+    writeOpenAiStream(res, JSON.stringify({
+      status: "skip",
+      reason: "No action is needed before final synthesis.",
+      objections: [],
+      confidence: 1,
+      memory_candidates: []
+    }), { prompt_tokens: 200, completion_tokens: 40, total_tokens: 240 });
+  });
+  await listen(server);
+  const address = server.address();
+
+  try {
+    const group = validateGroupConfig({
+      id: "provider-usage-engine",
+      name: "Provider Usage Engine",
+      settings: {
+        maxRounds: 1,
+        minConsensusWeight: 1,
+        stopWhenAllSkip: true,
+        agentTimeoutMs: 3000,
+        allowSoloCouncil: true
+      },
+      agents: [{
+        id: "builder",
+        name: "Builder",
+        role: "Builder",
+        provider: "openai-compatible",
+        apiBaseUrl: `http://127.0.0.1:${address.port}/v1`,
+        allowUnsafePrivateNetwork: true,
+        apiKey: "secret-runtime-key",
+        model: "usage-model",
+        weight: 1,
+        enabled: true,
+        judge: true
+      }]
+    });
+    const result = await runCouncil("Record real provider usage.", group, tmp, { groupPath: tmp });
+    const ledgerPath = path.join(tmp, "shared", "usage", "provider-usage.jsonl");
+    const records = fs.readFileSync(ledgerPath, "utf8").trim().split(/\r?\n/).map((line) => JSON.parse(line));
+
+    assert.equal(result.session.messages[0].contextStatus.inputLimitKnown, false);
+    assert.equal(result.session.messages[0].contextStatus.inputLimitSource, "unknown");
+    assert.equal(records.length, 2);
+    assert.equal(records.every((record) => record.actual.input_tokens > 0), true);
+    assert.equal(records.every((record) => record.estimated.inputTokens > 0), true);
+    assert.equal(records.every((record) => record.model === "usage-model"), true);
+    assert.equal(JSON.stringify(records).includes("Record real provider usage."), false);
+  } finally {
+    await close(server);
+  }
+});
+
 function git(cwd, args) {
   return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
 }
 
-function writeOpenAiStream(res, text) {
+function writeOpenAiStream(res, text, usage = undefined) {
   res.writeHead(200, { "Content-Type": "text/event-stream; charset=utf-8" });
   res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: text } }] })}\n\n`);
+  if (usage) res.write(`data: ${JSON.stringify({ choices: [], usage })}\n\n`);
   res.write("data: [DONE]\n\n");
   res.end();
 }
