@@ -47,3 +47,36 @@ test("real tool execution records package and runtime acquisition facts without 
   assert.equal(fact.status, "ready");
   assert.equal(fact.lastTool, "run_code");
 });
+
+test("provisioning facts preserve verification provenance without persisting signed URL data", () => {
+  const groupPath = workspace();
+  recordCapabilityToolResults({
+    groupPath,
+    agent: { id: "builder" },
+    accepted: [{ id: "provision-1", tool: "provision_tool", toolName: "demo", commandName: "demo" }],
+    results: [{
+      id: "provision-1",
+      tool: "provision_tool",
+      status: "completed",
+      result: {
+        ok: true,
+        source: "managed_tool_provisioner",
+        command: "demo",
+        verification: { ok: true },
+        provenance: {
+          type: "download",
+          requestedUrl: "https://downloads.example.test/demo.zip?signature=secret",
+          finalUrl: "https://cdn.example.test/demo.zip?token=secret",
+          integrity: { status: "verified", algorithm: "sha256", expected: "a".repeat(64), actual: "a".repeat(64) }
+        }
+      }
+    }]
+  });
+
+  const runtime = listCapabilityFacts(groupPath).find((item) => item.id === "runtime:demo");
+  assert.equal(runtime.status, "ready");
+  assert.equal(runtime.evidence.integrityStatus, "verified");
+  assert.equal(runtime.evidence.actualSha256, "a".repeat(64));
+  assert.equal(runtime.evidence.requestedUrl, "https://downloads.example.test/demo.zip");
+  assert.equal(runtime.evidence.finalUrl, "https://cdn.example.test/demo.zip");
+});

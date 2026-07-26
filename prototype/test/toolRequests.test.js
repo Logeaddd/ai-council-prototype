@@ -1453,6 +1453,7 @@ test("provision_tool downloads and extracts a real tool archive before verificat
     ? "@echo off\r\necho downloaded 2.0\r\n"
     : "#!/bin/sh\necho downloaded 2.0\n";
   const archive = makeZip([{ name: `bin/${executableName}`, content: executableContent }]);
+  const archiveSha256 = createHash("sha256").update(archive).digest("hex");
   const server = http.createServer((req, res) => {
     res.writeHead(200, { "Content-Type": "application/zip", "Content-Length": archive.length });
     res.end(archive);
@@ -1472,7 +1473,8 @@ test("provision_tool downloads and extracts a real tool archive before verificat
         tool: "provision_tool",
         toolName: "downloaded",
         commandName: "downloaded",
-        downloadUrl: `http://127.0.0.1:${address.port}/downloaded.zip`,
+        downloadUrl: `http://127.0.0.1:${address.port}/downloaded.zip?temporary-token=not-for-logs`,
+        sha256: archiveSha256,
         verifyCommand,
         reason: "Download the missing CLI archive."
       }]
@@ -1480,8 +1482,89 @@ test("provision_tool downloads and extracts a real tool archive before verificat
 
     assert.equal(result.results[0].status, "completed", JSON.stringify(result.results[0]));
     assert.equal(result.results[0].result.strategy.type, "download");
+    assert.equal(result.results[0].result.provenance.integrity.status, "verified");
     assert.match(result.results[0].result.verification.stdout, /downloaded 2\.0/);
     assert.equal(fs.existsSync(path.join(tmp, "shared", "tools", "downloaded", "bin", executableName)), true);
+    const manifest = JSON.parse(fs.readFileSync(path.join(tmp, "shared", "tools", "downloaded", ".provisioning.json"), "utf8"));
+    assert.equal(manifest.provenance.integrity.status, "verified");
+    assert.doesNotMatch(manifest.provenance.requestedUrl, /temporary-token/);
+
+    const reused = await executeToolRequests({
+      permissionTier: "full",
+      groupPath: tmp,
+      agent: { id: "full", name: "Full" },
+      round: 2,
+      requests: [{ tool: "provision_tool", toolName: "downloaded", commandName: "downloaded", reason: "Reuse verified tool provenance." }]
+    });
+    assert.equal(reused.results[0].status, "completed", JSON.stringify(reused.results[0]));
+    assert.equal(reused.results[0].result.status, "already_available");
+    assert.equal(reused.results[0].result.provenance.integrity.status, "verified");
+  } finally {
+    await close(server);
+  }
+});
+
+test("provision_tool rejects checksum mismatches and removes the untrusted artifact", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-provision-checksum-"));
+  const archive = makeZip([{ name: "bin/unused", content: "not accepted" }]);
+  const server = http.createServer((req, res) => {
+    res.writeHead(200, { "Content-Type": "application/zip", "Content-Length": archive.length });
+    res.end(archive);
+  });
+  await listen(server);
+  try {
+    const address = server.address();
+    const result = await executeToolRequests({
+      permissionTier: "full",
+      groupPath: tmp,
+      agent: { id: "full", name: "Full" },
+      round: 1,
+      requests: [{
+        tool: "provision_tool",
+        toolName: "checksum-demo",
+        commandName: "checksum-demo",
+        downloadUrl: `http://127.0.0.1:${address.port}/checksum-demo.zip`,
+        sha256: "0".repeat(64),
+        reason: "Exercise checksum rejection."
+      }]
+    });
+
+    assert.equal(result.results[0].status, "failed");
+    assert.equal(result.results[0].code, "checksum_mismatch");
+    assert.equal(result.results[0].result.provenance.integrity.status, "mismatch");
+    assert.equal(fs.existsSync(path.join(tmp, "shared", "tools", "checksum-demo", "checksum-demo.zip")), false);
+  } finally {
+    await close(server);
+  }
+});
+
+test("provision_tool checks every redirect target before downloading", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-provision-redirect-"));
+  const server = http.createServer((req, res) => {
+    res.writeHead(302, { Location: "file:///not-a-download.zip" });
+    res.end();
+  });
+  await listen(server);
+  try {
+    const address = server.address();
+    const result = await executeToolRequests({
+      permissionTier: "full",
+      groupPath: tmp,
+      agent: { id: "full", name: "Full" },
+      round: 1,
+      requests: [{
+        tool: "provision_tool",
+        toolName: "redirect-demo",
+        commandName: "redirect-demo",
+        downloadUrl: `http://127.0.0.1:${address.port}/redirect.zip`,
+        reason: "Reject a redirect outside the allowed download protocol."
+      }]
+    });
+
+    assert.equal(result.results[0].status, "failed");
+    assert.equal(result.results[0].code, "unsafe_download_url");
+    assert.equal(result.results[0].result.provenance.integrity.status, "not_downloaded");
+    assert.equal(fs.existsSync(path.join(tmp, "shared", "tools", "redirect-demo", "redirect.zip")), false);
   } finally {
     await close(server);
   }

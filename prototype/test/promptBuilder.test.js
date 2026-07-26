@@ -283,7 +283,8 @@ test("round prompt advertises artifacts in speak schema", () => {
   assert.match(messages[0].content, /Do not put full source code/);
   assert.match(messages[0].content, /Use fetch_url only for text\/html\/json pages/);
   assert.match(messages[0].content, /Do not use fetch_url to download zip/);
-  assert.match(messages[0].content, /execute_command with curl\/PowerShell/);
+  assert.match(messages[0].content, /use provision_tool for a missing CLI\/runtime download/);
+  assert.match(messages[0].content, /publisher SHA-256/);
   assert.match(messages[0].content, /api_request/);
   assert.match(messages[0].content, /search saved public group history/);
   assert.match(messages[0].content, /search_context/);

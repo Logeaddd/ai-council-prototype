@@ -118,7 +118,8 @@ function observationsFor(request = {}, result = {}, options = {}) {
     taskRunId: String(options.taskRunId || options.taskRun?.id || ""),
     requestId: String(result?.id || request?.id || ""),
     lastError: success ? "" : String(result?.error || result?.result?.error || code || "tool_failed"),
-    status: coreStatus
+    status: coreStatus,
+    evidence: capabilityEvidence(tool, result)
   };
   const observations = [{ id: `core:${coreId}`, capabilityId: coreId, scope: "core", ...common }];
   if (ASSET_TOOLS.has(tool)) {
@@ -163,6 +164,7 @@ function assetFor(tool, request = {}, result = {}) {
 
 function assetStatus(tool, success, result) {
   if (!success) return "degraded";
+  if (tool === "provision_tool" && result?.result?.provenance?.integrity?.status === "unverified") return "unverified";
   if (tool === "skill_install" || tool === "mcp_install_npm") return "installed";
   if (tool === "skill_disable" || tool === "skill_remove" || tool === "mcp_uninstall") return "disabled";
   if (tool === "process_control") return String(result?.result?.process?.status || result?.result?.status || "ready").toLowerCase();
@@ -188,6 +190,7 @@ function mergeFact(previous, observation) {
     lastAgentId: observation.agentId,
     lastTaskRunId: observation.taskRunId,
     lastRequestId: observation.requestId,
+    evidence: observation.evidence || previous?.evidence || {},
     useCount: Math.max(0, Number(previous?.useCount || 0)) + 1
   };
 }
@@ -214,6 +217,7 @@ function normalizeFacts(value = {}) {
       lastAgentId: String(item.lastAgentId || ""),
       lastTaskRunId: String(item.lastTaskRunId || ""),
       lastRequestId: String(item.lastRequestId || ""),
+      evidence: normalizeEvidence(item.evidence),
       useCount: Math.max(0, Number(item.useCount || 0))
     });
   }
@@ -234,6 +238,54 @@ function sourceFor(result = {}) {
   return String(result?.result?.source || result?.source || "local_agent_tool").slice(0, 160);
 }
 
+function capabilityEvidence(tool, result = {}) {
+  if (tool !== "provision_tool") return {};
+  const provenance = result?.result?.provenance || {};
+  const integrity = provenance.integrity || {};
+  return normalizeEvidence({
+    sourceType: provenance.type,
+    manager: provenance.manager,
+    packageId: provenance.packageId,
+    requestedUrl: provenance.requestedUrl,
+    finalUrl: provenance.finalUrl,
+    integrityStatus: integrity.status,
+    integrityAlgorithm: integrity.algorithm,
+    expectedSha256: integrity.expected,
+    actualSha256: integrity.actual,
+    verificationStatus: result?.result?.verification?.ok ? "verified_command" : "verification_failed"
+  });
+}
+
+function normalizeEvidence(value) {
+  const item = value && typeof value === "object" ? value : {};
+  const digest = (candidate) => /^[a-f0-9]{64}$/i.test(String(candidate || "")) ? String(candidate).toLowerCase() : "";
+  return {
+    sourceType: String(item.sourceType || "").slice(0, 80),
+    manager: String(item.manager || "").slice(0, 80),
+    packageId: String(item.packageId || "").slice(0, 240),
+    requestedUrl: safeEvidenceUrl(item.requestedUrl),
+    finalUrl: safeEvidenceUrl(item.finalUrl),
+    integrityStatus: String(item.integrityStatus || "").slice(0, 80),
+    integrityAlgorithm: String(item.integrityAlgorithm || "").slice(0, 40),
+    expectedSha256: digest(item.expectedSha256),
+    actualSha256: digest(item.actualSha256),
+    verificationStatus: String(item.verificationStatus || "").slice(0, 80)
+  };
+}
+
+function safeEvidenceUrl(value) {
+  try {
+    const url = new URL(String(value || ""));
+    url.username = "";
+    url.password = "";
+    url.search = "";
+    url.hash = "";
+    return url.toString().slice(0, 2048);
+  } catch {
+    return "";
+  }
+}
+
 function isExternalCapability(id) {
   return ["web-search", "fetch-url", "api-request", "mcp-web-tools", "mcp-marketplace"].includes(id);
 }
@@ -251,6 +303,7 @@ function publicFact(fact) {
     lastSucceededAt: fact.lastSucceededAt,
     lastError: fact.lastError,
     lastTool: fact.lastTool,
+    evidence: fact.evidence,
     useCount: fact.useCount
   };
 }

@@ -904,6 +904,8 @@ function normalizeToolRequest(item, index) {
     packageId: stringField(item.packageId || item.package_id),
     installCommand: stringField(item.installCommand || item.install_command),
     downloadUrl: stringField(item.downloadUrl || item.download_url),
+    sha256: stringField(item.sha256 || item.expectedSha256 || item.expected_sha256 || item.checksum),
+    maxDownloadBytes: normalizeOptionalNumber(item.maxDownloadBytes || item.max_download_bytes),
     executablePath: stringField(item.executablePath || item.executable_path),
     verifyCommand: stringField(item.verifyCommand || item.verify_command),
     fileName: stringField(item.fileName || item.file_name),
@@ -996,6 +998,8 @@ function reject(request, code, reason) {
     packageId: request.packageId,
     installCommand: safeCommandForStorage(request.installCommand),
     downloadUrl: safeUrlForEvent(request.downloadUrl),
+    sha256: request.sha256,
+    maxDownloadBytes: request.maxDownloadBytes,
     executablePath: request.executablePath,
     verifyCommand: safeCommandForStorage(request.verifyCommand),
     fileName: request.fileName,
@@ -1972,6 +1976,10 @@ function safeRequestForStorage(request) {
   return {
     ...request,
     command: safeCommandForStorage(request.command),
+    installCommand: safeCommandForStorage(request.installCommand),
+    downloadUrl: safeDownloadUrlForStorage(request.downloadUrl),
+    sha256: request.sha256,
+    maxDownloadBytes: request.maxDownloadBytes,
     code: summarizeCodeForStorage(request.code),
     packageName: safePackageForStorage(request.packageName),
     runner: request.runner,
@@ -2039,6 +2047,15 @@ function safeUrlForEvent(value) {
   } catch {
     return "";
   }
+}
+
+function safeDownloadUrlForStorage(value) {
+  const safe = safeUrlForEvent(value);
+  if (!safe) return "";
+  const url = new URL(safe);
+  url.search = "";
+  url.hash = "";
+  return url.toString();
 }
 
 function safeSkillUrlForStorage(value) {
