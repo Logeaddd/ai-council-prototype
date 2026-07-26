@@ -13,72 +13,156 @@ const FULL_TIER_TOOLS = [
   "mcp_list_prompts", "mcp_get_prompt"
 ];
 
-export function nativeToolDefinitions(permissionTier = "text") {
-  const allowed = permissionTier === "full"
-    ? FULL_TIER_TOOLS
-    : permissionTier === "tool"
-      ? TOOL_TIER_TOOLS
-      : CONTEXT_TOOLS;
-  return [{
-    name: "ai_council_tool",
-    description: "Execute one real AI Council tool. Use only tools allowed for this member. Results are returned in the next model call.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        tool: { type: "string", enum: allowed },
-        reason: { type: "string" },
-        action: { type: "string" },
-        path: { type: "string" },
-        destination: { type: "string" },
-        code: { type: "string" },
-        oldText: { type: "string" },
-        newText: { type: "string" },
-        replaceAll: { type: "boolean" },
-        query: { type: "string" },
-        url: { type: "string" },
-        command: { type: "string" },
-        cwd: { type: "string" },
-        shell: { type: "string" },
-        timeoutMs: { type: "number" },
-        background: { type: "boolean" },
-        language: { type: "string" },
-        manager: { type: "string" },
-        packageName: { type: "string" },
-        toolName: { type: "string" },
-        commandName: { type: "string" },
-        packageId: { type: "string" },
-        installCommand: { type: "string" },
-        downloadUrl: { type: "string" },
-        executablePath: { type: "string" },
-        verifyCommand: { type: "string" },
-        runner: { type: "string" },
-        method: { type: "string" },
-        headers: { type: "object" },
-        json: {},
-        body: { type: "string" },
-        sessionId: { type: "string" },
-        eventId: { type: "string" },
-        round: { type: "number" },
-        count: { type: "number" },
-        offset: { type: "number" },
-        contextSessionId: { type: "string" },
-        eventType: { type: "string" },
-        actorId: { type: "string" },
-        taskId: { type: "string" },
-        file: { type: "string" },
-        commit: { type: "string" },
-        toolFilter: { type: "string" },
-        statusFilter: { type: "string" },
-        fromTime: { type: "string" },
-        toTime: { type: "string" },
-        serverId: { type: "string" },
-        mcpToolName: { type: "string" },
-        arguments: { type: "object" }
-      },
-      required: ["tool", "reason"],
-      additionalProperties: true
-    }
-  }];
+const STRING = { type: "string" };
+const NON_EMPTY_STRING = { type: "string", minLength: 1 };
+const POSITIVE_INTEGER = { type: "integer", minimum: 1 };
+const BOOLEAN = { type: "boolean" };
+const OBJECT = { type: "object", additionalProperties: true };
+const STRING_LIST = { type: "array", items: STRING };
+const PRIMITIVE_LIST = { type: "array", items: { type: ["string", "number", "boolean", "null"] } };
+const OBJECT_LIST = { type: "array", items: OBJECT };
+
+// These names mirror normalizeToolRequest. Keeping the source of truth here
+// prevents a provider from inventing fields for an unrelated tool family.
+const PROPERTY_DEFINITIONS = {
+  reason: { ...NON_EMPTY_STRING, description: "Why this real action is needed now." },
+  query: { ...NON_EMPTY_STRING, description: "Search query or file-name/content pattern." },
+  url: { ...NON_EMPTY_STRING, description: "Public URL to fetch or call." },
+  path: { ...NON_EMPTY_STRING, description: "Workspace-relative path, unless an authorized project path is used." },
+  destination: { ...NON_EMPTY_STRING, description: "Workspace-relative destination path." },
+  root: { ...STRING, description: "Optional workspace root hint." },
+  action: { ...NON_EMPTY_STRING, description: "Operation supported by this tool." },
+  code: { ...STRING, description: "Source code or file content for a real write/run operation." },
+  oldText: { ...STRING, description: "Exact text to replace." },
+  newText: { ...STRING, description: "Replacement text." },
+  replaceAll: BOOLEAN,
+  command: { ...NON_EMPTY_STRING, description: "Shell command to execute." },
+  cwd: { ...STRING, description: "Optional working directory inside the authorized workspace." },
+  shell: { ...STRING, description: "Requested shell." },
+  timeoutMs: { ...POSITIVE_INTEGER, maximum: 3600000 },
+  background: BOOLEAN,
+  language: { ...NON_EMPTY_STRING, description: "Language/runtime for the code snippet." },
+  manager: { ...NON_EMPTY_STRING, description: "Package manager or ecosystem." },
+  packageName: { ...NON_EMPTY_STRING, description: "Package name." },
+  toolName: { ...NON_EMPTY_STRING, description: "Tool or runtime being acquired." },
+  commandName: { ...STRING, description: "Executable to detect." },
+  packageId: { ...STRING, description: "Platform package identifier." },
+  installCommand: { ...STRING, description: "Explicit installation command when policy permits it." },
+  downloadUrl: { ...STRING, description: "Download URL for a verified tool archive." },
+  executablePath: { ...STRING, description: "Expected executable after installation." },
+  verifyCommand: { ...STRING, description: "Command used to verify the acquired tool." },
+  runner: { ...STRING, description: "Test runner or framework." },
+  method: { ...STRING, description: "HTTP method." },
+  headers: OBJECT,
+  json: {},
+  body: {},
+  count: { ...POSITIVE_INTEGER, maximum: 1000 },
+  offset: { type: "integer", minimum: 0 },
+  pattern: { ...STRING, description: "Optional search pattern." },
+  sessionId: { ...STRING, description: "Saved session identifier." },
+  eventId: { ...STRING, description: "Public event identifier." },
+  round: { ...POSITIVE_INTEGER, description: "Round number in a saved context." },
+  contextSessionId: { ...STRING, description: "Session scope for public-event search." },
+  eventType: STRING,
+  actorId: STRING,
+  taskId: STRING,
+  file: STRING,
+  commit: STRING,
+  toolFilter: STRING,
+  statusFilter: STRING,
+  fromTime: STRING,
+  toTime: STRING,
+  maxBytes: { ...POSITIVE_INTEGER, maximum: 524288 },
+  overwrite: BOOLEAN,
+  processId: { ...STRING, description: "Background process identifier." },
+  stream: { ...STRING, description: "Process output stream to read." },
+  maxOutputBytes: { ...POSITIVE_INTEGER, maximum: 524288 },
+  branch: STRING,
+  remote: STRING,
+  message: STRING,
+  paths: STRING_LIST,
+  selector: STRING,
+  inputText: STRING,
+  expression: STRING,
+  steps: OBJECT_LIST,
+  viewport: OBJECT,
+  waitMs: { ...POSITIVE_INTEGER, maximum: 3600000 },
+  screenshot: BOOLEAN,
+  databasePath: { ...NON_EMPTY_STRING, description: "SQLite database path inside the authorized workspace." },
+  sql: { ...NON_EMPTY_STRING, description: "SQLite statement to execute." },
+  params: PRIMITIVE_LIST,
+  maxRows: { ...POSITIVE_INTEGER, maximum: 10000 },
+  serverId: STRING,
+  mcpToolName: STRING,
+  arguments: OBJECT,
+  resourceUri: STRING,
+  promptName: STRING,
+  promptArguments: OBJECT,
+  catalogId: STRING,
+  packageSpec: STRING,
+  binName: STRING,
+  mcpArgs: STRING_LIST,
+  skillId: STRING,
+  skillUrl: STRING,
+  skillMarkdown: STRING,
+  force: BOOLEAN,
+  create: BOOLEAN,
+  mode: STRING
+};
+
+const TOOL_SPECS = {
+  web_search: spec("Search the public web and return evidence-bearing results.", ["query", "count", "timeoutMs"], ["query"]),
+  fetch_url: spec("Fetch readable content from one public URL.", ["url", "timeoutMs"], ["url"]),
+  api_request: spec("Make one real HTTP API request.", ["url", "method", "headers", "json", "body", "timeoutMs"], ["url"]),
+  list_directory: spec("List an authorized workspace directory.", ["path", "root", "count"], ["path"]),
+  read_file: spec("Read one authorized workspace file.", ["path", "root", "maxBytes"], ["path"]),
+  search_files: spec("Search authorized workspace file names.", ["query", "path", "root", "count"], ["query"]),
+  grep_content: spec("Search text content in authorized workspace files.", ["query", "path", "root", "pattern", "count"], ["query"]),
+  search_context: spec("Search retained public group history and saved archives.", ["query", "contextSessionId", "eventType", "actorId", "taskId", "file", "commit", "toolFilter", "statusFilter", "fromTime", "toTime", "count", "offset"]),
+  load_context: spec("Load one retained public context item by a pointer.", ["sessionId", "eventId", "commit", "round", "maxBytes"], [], [["sessionId"], ["eventId"], ["commit"]]),
+  skill_read: spec("Read instructions from one enabled skill.", ["skillId", "offset", "maxBytes"], ["skillId"]),
+  database_query: spec("Run an authorized SQLite query.", ["databasePath", "sql", "params", "maxRows"], ["databasePath", "sql"]),
+  workspace_edit: spec("Make a real workspace mkdir, write, append, replace, or move operation.", ["action", "path", "destination", "root", "code", "oldText", "newText", "replaceAll"], ["action", "path"]),
+  extract_archive: spec("Extract an archive inside the workspace.", ["path", "destination", "overwrite", "count"], ["path", "destination"]),
+  create_archive: spec("Create a real archive from workspace files.", ["path", "destination", "overwrite"], ["path", "destination"]),
+  execute_command: spec("Run a real shell command in the authorized workspace.", ["command", "cwd", "shell", "timeoutMs", "background", "maxOutputBytes"], ["command"]),
+  process_control: spec("Inspect output/status or stop a tracked background process.", ["action", "processId", "stream", "offset", "count"], ["action"]),
+  run_code: spec("Run a real code snippet through a selected runtime.", ["language", "code", "cwd", "timeoutMs", "maxOutputBytes"], ["language", "code"]),
+  install_package: spec("Install a real language package into the managed workspace environment.", ["manager", "packageName", "cwd", "timeoutMs"], ["manager", "packageName"]),
+  provision_tool: spec("Detect, acquire, and verify a missing runtime or CLI.", ["toolName", "commandName", "packageId", "installCommand", "downloadUrl", "executablePath", "verifyCommand", "timeoutMs"], ["toolName"]),
+  run_tests: spec("Run the project test or build command and return its real result.", ["runner", "command", "cwd", "timeoutMs", "maxOutputBytes"]),
+  git_operation: spec("Run one real Git operation in the authorized project.", ["action", "cwd", "branch", "remote", "message", "paths", "force", "timeoutMs"], ["action"]),
+  browser_control: spec("Control a real browser for an authorized workflow.", ["action", "url", "selector", "inputText", "expression", "steps", "viewport", "waitMs", "screenshot", "timeoutMs"], ["action"]),
+  mcp_list_tools: spec("List tools exposed by configured MCP servers.", ["serverId", "timeoutMs"]),
+  mcp_call: spec("Call one tool exposed by a configured MCP server.", ["serverId", "mcpToolName", "arguments", "timeoutMs"], ["mcpToolName"]),
+  mcp_list_resources: spec("List resources exposed by configured MCP servers.", ["serverId", "timeoutMs"]),
+  mcp_read_resource: spec("Read one resource exposed by a configured MCP server.", ["serverId", "resourceUri", "timeoutMs"], ["resourceUri"]),
+  mcp_list_prompts: spec("List prompts exposed by configured MCP servers.", ["serverId", "timeoutMs"]),
+  mcp_get_prompt: spec("Load one prompt from a configured MCP server.", ["serverId", "promptName", "promptArguments", "timeoutMs"], ["promptName"]),
+  mcp_search_npm: spec("Search npm before choosing an MCP server package.", ["query", "count", "timeoutMs"], ["query"]),
+  mcp_install_npm: spec("Install and configure an MCP server from npm.", ["serverId", "catalogId", "packageSpec", "binName", "mcpArgs", "timeoutMs"]),
+  mcp_uninstall: spec("Remove a managed MCP server configuration.", ["serverId", "packageSpec"], ["serverId"]),
+  skill_list: spec("List installed and enabled skills for this group."),
+  skill_search: spec("Search real remote skill candidates.", ["query", "count", "timeoutMs"], ["query"]),
+  skill_install: spec("Install a validated skill from a catalog, URL, or supplied markdown.", ["skillId", "catalogId", "skillUrl", "skillMarkdown", "overwrite", "timeoutMs"]),
+  skill_enable: spec("Enable an installed skill for this group.", ["skillId"], ["skillId"]),
+  skill_disable: spec("Disable a skill for this group.", ["skillId"], ["skillId"]),
+  skill_remove: spec("Remove an installed skill.", ["skillId"], ["skillId"])
+};
+
+export function nativeToolDefinitions(permissionTier = "text", options = {}) {
+  const allowed = toolsForTier(permissionTier);
+  const selected = new Set(
+    (Array.isArray(options.tools) ? options.tools : allowed)
+      .map((name) => String(name || "").trim().toLowerCase().replace(/-/g, "_"))
+  );
+  return allowed
+    .filter((name) => selected.has(name))
+    .map((name) => nativeDefinition(name));
+}
+
+export function nativeToolNames(permissionTier = "text") {
+  return [...toolsForTier(permissionTier)];
 }
 
 export function openAiToolDefinitions(definitions = []) {
@@ -106,10 +190,41 @@ export function normalizeNativeToolCalls(calls = []) {
     const name = String(call?.name || "").trim();
     const args = parseArguments(call?.arguments ?? call?.input);
     if (!args) continue;
+    // ai_council_tool is accepted only for already-persisted sessions and older
+    // providers. New calls use the real tool name and a closed per-tool schema.
     const request = name === "ai_council_tool" ? args : { ...args, tool: args.tool || name };
     requests.push({ ...request, id: String(call.id || request.id || "") || undefined });
   }
   return normalizeToolRequests(requests);
+}
+
+function spec(description, properties = [], required = [], anyOf = undefined) {
+  return { description, properties, required, anyOf };
+}
+
+function nativeDefinition(name) {
+  const spec = TOOL_SPECS[name];
+  if (!spec) throw new Error(`Missing native tool schema for ${name}`);
+  const propertyNames = [...new Set(["reason", ...spec.properties])];
+  const properties = Object.fromEntries(propertyNames.map((property) => [property, PROPERTY_DEFINITIONS[property]]));
+  const inputSchema = {
+    type: "object",
+    properties,
+    required: [...new Set(["reason", ...spec.required])],
+    additionalProperties: false
+  };
+  if (spec.anyOf) inputSchema.anyOf = spec.anyOf.map((required) => ({ required }));
+  return {
+    name,
+    description: spec.description,
+    inputSchema
+  };
+}
+
+function toolsForTier(permissionTier) {
+  if (permissionTier === "full") return FULL_TIER_TOOLS;
+  if (permissionTier === "tool") return TOOL_TIER_TOOLS;
+  return CONTEXT_TOOLS;
 }
 
 function parseArguments(value) {

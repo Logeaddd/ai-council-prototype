@@ -4926,16 +4926,16 @@ test("provider-native tool calls execute through the council permission and veri
     }
     if (executorStep === 0) {
       executorStep += 1;
-      writeOpenAiNativeToolStream(res, [
+      writeOpenAiDirectNativeToolStream(res, [
         { tool: "workspace_edit", action: "write", path: "shared/native/package.json", code: "{\"type\":\"module\",\"scripts\":{\"test\":\"node --test\"}}\n", reason: "Create package" },
         { tool: "workspace_edit", action: "write", path: "shared/native/app.js", code: "export const value = 42;\n", reason: "Create source" },
         { tool: "workspace_edit", action: "write", path: "shared/native/app.test.js", code: "import test from 'node:test'; import assert from 'node:assert/strict'; import { value } from './app.js'; test('value',()=>assert.equal(value,42));\n", reason: "Create test" }
-      ]);
+      ], "write");
       return;
     }
     if (executorStep === 1) {
       executorStep += 1;
-      writeOpenAiNativeToolStream(res, [{ tool: "run_tests", runner: "custom", cwd: "shared/native", command: "node --test", reason: "Verify project" }]);
+      writeOpenAiDirectNativeToolStream(res, [{ tool: "run_tests", runner: "custom", cwd: "shared/native", command: "node --test", reason: "Verify project" }], "verify");
       return;
     }
     writeOpenAiStream(res, JSON.stringify({
@@ -4968,8 +4968,12 @@ test("provider-native tool calls execute through the council permission and veri
     const testResult = session.toolExecutionResults.find((item) => item.tool === "run_tests");
     assert.equal(testResult.result.passed, true);
     assert.equal(session.executionState.phase, "complete");
-    assert.equal(requestBodies[0].tools[0].function.name, "ai_council_tool");
-    assert.equal(requestBodies[0].tools[0].function.parameters.properties.tool.enum.includes("workspace_edit"), true);
+    assert.equal(requestBodies[0].tools.some((item) => item.function.name === "workspace_edit"), true);
+    assert.equal(requestBodies[0].tools.find((item) => item.function.name === "workspace_edit").function.parameters.additionalProperties, false);
+    const nativeFollowup = requestBodies.find((body) => body.messages?.some((item) => item.role === "tool"));
+    assert.ok(nativeFollowup);
+    assert.equal(nativeFollowup.messages.some((item) => item.role === "assistant" && item.tool_calls?.some((call) => call.function.name === "workspace_edit")), true);
+    assert.equal(nativeFollowup.messages.filter((item) => item.role === "tool").length, 3);
     assert.equal(session.toolRequests.filter((item) => item.tool === "workspace_edit").length, 3);
     assert.equal(session.interimMessages.length, 2);
     assert.equal(session.interimMessages.every((item) => item.interim === true), true);
@@ -7573,11 +7577,14 @@ test("tool follow-up receives exact immediate API and file results before writin
     }
     followupPrompts.push(prompt);
     if (executorStep === 1) {
-      assert.match(messageText, /Current-turn tool evidence/);
-      assert.match(messageText, /Atlas 6/);
-      assert.match(messageText, /Cedar 0/);
-      assert.match(messageText, /active\\":true/);
-      assert.match(messageText, /active\\":false/);
+      const nativeToolResults = (body.messages || [])
+        .filter((message) => message.role === "tool")
+        .map((message) => String(message.content || ""))
+        .join("\n");
+      assert.match(nativeToolResults, /Atlas 6/);
+      assert.match(nativeToolResults, /Cedar 0/);
+      assert.match(nativeToolResults, /active\\":true/);
+      assert.match(nativeToolResults, /active\\":false/);
       executorStep += 1;
       writeOpenAiNativeToolStream(res, [{
         tool: "workspace_edit",
@@ -7654,6 +7661,21 @@ function writeOpenAiNativeToolStream(res, requests) {
     id: `native_${index + 1}`,
     function: { name: "ai_council_tool", arguments: JSON.stringify(request) }
   }));
+  res.write(`data: ${JSON.stringify({ choices: [{ delta: { tool_calls: toolCalls } }] })}\n\n`);
+  res.write("data: [DONE]\n\n");
+  res.end();
+}
+
+function writeOpenAiDirectNativeToolStream(res, requests, prefix = "native") {
+  res.writeHead(200, { "Content-Type": "text/event-stream; charset=utf-8" });
+  const toolCalls = requests.map((request, index) => {
+    const { tool, ...argumentsObject } = request;
+    return {
+      index,
+      id: `${prefix}_${index + 1}`,
+      function: { name: tool, arguments: JSON.stringify(argumentsObject) }
+    };
+  });
   res.write(`data: ${JSON.stringify({ choices: [{ delta: { tool_calls: toolCalls } }] })}\n\n`);
   res.write("data: [DONE]\n\n");
   res.end();

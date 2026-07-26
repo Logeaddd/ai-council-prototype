@@ -92,7 +92,8 @@ async function callAnthropicMessagesOnce({ agent, apiBaseUrl, apiKey, model, mes
     model,
     messages,
     nativeTools: options.nativeTools,
-    nativeToolChoice: options.nativeToolChoice
+    nativeToolChoice: options.nativeToolChoice,
+    nativeToolConversation: options.nativeToolConversation
   });
   try {
     const response = await fetch(`${apiBaseUrl.replace(/\/$/, "")}/messages`, {
@@ -108,7 +109,7 @@ async function callAnthropicMessagesOnce({ agent, apiBaseUrl, apiKey, model, mes
     if (!response.ok) throw await httpError(response);
     const parsed = await response.json();
     const text = readAnthropicText(parsed);
-    const nativeToolCalls = readAnthropicToolCalls(parsed);
+    const nativeToolCalls = normalizeNativeToolCallIds(readAnthropicToolCalls(parsed));
     if (text) options.onDelta?.(text);
     return { text, nativeToolCalls, usage: normalizeProviderUsage(parsed.usage) };
   } finally {
@@ -126,7 +127,8 @@ async function callOpenAiCompatibleOnce({ agent, apiBaseUrl, apiKey, model, mess
     model,
     messages,
     nativeTools: options.nativeTools,
-    nativeToolChoice: options.nativeToolChoice
+    nativeToolChoice: options.nativeToolChoice,
+    nativeToolConversation: options.nativeToolConversation
   });
   try {
     const response = await fetch(`${apiBaseUrl.replace(/\/$/, "")}/chat/completions`, {
@@ -146,11 +148,11 @@ async function callOpenAiCompatibleOnce({ agent, apiBaseUrl, apiKey, model, mess
   }
 }
 
-export function buildOpenAiCompatiblePayload(agent, { model, messages, nativeTools, nativeToolChoice }) {
+export function buildOpenAiCompatiblePayload(agent, { model, messages, nativeTools, nativeToolChoice, nativeToolConversation }) {
   const maxTokens = requestedMaxTokens(agent);
   return {
     model,
-    messages: applyProviderPromptCache(agent, messages),
+    messages: applyProviderPromptCache(agent, appendOpenAiNativeToolTurns(messages, nativeToolConversation)),
     ...(maxTokens ? { max_tokens: maxTokens } : {}),
     temperature: 0.2,
     stream: true,
@@ -159,17 +161,20 @@ export function buildOpenAiCompatiblePayload(agent, { model, messages, nativeToo
   };
 }
 
-export function buildAnthropicMessagesPayload(agent, { model, messages, nativeTools, nativeToolChoice }) {
-  const system = messages
+export function buildAnthropicMessagesPayload(agent, { model, messages, nativeTools, nativeToolChoice, nativeToolConversation }) {
+  const providerMessages = appendAnthropicNativeToolTurns(messages, nativeToolConversation);
+  const system = providerMessages
     .filter((message) => message.role === "system")
     .map((message) => stringifyMessageContent(message.content))
     .filter(Boolean)
     .join("\n\n");
-  const anthropicMessages = messages
+  const anthropicMessages = providerMessages
     .filter((message) => message.role !== "system")
     .map((message) => ({
       role: message.role === "assistant" ? "assistant" : "user",
-      content: stringifyMessageContent(message.content)
+      content: isAnthropicContentBlocks(message.content)
+        ? message.content
+        : stringifyMessageContent(message.content)
     }))
     .filter((message) => message.content);
 
@@ -358,7 +363,143 @@ async function readOpenAiStream(response, onDelta) {
     }
   }
 
-  return { text: content, nativeToolCalls: [...toolCalls.values()], usage };
+  return { text: content, nativeToolCalls: normalizeNativeToolCallIds([...toolCalls.values()]), usage };
+}
+
+function appendOpenAiNativeToolTurns(messages = [], conversation = undefined) {
+  const turns = Array.isArray(conversation?.turns) ? conversation.turns : [];
+  if (!turns.length) return messages;
+  const splitAt = nativeConversationSplit(messages, conversation);
+  const base = messages.slice(0, splitAt);
+  const tail = messages.slice(splitAt);
+  return [...base, ...turns.flatMap(openAiNativeToolTurnMessages), ...tail];
+}
+
+function openAiNativeToolTurnMessages(turn = {}) {
+  const calls = normalizeNativeToolCallIds(turn.toolCalls);
+  if (!calls.length) return [];
+  const assistant = {
+    role: "assistant",
+    content: String(turn.text || "") || null,
+    tool_calls: calls.map((call) => ({
+      id: call.id,
+      type: "function",
+      function: {
+        name: call.name,
+        arguments: typeof call.arguments === "string" ? call.arguments : JSON.stringify(call.input || {})
+      }
+    }))
+  };
+  const results = calls.map((call) => ({
+    role: "tool",
+    tool_call_id: call.id,
+    content: serializeNativeToolResult(nativeResultForCall(turn, call))
+  }));
+  return [assistant, ...results];
+}
+
+function appendAnthropicNativeToolTurns(messages = [], conversation = undefined) {
+  const turns = Array.isArray(conversation?.turns) ? conversation.turns : [];
+  if (!turns.length) return messages;
+  const splitAt = nativeConversationSplit(messages, conversation);
+  const base = messages.slice(0, splitAt);
+  const tail = messages.slice(splitAt);
+  const nativeMessages = turns.flatMap((turn) => {
+    const calls = normalizeNativeToolCallIds(turn.toolCalls);
+    if (!calls.length) return [];
+    const content = [];
+    if (turn.text) content.push({ type: "text", text: String(turn.text) });
+    content.push(...calls.map((call) => ({
+      type: "tool_use",
+      id: call.id,
+      name: call.name,
+      input: parseNativeToolArguments(call)
+    })));
+    return [{
+      role: "assistant",
+      content
+    }, {
+      role: "user",
+      content: calls.map((call) => ({
+        type: "tool_result",
+        tool_use_id: call.id,
+        content: serializeNativeToolResult(nativeResultForCall(turn, call))
+      }))
+    }];
+  });
+  return [...base, ...nativeMessages, ...tail];
+}
+
+function nativeConversationSplit(messages = [], conversation = {}) {
+  const requested = Number(conversation.baseMessageCount);
+  if (!Number.isFinite(requested)) return messages.length;
+  return Math.max(0, Math.min(messages.length, Math.floor(requested)));
+}
+
+function nativeResultForCall(turn = {}, call = {}) {
+  const candidates = Array.isArray(turn.toolResults) ? turn.toolResults : [];
+  return candidates.find((item) => String(item?.id || "") === String(call.id || "")) || {
+    id: call.id,
+    tool: call.name,
+    status: "failed",
+    code: "missing_tool_result",
+    error: "The tool call finished without a result record."
+  };
+}
+
+function serializeNativeToolResult(record = {}) {
+  const payload = {
+    id: record.id || "",
+    tool: record.tool || "",
+    status: record.status || "failed",
+    code: record.code || "",
+    error: record.error || "",
+    result: record.result
+  };
+  let serialized;
+  try {
+    serialized = JSON.stringify(payload);
+  } catch {
+    serialized = JSON.stringify({ ...payload, result: "[unserializable tool result]" });
+  }
+  const maxChars = 60000;
+  if (serialized.length <= maxChars) return serialized;
+  return JSON.stringify({
+    id: payload.id,
+    tool: payload.tool,
+    status: payload.status,
+    code: payload.code,
+    error: payload.error,
+    truncated: true,
+    resultPreview: serialized.slice(0, maxChars - 500)
+  });
+}
+
+function parseNativeToolArguments(call = {}) {
+  if (call.input && typeof call.input === "object" && !Array.isArray(call.input)) return call.input;
+  if (typeof call.arguments !== "string" || !call.arguments.trim()) return {};
+  try {
+    const parsed = JSON.parse(call.arguments);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function isAnthropicContentBlocks(content) {
+  return Array.isArray(content) && content.every((block) => block && typeof block === "object" && typeof block.type === "string");
+}
+
+function normalizeNativeToolCallIds(calls = []) {
+  const used = new Set();
+  return (Array.isArray(calls) ? calls : []).map((call, index) => {
+    const base = String(call?.id || "").trim() || `native_tool_${index + 1}`;
+    let id = base;
+    let suffix = 2;
+    while (used.has(id)) id = `${base}_${suffix++}`;
+    used.add(id);
+    return { ...call, id };
+  });
 }
 
 function parseOpenAiStreamFrame(frame) {

@@ -321,6 +321,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
       captureSemanticMemory(response, "round");
       let rawTextForMessage = callOutcome.rawTextForMessage;
       let errorForMessage = callOutcome.errorForMessage;
+      let nativeToolConversation;
       const accumulatedToolRequests = [];
       const accumulatedToolResults = [];
       const accumulatedRejectedToolRequests = [];
@@ -433,6 +434,15 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
       }
 
       while (response.status === "speak" && response.tool_requests?.length && toolIterations < maxToolIterations) {
+        const nativeToolTurn = nativeToolTurnFromResponse(callOutcome, response);
+        if (nativeToolTurn) {
+          nativeToolConversation ||= { baseMessageCount: messages.length, turns: [] };
+        } else {
+          // Text-JSON tool requests use the existing context path. Mixing the
+          // two protocols in one follow-up would create an invalid provider
+          // transcript, so restart native history at this boundary.
+          nativeToolConversation = undefined;
+        }
         toolIterations += 1;
         const requestedToolTimeoutMs = positiveDuration(group.settings.toolTimeoutMs);
         const toolResult = await executeToolRequests({
@@ -472,6 +482,12 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
         session.toolRequests.push(...toolResult.accepted);
         session.toolExecutionResults.push(...toolResult.results);
         session.rejectedToolRequests.push(...toolResult.rejected);
+        if (nativeToolTurn) {
+          nativeToolConversation.turns.push({
+            ...nativeToolTurn,
+            toolResults: [...toolResult.results, ...toolResult.rejected]
+          });
+        }
         if (session.taskRun) {
           recordTaskRunToolAttempts({
             groupPath: options.groupPath,
@@ -578,6 +594,13 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
           resumeInstruction: recoveryInstruction,
           contextSections: buildContextPromptSections(followupContext),
         });
+        const continuingNatively = Boolean(nativeToolConversation?.turns.length);
+        const providerFollowupMessages = continuingNatively
+          ? [...messages, {
+            role: "user",
+            content: buildNativeToolContinuationInstruction(recoveryInstruction, executionDirective)
+          }]
+          : followupMessages;
         callOutcome = yield* callRoundModel({
           options,
           session,
@@ -585,9 +608,10 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
           round,
           agent,
           memberContext: followupContext,
-          messages: followupMessages,
+          messages: providerFollowupMessages,
           timeoutMs: group.settings.agentTimeoutMs,
           toolIteration: toolIterations,
+          nativeToolConversation: continuingNatively ? nativeToolConversation : undefined,
           nativeToolPermissionTier: fileOperationPermissionTier,
           nativeToolChoice: toolLoopStagnated.recoveryRequired && fileOperationPermissionTier === "full" && !isReviewerLike(agent)
             ? "required"
@@ -598,6 +622,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
         rawTextForMessage = callOutcome.rawTextForMessage;
         errorForMessage = callOutcome.errorForMessage;
         if (toolLoopStagnated.recoveryRequired && isReviewerLike(agent) && response.tool_requests?.length) {
+          nativeToolConversation = undefined;
           callOutcome = yield* callRoundModel({
             options,
             session,
@@ -636,6 +661,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
           }
         }
         if (toolLoopStagnated.recoveryRequired && requiresStagnationWorkspaceEdit(agent, question, fileOperationPermissionTier, session.executionState) && !hasMaterialExecutionRequest(response)) {
+          nativeToolConversation = undefined;
           callOutcome = yield* callRoundModel({
             options,
             session,
@@ -674,6 +700,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
           }
         }
         if (toolLoopStagnated.recoveryRequired && requiresStagnationVerification(agent, fileOperationPermissionTier, session.executionState) && !hasVerificationRequest(response)) {
+          nativeToolConversation = undefined;
           callOutcome = yield* callRoundModel({
             options,
             session,
@@ -1140,13 +1167,15 @@ function persistAgentSemanticPublicMemory(groupPath, candidates, options = {}) {
   }
 }
 
-async function* callRoundModel({ options, session, phase, round, agent, memberContext, messages, timeoutMs, toolIteration, formatRecovery = true, nativeToolPermissionTier = "text", nativeToolChoice = "auto" }) {
+async function* callRoundModel({ options, session, phase, round, agent, memberContext, messages, timeoutMs, toolIteration, formatRecovery = true, nativeToolPermissionTier = "text", nativeToolChoice = "auto", nativeToolConversation = undefined }) {
   if (!reserveModelCall(session)) {
     session.guardStopReason = "model_call_budget_exhausted";
     return {
       response: { status: "unavailable", reason: session.guardStopReason, retryable: false },
       rawTextForMessage: "",
-      errorForMessage: session.guardStopReason
+      errorForMessage: session.guardStopReason,
+      nativeToolCalls: [],
+      nativeAssistantText: ""
     };
   }
   const contextReceipt = recordContextReceipt(session, memberContext, {
@@ -1172,7 +1201,7 @@ async function* callRoundModel({ options, session, phase, round, agent, memberCo
     contextReceipt
   });
   throwIfAborted(options.signal);
-  const streamingCall = startAgentCallWithDeltaQueue(agent, messages, timeoutMs, options.signal, nativeToolDefinitions(nativeToolPermissionTier), nativeToolChoice);
+  const streamingCall = startAgentCallWithDeltaQueue(agent, messages, timeoutMs, options.signal, nativeToolDefinitions(nativeToolPermissionTier), nativeToolChoice, nativeToolConversation);
   while (!streamingCall.done() || streamingCall.hasDeltas()) {
     const delta = await streamingCall.nextDelta();
     if (!delta) continue;
@@ -1234,7 +1263,9 @@ async function* callRoundModel({ options, session, phase, round, agent, memberCo
   return {
     response: parsedResponse,
     rawTextForMessage: raw.error ? "" : raw.text,
-    errorForMessage: raw.error
+    errorForMessage: raw.error,
+    nativeToolCalls: raw.nativeToolCalls || [],
+    nativeAssistantText: raw.error ? "" : raw.text
   };
 }
 
@@ -1929,12 +1960,12 @@ function normalizeTextList(value) {
   }).filter(Boolean);
 }
 
-function startAgentCallWithDeltaQueue(agent, messages, timeoutMs, signal, nativeTools, nativeToolChoice = "auto") {
+function startAgentCallWithDeltaQueue(agent, messages, timeoutMs, signal, nativeTools, nativeToolChoice = "auto", nativeToolConversation = undefined) {
   const queue = createAsyncQueue();
   let result;
   let thrown;
   let done = false;
-  const callPromise = safeCall(agent, messages, timeoutMs, signal, (delta) => queue.push(delta), nativeTools, nativeToolChoice)
+  const callPromise = safeCall(agent, messages, timeoutMs, signal, (delta) => queue.push(delta), nativeTools, nativeToolChoice, nativeToolConversation)
     .then((value) => {
       result = value;
     })
@@ -1957,9 +1988,38 @@ function startAgentCallWithDeltaQueue(agent, messages, timeoutMs, signal, native
   };
 }
 
-async function safeCall(agent, messages, timeoutMs, signal, onDelta, nativeTools, nativeToolChoice = "auto") {
+function nativeToolTurnFromResponse(callOutcome = {}, response = {}) {
+  const toolCalls = Array.isArray(callOutcome.nativeToolCalls)
+    ? callOutcome.nativeToolCalls.filter((call) => call?.id && call?.name)
+    : [];
+  const requests = Array.isArray(response.tool_requests) ? response.tool_requests : [];
+  if (!toolCalls.length || !requests.length) return undefined;
+  const nativeRequestIds = new Set(toolCalls.map((call) => String(call.id)));
+  if (requests.some((request) => !nativeRequestIds.has(String(request?.id || "")))) return undefined;
+  return {
+    text: String(callOutcome.nativeAssistantText || callOutcome.rawTextForMessage || ""),
+    toolCalls
+  };
+}
+
+function buildNativeToolContinuationInstruction(recoveryInstruction, executionDirective) {
+  return [
+    "The preceding native tool-result messages are the authoritative result of your requested actions. Continue from them. Do not repeat a completed observation or command unless the workspace changed or the result requires a repair.",
+    recoveryInstruction,
+    executionDirective
+  ].filter(Boolean).join("\n\n");
+}
+
+async function safeCall(agent, messages, timeoutMs, signal, onDelta, nativeTools, nativeToolChoice = "auto", nativeToolConversation = undefined) {
   try {
-    return await callAgentResult(agent, messages, { timeoutMs, signal, onDelta, nativeTools: nativeTools || [], nativeToolChoice });
+    return await callAgentResult(agent, messages, {
+      timeoutMs,
+      signal,
+      onDelta,
+      nativeTools: nativeTools || [],
+      nativeToolChoice,
+      nativeToolConversation
+    });
   } catch (error) {
     if (error.name === "AbortError") throw error;
     return { error: `agent_call_failed:${agent.id}:${error.message}` };

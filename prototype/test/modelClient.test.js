@@ -376,10 +376,56 @@ test("provider payloads include native tool definitions only when requested", ()
     messages: [{ role: "user", content: "Question" }],
     nativeTools
   });
-  assert.equal(openai.tools[0].function.name, "ai_council_tool");
+  assert.equal(openai.tools.some((item) => item.function.name === "workspace_edit"), true);
   assert.equal(openai.tool_choice, "auto");
-  assert.equal(anthropic.tools[0].name, "ai_council_tool");
-  assert.equal(openai.tools[0].function.parameters.properties.tool.enum.includes("workspace_edit"), true);
+  assert.equal(anthropic.tools.some((item) => item.name === "workspace_edit"), true);
+  assert.equal(openai.tools.find((item) => item.function.name === "workspace_edit").function.parameters.additionalProperties, false);
+});
+
+test("provider payloads continue a native tool exchange in provider order", () => {
+  const nativeToolConversation = {
+    baseMessageCount: 2,
+    turns: [{
+      text: "I will create the source file.",
+      toolCalls: [{
+        id: "call_write",
+        name: "workspace_edit",
+        arguments: JSON.stringify({ action: "write", path: "shared/app.js", code: "export const value = 1;\n", reason: "Create the source" })
+      }],
+      toolResults: [{
+        id: "call_write",
+        tool: "workspace_edit",
+        status: "completed",
+        result: { ok: true, bytesWritten: 24 }
+      }]
+    }]
+  };
+  const messages = [
+    { role: "system", content: "System contract" },
+    { role: "user", content: "Create the source" },
+    { role: "user", content: "Continue from the result." }
+  ];
+  const openai = buildOpenAiCompatiblePayload({}, {
+    model: "runtime-model",
+    messages,
+    nativeToolConversation
+  });
+  const anthropic = buildAnthropicMessagesPayload({}, {
+    model: "claude-test-model",
+    messages,
+    nativeToolConversation
+  });
+
+  assert.deepEqual(openai.messages.map((item) => item.role), ["system", "user", "assistant", "tool", "user"]);
+  assert.equal(openai.messages[2].tool_calls[0].function.name, "workspace_edit");
+  assert.equal(openai.messages[3].tool_call_id, "call_write");
+  assert.match(openai.messages[3].content, /bytesWritten/);
+  assert.equal(anthropic.system, "System contract");
+  assert.deepEqual(anthropic.messages.map((item) => item.role), ["user", "assistant", "user", "user"]);
+  assert.equal(anthropic.messages[1].content[0].type, "text");
+  assert.equal(anthropic.messages[1].content[1].type, "tool_use");
+  assert.equal(anthropic.messages[2].content[0].type, "tool_result");
+  assert.equal(anthropic.messages[2].content[0].tool_use_id, "call_write");
 });
 
 test("structured recovery can require a real native tool call", () => {
