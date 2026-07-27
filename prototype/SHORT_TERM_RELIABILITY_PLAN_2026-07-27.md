@@ -375,8 +375,10 @@ Completed on 2026-07-27:
   longer receives the token and the untouched static document retains CSS.
   `npm run renderer:build`, the transcript probe, existing private-draft and
   file-drop Electron probes, and the full `npm test` run (768 passed, 0
-  failed, 1 Windows-only platform skip) passed locally. This is desktop UI
-  and local API evidence only, not a Provider capability claim.
+  failed, 1 Windows-only platform skip) passed locally. A later full run after
+  the no-side-effect CLI help guard passed 770 tests with the same zero
+  failures and one Windows-only skip. This is desktop UI and local API
+  evidence only, not a Provider capability claim.
 
 Still open before the real-provider release gate:
 
