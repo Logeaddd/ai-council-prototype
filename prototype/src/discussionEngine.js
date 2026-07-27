@@ -81,7 +81,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
     ? recentGroupSessions.filter(isLegacyContinuationShell).map((session) => session.id)
     : [];
   let taskState = options.groupPath && memoryEnabled ? readTaskState(options.groupPath) : undefined;
-  const contextInvalidations = mergeContextInvalidations(taskState?.invalidations, options.contextInvalidations);
+  let contextInvalidations = mergeContextInvalidations(taskState?.invalidations, options.contextInvalidations);
   const runtimeDiscoveryOptions = { managedToolRoots: [path.join(baseDir, "tools")] };
   const runtimeEnvironment = formatRuntimeEnvironment(discoverRuntimeEnvironment(options.groupPath || baseDir, runtimeDiscoveryOptions));
   const retrievedContext = options.groupPath && memoryEnabled
@@ -128,6 +128,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
     rejectedToolRequests: [],
     contextRetrievalResults: retrievedContext,
     contextReceipts: [],
+    contextInvalidationUpdates: [],
     semanticMemoryUpdates: [],
     contextInvalidations,
     rejectedFileOperationProposals: [],
@@ -183,6 +184,42 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
     const updated = updateExecutionCheckpoint(options.groupPath, session);
     if (updated) taskState = updated;
     return updated;
+  };
+  const recordContextInvalidationDeclarations = (response, memberContext, agent, round, phase) => {
+    const accepted = acceptContextInvalidationDeclarations({
+      declarations: response?.context_invalidations,
+      memberContext,
+      session,
+      agent,
+      round,
+      phase
+    });
+    if (!accepted.length) return [];
+    contextInvalidations = mergeContextInvalidations(contextInvalidations, accepted);
+    session.contextInvalidations = contextInvalidations;
+    const update = {
+      id: makeId("context_invalidation"),
+      createdAt: nowIso(),
+      phase,
+      round,
+      agentId: agent.id,
+      agentName: agent.name,
+      accepted
+    };
+    session.contextInvalidationUpdates.push(update);
+    if (options.groupPath && session.taskRun?.id) {
+      appendTaskRunEvent(options.groupPath, session.taskRun.id, "context_invalidation_recorded", {
+        id: update.id,
+        createdAt: update.createdAt,
+        phase,
+        round,
+        agentId: agent.id,
+        agentName: agent.name,
+        invalidations: accepted.map(compactContextInvalidation)
+      });
+    }
+    persistRunningSession();
+    return accepted;
   };
   const persistInterruptedSession = () => {
     if (session.status !== "running") return;
@@ -326,6 +363,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
       });
       let response = applyRoundResponseRules(callOutcome.response, agent, round);
       captureSemanticMemory(response, "round");
+      recordContextInvalidationDeclarations(response, memberContext, agent, round, "round");
       let rawTextForMessage = callOutcome.rawTextForMessage;
       let errorForMessage = callOutcome.errorForMessage;
       let nativeToolConversation;
@@ -519,6 +557,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
         });
         response = applyRoundResponseRules(callOutcome.response, agent, round);
         captureSemanticMemory(response, "file_operation_recovery");
+        recordContextInvalidationDeclarations(response, memberContext, agent, round, "file_operation_recovery");
         rawTextForMessage = callOutcome.rawTextForMessage;
         errorForMessage = callOutcome.errorForMessage;
         processResponseFileOperations(response);
@@ -768,6 +807,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
         });
         response = applyRoundResponseRules(callOutcome.response, agent, round);
         captureSemanticMemory(response, toolLoopStagnated.recoveryRequired ? "tool_stagnation_recovery" : "tool_followup");
+        recordContextInvalidationDeclarations(response, followupContext, agent, round, toolLoopStagnated.recoveryRequired ? "tool_stagnation_recovery" : "tool_followup");
         rawTextForMessage = callOutcome.rawTextForMessage;
         errorForMessage = callOutcome.errorForMessage;
         if (toolLoopStagnated.recoveryRequired && isReviewerLike(agent) && response.tool_requests?.length) {
@@ -790,6 +830,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
           });
           response = applyRoundResponseRules(callOutcome.response, agent, round);
           captureSemanticMemory(response, "tool_stagnation_review_recovery");
+          recordContextInvalidationDeclarations(response, followupContext, agent, round, "tool_stagnation_review_recovery");
           rawTextForMessage = callOutcome.rawTextForMessage;
           errorForMessage = callOutcome.errorForMessage;
           if (response.tool_requests?.length) {
@@ -829,6 +870,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
           });
           response = applyRoundResponseRules(callOutcome.response, agent, round);
           captureSemanticMemory(response, "tool_stagnation_action_recovery");
+          recordContextInvalidationDeclarations(response, followupContext, agent, round, "tool_stagnation_action_recovery");
           rawTextForMessage = callOutcome.rawTextForMessage;
           errorForMessage = callOutcome.errorForMessage;
           if (!hasMaterialExecutionRequest(response)) {
@@ -868,6 +910,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
           });
           response = applyRoundResponseRules(callOutcome.response, agent, round);
           captureSemanticMemory(response, "tool_stagnation_verification_recovery");
+          recordContextInvalidationDeclarations(response, followupContext, agent, round, "tool_stagnation_verification_recovery");
           rawTextForMessage = callOutcome.rawTextForMessage;
           errorForMessage = callOutcome.errorForMessage;
           if (!hasVerificationRequest(response)) {
@@ -1969,6 +2012,81 @@ function mergeContextInvalidations(...values) {
     }
   }
   return [...byKey.values()];
+}
+
+function acceptContextInvalidationDeclarations({ declarations, memberContext, session, agent, round, phase }) {
+  const visibleSourceList = Array.isArray(memberContext?.invalidationSourceRefs)
+    ? memberContext.invalidationSourceRefs
+    : [];
+  const visibleSources = new Map(visibleSourceList.map((source) => [`${source.type}\u001f${source.id}`, source]));
+  if (!visibleSources.size || !Array.isArray(declarations)) return [];
+  const current = memberContext?.currentInstructionSource || {
+    type: "session_question",
+    id: String(session?.id || "")
+  };
+  const accepted = [];
+  const seen = new Set();
+  for (const declaration of declarations) {
+    const source = declaration?.source || {};
+    const type = String(source.type || "").trim();
+    const id = String(source.id || "").trim();
+    const key = `${type}\u001f${id}`;
+    if (!type || !id || !visibleSources.has(key) || seen.has(key)) continue;
+    if (type === current.type && id === current.id) continue;
+    const declaredSource = visibleSources.get(key);
+    for (const relatedSource of visibleSourceList.filter((candidate) => replacementSourceAliases(declaredSource, candidate))) {
+      const relatedKey = `${relatedSource.type}\u001f${relatedSource.id}`;
+      if (seen.has(relatedKey)) continue;
+      seen.add(relatedKey);
+      accepted.push({
+        source: { type: String(relatedSource.type), id: String(relatedSource.id) },
+        supersededBy: { type: String(current.type), id: String(current.id) },
+        reason: String(declaration.reason || "current_user_instruction_replaces_retained_source").trim().slice(0, 400),
+        declaredBy: {
+          agentId: String(agent?.id || ""),
+          agentName: String(agent?.name || ""),
+          round: Number(round || 0),
+          phase: String(phase || "")
+        }
+      });
+      if (accepted.length >= 12) break;
+    }
+    if (accepted.length >= 12) break;
+  }
+  return accepted;
+}
+
+function replacementSourceAliases(declared = {}, candidate = {}) {
+  if (declared?.type === candidate?.type && declared?.id === candidate?.id) return true;
+  const eventViews = new Set(["retrieved_context", "public_event"]);
+  if (!eventViews.has(declared?.type) || !eventViews.has(candidate?.type)) return false;
+  if (declared?.id && declared.id === candidate?.id) return true;
+  const sameSession = String(declared?.sessionId || "") && String(declared?.sessionId) === String(candidate?.sessionId || "");
+  if (!sameSession) return false;
+  const declaredRound = Number(declared?.round || 0);
+  const candidateRound = Number(candidate?.round || 0);
+  if (declaredRound > 0 || candidateRound > 0) return declaredRound === candidateRound;
+  return String(declared?.sourceType || "") === "session_final" && String(candidate?.sourceType || "") === "final_decision";
+}
+
+function compactContextInvalidation(item = {}) {
+  return {
+    source: {
+      type: String(item.source?.type || ""),
+      id: String(item.source?.id || "")
+    },
+    supersededBy: {
+      type: String(item.supersededBy?.type || ""),
+      id: String(item.supersededBy?.id || "")
+    },
+    reason: String(item.reason || ""),
+    declaredBy: item.declaredBy && typeof item.declaredBy === "object" ? {
+      agentId: String(item.declaredBy.agentId || ""),
+      agentName: String(item.declaredBy.agentName || ""),
+      round: Number(item.declaredBy.round || 0),
+      phase: String(item.declaredBy.phase || "")
+    } : undefined
+  };
 }
 
 function contextVisibilityForAgent(agent, workMode) {

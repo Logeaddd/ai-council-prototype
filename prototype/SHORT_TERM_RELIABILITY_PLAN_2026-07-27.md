@@ -310,6 +310,27 @@ Completed on 2026-07-27:
   fields no longer count. The retained older collaboration reports lack the
   new native/timestamped evidence and receipt, so T119 is deliberately
   incomplete until a fresh real-provider campaign supplies it.
+* T112 source-specific context supersession is now implemented in the current
+  worktree. A member may semantically declare that the current user instruction
+  replaces one exact retained source, in any language; the app accepts the
+  declaration only when the source reference was actually injected into that
+  member's current context. It stores the replacement against the current
+  session question, persists it through the session, TaskRun event stream, and
+  public task state, then recompiles later member/tool contexts. Equivalent
+  archive-retrieval and public-event-cache views are suppressed together only
+  when their durable session/round provenance proves they represent the same
+  retained record. Raw session/archive history is never deleted. This is not a
+  keyword detector and it is not a second memory store.
+* The deterministic context-pressure baseline at
+  `eval/context-pressure/baseline-20260714-1785165258139/report.json` now
+  requires the stale source to be initially visible, source-addressable, and
+  absent after a valid replacement. A local HTTP/SSE protocol regression
+  additionally verifies the first member's source-specific declaration,
+  recompilation of the next member's real prompt, durable state/receipt
+  persistence, and retained raw history. Full local regression was 765 passed,
+  0 failed, and 1 Windows platform skip out of 766 tests; the production
+  renderer build passed. These are local implementation evidence, not a
+  real-provider semantic-reasoning acceptance pass.
 
 Still open before the real-provider release gate:
 
@@ -331,6 +352,12 @@ Still open before the real-provider release gate:
   with real Providers across several project families. The local orchestration
   test proves the path exists; it does not prove a provider will choose good
   delegation boundaries or integrate evidence correctly under pressure.
+* T113 remains deliberately unbuilt. Use the new source receipts and pressure
+  measurements to identify a repeatable short-term working-memory failure
+  before adding a replaceable cache; do not introduce an append-only parallel
+  history. T114 likewise remains an audit of existing structured retrieval and
+  performance, with FTS5 or semantic retrieval permitted only after measured
+  recall evidence shows a gap.
 * Add PTY only where a real task proves interactive stdin is the blocker;
   absence alone is not evidence for a parallel terminal system.
 * Run the paid real-provider campaign with its mechanical oracles, distinct

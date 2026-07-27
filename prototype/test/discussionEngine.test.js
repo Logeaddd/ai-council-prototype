@@ -14,7 +14,7 @@ import { appendPrivateChatMessage } from "../src/privateChat.js";
 import { listPublicMemories, upsertPublicMemory } from "../src/publicMemory.js";
 import { readGroupSession, readMemoryPending, writeContextArchive, writeGroupSession } from "../src/storage.js";
 import { enableSkillForGroup, installSkillMarkdown } from "../src/skillPacks.js";
-import { writeTaskState } from "../src/taskState.js";
+import { readTaskState, writeTaskState } from "../src/taskState.js";
 import { createTaskRun, readTaskRun, readTaskRunEvents, syncTaskRunFromSession } from "../src/taskRuntime.js";
 
 function discussionTaskContract() {
@@ -7360,6 +7360,125 @@ test("task state ledger is written after a session and injected into the next ru
   assert.match(roundPrompt, /Task state ledger/);
   assert.match(roundPrompt, /Proceed with a CLI-first prototype/);
   assert.doesNotMatch(roundPrompt, /private-chat\.jsonl/);
+});
+
+test("a semantic source-specific replacement is validated, recompiles the next member context, and persists", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-context-replacement-runtime-"));
+  const oldRule = "RUNTIME_OLD_THEME_RULE";
+  const currentRule = "RUNTIME_CURRENT_THEME_RULE";
+  writeContextArchive({
+    id: "session_theme_history",
+    question: "Earlier report theme decision.",
+    createdAt: "2026-07-20T10:00:00.000Z",
+    completedAt: "2026-07-20T10:01:00.000Z",
+    status: "completed",
+    messages: [{
+      id: "theme_history_message",
+      round: 1,
+      agentId: "old-designer",
+      agentName: "Old Designer",
+      response: { status: "speak", argument: `The report must use ${oldRule}.` },
+      createdAt: "2026-07-20T10:00:20.000Z"
+    }],
+    finalDecision: { final_state: "ready_to_execute", answer: "Archived theme decision." }
+  }, tmp);
+
+  const requests = [];
+  let resolverSource;
+  const server = http.createServer(async (req, res) => {
+    const body = JSON.parse(await readRequestBody(req));
+    requests.push(body);
+    const prompt = (body.messages || []).map((message) => String(message.content || "")).join("\n");
+    if (prompt.includes("FinalDecision JSON object")) {
+      writeOpenAiStream(res, JSON.stringify({
+        answer: "The current theme instruction is active.",
+        consensus_score: 1,
+        supporting_agents: ["Resolver", "Worker"],
+        dissenting_agents: [],
+        minority_report: "",
+        risks: [],
+        next_actions: [],
+        selected_file_operation_ids: [],
+        memory_candidates: []
+      }));
+      return;
+    }
+    if (body.model === "replacement-resolver") {
+      const oldSourcePath = prompt.match(/Source path: ([^\n]+)\nSnippet: [^\n]*RUNTIME_OLD_THEME_RULE/)?.[1];
+      const references = [...prompt.matchAll(/Retained source_ref=(\{[^\n]+\})/g)]
+        .map((match) => {
+          try { return JSON.parse(match[1]); } catch { return null; }
+        })
+        .filter(Boolean);
+      resolverSource = references.find((source) => source.type === "retrieved_context" && source.sourcePath === oldSourcePath);
+      writeOpenAiStream(res, JSON.stringify({
+        status: "speak",
+        argument: "The current user instruction replaces the archived theme rule.",
+        objections: [],
+        task_contract: discussionTaskContract(),
+        context_invalidations: resolverSource ? [{
+          source: resolverSource,
+          reason: "The current user instruction changes the retained theme requirement."
+        }] : [],
+        memory_candidates: []
+      }));
+      return;
+    }
+    writeOpenAiStream(res, JSON.stringify({
+      status: "speak",
+      argument: "I received the recompilation result.",
+      objections: [],
+      memory_candidates: []
+    }));
+  });
+  await listen(server);
+  const apiBaseUrl = `http://127.0.0.1:${server.address().port}/v1`;
+
+  try {
+    const baseAgent = {
+      provider: "openai-compatible",
+      apiBaseUrl,
+      allowUnsafePrivateNetwork: true,
+      apiKey: "secret-runtime-key",
+      weight: 1,
+      enabled: true,
+      providerLimits: { contextWindow: 12000, maxOutputTokens: 1000 }
+    };
+    const group = validateGroupConfig({
+      id: "context-replacement-runtime",
+      name: "Context Replacement Runtime",
+      settings: { maxRounds: 1, minConsensusWeight: 1, stopWhenAllSkip: true, agentTimeoutMs: 1000 },
+      agents: [
+        { ...baseAgent, id: "resolver", name: "Resolver", role: "Member", model: "replacement-resolver" },
+        { ...baseAgent, id: "worker", name: "Worker", role: "Member", model: "replacement-worker" },
+        { ...baseAgent, id: "finalizer", name: "Finalizer", role: "Finalizer", model: "replacement-final", judge: true }
+      ]
+    });
+    const result = await runCouncil(`The user changes the report theme decision: use ${currentRule} instead.`, group, tmp, { groupPath: tmp });
+    const resolverPrompt = (requests.find((body) => body.model === "replacement-resolver")?.messages || [])
+      .map((message) => String(message.content || "")).join("\n");
+    const workerPrompt = (requests.find((body) => body.model === "replacement-worker")?.messages || [])
+      .map((message) => String(message.content || "")).join("\n");
+    const invalidation = result.session.contextInvalidations.find((item) => item.source.type === "retrieved_context");
+    const persisted = readTaskState(tmp);
+    const workerReceipt = result.session.contextReceipts.find((receipt) => receipt.call.agentId === "worker");
+
+    assert.ok(resolverSource, "the resolver must receive an exact archived source reference");
+    assert.match(resolverPrompt, new RegExp(oldRule));
+    assert.match(resolverPrompt, /Context source references/);
+    assert.match(workerPrompt, new RegExp(currentRule));
+    assert.doesNotMatch(workerPrompt, new RegExp(oldRule));
+    assert.equal(invalidation?.source.id, resolverSource.id);
+    assert.equal(invalidation?.supersededBy.type, "session_question");
+    assert.equal(invalidation?.supersededBy.id, result.session.id);
+    assert.equal(result.session.contextInvalidationUpdates.length, 1);
+    assert.equal(result.session.contextInvalidationUpdates[0].accepted[0].declaredBy.agentId, "resolver");
+    assert.equal(persisted.invalidations.some((item) => item.source.id === resolverSource.id), true);
+    assert.equal(workerReceipt.policy.invalidatedSources.some((item) => item.source.id === resolverSource.id), true);
+    assert.match(fs.readFileSync(path.join(tmp, "sessions", "session_theme_history", "round_1_full.json"), "utf8"), new RegExp(oldRule));
+  } finally {
+    await close(server);
+  }
 });
 
 test("saved public archive snippets are retrieved and injected into later prompts", async () => {

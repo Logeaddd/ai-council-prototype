@@ -136,16 +136,32 @@ function runSupersededInstructionScenario(groupPath, fixture) {
     latestBossInstruction: `The current instruction supersedes the old request: ${currentRule}.`,
     recentMessageLimit: 6
   });
-  const prompt = contextPrompt(context);
-  const currentSource = context.contextReceipt.decisions.find((decision) => decision.source.type === "latest_boss_instruction");
-  const oldSource = context.contextReceipt.decisions.find((decision) => decision.source.id === "old_rule_message");
+  const initialPrompt = contextPrompt(context);
+  const oldSource = context.invalidationSourceRefs.find((source) => source.type === "member_message" && source.id === "old_rule_message");
+  const replacement = buildRealContext(session, fixture, {
+    latestBossInstruction: `The current instruction supersedes the old request: ${currentRule}.`,
+    recentMessageLimit: 6,
+    contextInvalidations: oldSource ? [{
+      source: { type: oldSource.type, id: oldSource.id },
+      supersededBy: { type: "session_question", id: session.id },
+      reason: "current_user_instruction_replaces_retained_rule"
+    }] : []
+  });
+  const prompt = contextPrompt(replacement);
+  const currentSource = replacement.contextReceipt.decisions.find((decision) => decision.source.type === "latest_boss_instruction");
+  const replacementOldSource = replacement.contextReceipt.policy.invalidatedSources.find((item) => item.source.id === "old_rule_message");
   return measured("superseded_instruction_visibility", {
     currentInstructionPresent: prompt.includes(currentRule),
     staleInstructionPresent: prompt.includes(oldRule),
+    staleInstructionInitiallyPresent: initialPrompt.includes(oldRule),
+    sourceReferenceOffered: Boolean(oldSource),
     currentSourceRecorded: currentSource?.status === "injected",
-    staleSourceRecorded: oldSource?.status === "injected",
-    conflictPolicyState: context.contextReceipt.policy
-  }, Boolean(currentSource && oldSource));
+    staleSourceRecorded: replacementOldSource?.status === "invalidated",
+    conflictPolicyState: replacement.contextReceipt.policy
+  }, Boolean(currentSource && oldSource)
+    && initialPrompt.includes(oldRule)
+    && !prompt.includes(oldRule)
+    && replacementOldSource?.status === "invalidated");
 }
 
 function runRepeatedEvidenceScenario(groupPath, fixture) {

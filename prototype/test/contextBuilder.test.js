@@ -86,10 +86,12 @@ test("context prompt sections keep stable and core before transcript", () => {
   assert.deepEqual(sections.map((section) => section.title), [
     "Stable context",
     "Non-compressible core",
+    "Context source references",
     "Recent transcript"
   ]);
   assert.doesNotMatch(sections[1].content, /Original question:/);
-  assert.match(sections[2].content, /unavailable: 429/);
+  assert.match(sections[2].content, /Retained source_ref=/);
+  assert.match(sections[3].content, /unavailable: 429/);
 });
 
 test("member context marks stale reviewer history as overridden for ordinary members", () => {

@@ -41,8 +41,11 @@ export function buildMemberContext(agent, session, options = {}) {
   const attachedFiles = normalizeFileAttachments(options.attachments || []);
   const retrievedSelection = excludeInvalidatedContextItems(options.retrievedContext || [], retrievedContextSource, priorityPolicy);
   const hotCacheSelection = excludeInvalidatedContextItems(options.publicEventHotCache?.events || [], (item) => contextSource("public_event", item?.eventId || item?.sequence, {
+    sessionId: item?.sessionId,
     eventId: item?.eventId,
-    sourcePath: item?.sourcePath
+    sourcePath: item?.sourcePath,
+    round: item?.round,
+    sourceType: item?.type
   }), priorityPolicy);
   const stable = {
     roleIdentity: roleIdentity(agent),
@@ -107,16 +110,29 @@ export function buildMemberContext(agent, session, options = {}) {
     toolExecutionResults: visibleToolExecutionResults.filter((item) => !currentTurnSignatures.has(currentTurnEvidenceIdentity("tool", item))),
     rejectedToolRequests: visibleRejectedToolRequests.filter((item) => !currentTurnSignatures.has(currentTurnEvidenceIdentity("rejected", item)))
   }, executionEvidenceBudget, limits);
+  const currentInstructionSource = contextSource("session_question", String(session?.id || "active-session"), {
+    sessionId: String(session?.id || "active-session")
+  });
+  const requestedRecentTranscript = selectRecentTranscript(visibleMessages, options.recentMessageLimit ?? options.groupSettings?.recentMessageLimit);
+  const provisionalInvalidationSourceRefs = buildInvalidationSourceRefs({
+    session,
+    recentTranscript: requestedRecentTranscript,
+    retrievedContext: summaries.retrievedContext.items,
+    summarySources: summarySelection.sources,
+    continuationSources: continuationSelection.sources,
+    publicEvents: summaries.publicEventHotCache.events
+  });
   const core = {
     ...coreBase,
     fileOperationExecutionResults: executionEvidence.fileOperationExecutionResults,
     toolExecutionResults: executionEvidence.toolExecutionResults,
     rejectedToolRequests: executionEvidence.rejectedToolRequests,
-    executionEvidenceCompression: executionEvidence.compression
+    executionEvidenceCompression: executionEvidence.compression,
+    currentInstructionSource,
+    invalidationSourceRefs: provisionalInvalidationSourceRefs
   };
-  const coreMessages = contextMessagesFromCore(core);
+  let coreMessages = contextMessagesFromCore(core);
   const summaryMessages = contextMessagesFromSummaries(summaries);
-  const requestedRecentTranscript = selectRecentTranscript(visibleMessages, options.recentMessageLimit ?? options.groupSettings?.recentMessageLimit);
   const recentTranscript = fitRecentTranscriptToLimit({
     stableMessages,
     currentTurnMessages,
@@ -125,6 +141,18 @@ export function buildMemberContext(agent, session, options = {}) {
     recentTranscript: requestedRecentTranscript,
     limits
   });
+  // Source pointers must refer only to content that is actually retained in
+  // this prompt. The first pass budgets conservatively; this pass removes
+  // pointers for transcript entries that did not fit before final accounting.
+  core.invalidationSourceRefs = buildInvalidationSourceRefs({
+    session,
+    recentTranscript,
+    retrievedContext: summaries.retrievedContext.items,
+    summarySources: summarySelection.sources,
+    continuationSources: continuationSelection.sources,
+    publicEvents: summaries.publicEventHotCache.events
+  });
+  coreMessages = contextMessagesFromCore(core);
   const recentMessages = recentTranscript.map((message) => ({
     role: "user",
     content: formatTranscriptMessage(message)
@@ -166,7 +194,9 @@ export function buildMemberContext(agent, session, options = {}) {
     },
     coreOverflow: hasCoreOverflow(nonCompressibleCoreTokens, limits),
     priorityPolicy,
-    providerCacheBreakpoint: "after_original_question"
+    providerCacheBreakpoint: "after_original_question",
+    currentInstructionSource: core.currentInstructionSource,
+    invalidationSourceRefs: core.invalidationSourceRefs
   };
   context.contextReceipt = buildContextReceiptDraft({
     agent,
@@ -348,9 +378,7 @@ function excludeInvalidatedContextItems(items, sourceFor, policy) {
   const invalidated = [];
   for (const [index, item] of (Array.isArray(items) ? items : []).entries()) {
     const source = sourceFor(item, index);
-    const invalidation = policy.invalidations.find((candidate) => (
-      candidate.source.type === source.type && candidate.source.id === source.id
-    ));
+    const invalidation = matchingContextInvalidation(policy, source);
     if (!invalidation) {
       kept.push(item);
       continue;
@@ -363,6 +391,27 @@ function excludeInvalidatedContextItems(items, sourceFor, policy) {
     });
   }
   return { items: kept, invalidated };
+}
+
+function matchingContextInvalidation(policy = {}, source = {}) {
+  return (Array.isArray(policy.invalidations) ? policy.invalidations : []).find((candidate) => (
+    sameContextSource(candidate?.source, source)
+  ));
+}
+
+function sameContextSource(left = {}, right = {}) {
+  const leftType = String(left?.type || "");
+  const rightType = String(right?.type || "");
+  const leftId = String(left?.id || "");
+  const rightId = String(right?.id || "");
+  if (!leftType || !rightType || !leftId || !rightId) return false;
+  if (leftType === rightType && leftId === rightId) return true;
+  // A retained journal event can be surfaced either by archive retrieval or
+  // by the hot public-event cache. They share the event id, so an accepted
+  // replacement must suppress both prompt representations without deleting
+  // the underlying historical record.
+  const eventViews = new Set(["retrieved_context", "public_event"]);
+  return leftId === rightId && eventViews.has(leftType) && eventViews.has(rightType);
 }
 
 function selectSummaryContext(options, policy, agent, session) {
@@ -451,7 +500,7 @@ function selectContinuationContext(context, policy) {
   const candidates = [cacheSource, ...sourceRefs];
   const invalidatedMatches = candidates.map((source) => ({
     source,
-    invalidation: policy.invalidations.find((item) => item.source.type === source.type && item.source.id === source.id)
+    invalidation: matchingContextInvalidation(policy, source)
   })).filter((item) => item.invalidation);
   if (invalidatedMatches.length) {
     return {
@@ -515,7 +564,7 @@ function selectAttributedSummary(candidate, policy) {
   const provenance = String(record.provenance || (sourceRefs.length ? "attributed" : "unattributed")).trim();
   const invalidatedMatches = sourceRefs.map((source) => ({
     source,
-    invalidation: policy.invalidations.find((item) => item.source.type === source.type && item.source.id === source.id)
+    invalidation: matchingContextInvalidation(policy, source)
   })).filter((item) => item.invalidation);
   if (invalidatedMatches.length) {
     const invalidated = invalidatedMatches.map(({ source, invalidation }) => ({
@@ -573,7 +622,64 @@ function normalizeSummarySourceRefs(value) {
 function formatContextPriorityPolicy(policy = {}) {
   const tiers = Array.isArray(policy.tiers) ? policy.tiers : [];
   if (!tiers.length) return "";
-  return `Context priority is strict: ${tiers.join(" > ")}. Current user instructions override conflicting retained history. Invalidated sources are excluded from this prompt but remain loadable from retained history by their exact source pointer.`;
+  return `Context priority is strict: ${tiers.join(" > ")}. Current user instructions override conflicting retained history. Only validated, source-specific replacement records exclude retained sources; invalidated sources remain loadable from retained history by their exact source pointer.`;
+}
+
+function buildInvalidationSourceRefs({ session, recentTranscript, retrievedContext, summarySources, continuationSources, publicEvents }) {
+  const sessionId = String(session?.id || "active-session");
+  const candidates = [
+    ...(Array.isArray(recentTranscript) ? recentTranscript.map((message, index) => transcriptSource(message, sessionId, index)) : []),
+    ...(Array.isArray(retrievedContext) ? retrievedContext.map(retrievedContextSource) : []),
+    ...(Array.isArray(summarySources) ? summarySources : []),
+    ...(Array.isArray(continuationSources) ? continuationSources : []),
+    ...(Array.isArray(publicEvents) ? publicEvents.map((item) => contextSource("public_event", item?.eventId || item?.sequence, {
+      sessionId: item?.sessionId,
+      eventId: item?.eventId,
+      sourcePath: item?.sourcePath,
+      round: item?.round,
+      sourceType: item?.type
+    })) : [])
+  ];
+  const blockedTypes = new Set([
+    "agent_config",
+    "member_summary",
+    "group_summary",
+    "public_memory_summary",
+    "continuation",
+    "enabled_skill_metadata",
+    "attachment",
+    "artifact",
+    "execution_checkpoint_evidence",
+    "tool_result",
+    "file_operation_result",
+    "rejected_tool_request"
+  ]);
+  const seen = new Set();
+  return candidates.filter((source) => {
+    const type = String(source?.type || "").trim();
+    const id = String(source?.id || "").trim();
+    const key = `${type}\u001f${id}`;
+    if (!type || !id || blockedTypes.has(type) || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).slice(0, 32);
+}
+
+function formatContextSourceReferences(context = {}) {
+  const current = context.currentInstructionSource;
+  const retained = Array.isArray(context.invalidationSourceRefs) ? context.invalidationSourceRefs : [];
+  if (!current || !retained.length) return [];
+  return [
+    "These exact retained source references are eligible only for source-specific context replacement when the current user instruction makes their instruction non-authoritative. They are not an instruction to discard sources.",
+    `Current user instruction source: ${JSON.stringify(current)}`,
+    ...retained.map((source) => `Retained source_ref=${JSON.stringify({
+      type: source.type,
+      id: source.id,
+      sessionId: source.sessionId,
+      round: source.round,
+      sourcePath: source.sourcePath
+    })}`)
+  ];
 }
 
 function contextSourcesBySection({ agent, session, options, context, recentTranscript, executionEvidence }) {
@@ -589,7 +695,13 @@ function contextSourcesBySection({ agent, session, options, context, recentTrans
   ];
   const retrievedSources = context.summaries.retrievedContext.items.map(retrievedContextSource);
   const historySources = context.summaries.historyCatalogue.map((item) => contextSource("session_catalogue", item.sessionId, { sessionId: item.sessionId }));
-  const hotCacheSources = context.summaries.publicEventHotCache.events.map((item) => contextSource("public_event", item.eventId || item.sequence, { eventId: item.eventId, sourcePath: item.sourcePath }));
+  const hotCacheSources = context.summaries.publicEventHotCache.events.map((item) => contextSource("public_event", item.eventId || item.sequence, {
+    sessionId: item.sessionId,
+    eventId: item.eventId,
+    sourcePath: item.sourcePath,
+    round: item.round,
+    sourceType: item.type
+  }));
   const continuation = context.summaries.continuationContext;
   return {
     stable_context: [contextSource("agent_config", agent?.id || agent?.name || "unknown", { sessionId, sourcePath: "group.agent" })],
@@ -603,6 +715,7 @@ function contextSourcesBySection({ agent, session, options, context, recentTrans
     recent_public_activity_cache: hotCacheSources,
     cycle_continuation: context.summaries.continuationContextSelection?.sources
       || (continuation?.previousSessionId ? [contextSource("continuation", continuation.previousSessionId, { sessionId: continuation.previousSessionId, sourcePath: continuation.sourcePath })] : []),
+    context_source_references: context.invalidationSourceRefs || [],
     private_boss_messages: [],
     enabled_skills: context.summaries.enabledSkills ? [contextSource("enabled_skill_metadata", sessionId, { sessionId })] : [],
     recent_transcript: recentTranscript.map((message, index) => transcriptSource(message, sessionId, index))
@@ -651,13 +764,14 @@ function retrievedContextSource(item) {
     sessionId: item?.sessionId,
     eventId: item?.eventId,
     sourcePath: item?.sourcePath,
-    round: item?.round
+    round: item?.round,
+    sourceType: item?.sourceType
   });
 }
 
 function contextSource(type, id, details = {}) {
   const source = { type, id: String(id || "unknown") };
-  for (const key of ["sessionId", "eventId", "sourcePath", "path", "agentId", "round"]) {
+  for (const key of ["sessionId", "eventId", "sourcePath", "path", "agentId", "round", "sourceType"]) {
     const value = details[key];
     if (value !== undefined && value !== null && value !== "") source[key] = value;
   }
@@ -709,6 +823,7 @@ export function buildContextPromptSections(context) {
       formatExecutionEvidenceCompression(context.core.executionEvidenceCompression),
       formatTaskStateForPrompt(context.core.taskState) ? `Task state ledger:\n${formatTaskStateForPrompt(context.core.taskState)}` : ""
     ]],
+    ["Context source references", formatContextSourceReferences(context)],
     ["Summaries", [
       context.summaries.memberShortSummary ? `Member summary: ${context.summaries.memberShortSummary}` : "",
       context.summaries.groupSharedSummary ? `Group summary: ${context.summaries.groupSharedSummary}` : "",
@@ -1462,7 +1577,8 @@ function contextMessagesFromCore(core) {
     { role: "user", content: JSON.stringify(core.toolExecutionResults || []) },
     { role: "user", content: JSON.stringify(core.rejectedToolRequests || []) },
     { role: "user", content: formatExecutionEvidenceCompression(core.executionEvidenceCompression) },
-    { role: "user", content: formatTaskStateForPrompt(core.taskState) }
+    { role: "user", content: formatTaskStateForPrompt(core.taskState) },
+    { role: "system", content: formatContextSourceReferences(core).join("\n") }
   ].filter((message) => message.content);
 }
 
@@ -1528,6 +1644,8 @@ function normalizePublicEventHotCache(value, configuredLimit) {
       sequence: Number(item?.sequence || 0),
       type: String(item?.type || ""),
       occurredAt: String(item?.occurredAt || ""),
+      sessionId: String(item?.sessionId || ""),
+      round: Number(item?.round || 0),
       actorName: String(item?.actorName || item?.actorId || ""),
       status: String(item?.status || ""),
       tool: String(item?.tool || ""),

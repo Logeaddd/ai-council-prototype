@@ -22,8 +22,11 @@ test("context pressure baseline uses retained sessions, a rebuilt public index, 
 
     const stale = run.report.scenarios.find((scenario) => scenario.id === "superseded_instruction_visibility");
     assert.equal(stale.metrics.currentInstructionPresent, true);
-    assert.equal(stale.metrics.staleInstructionPresent, true);
-    assert.equal(stale.metrics.conflictPolicyState.invalidatedSources.length, 0);
+    assert.equal(stale.metrics.staleInstructionInitiallyPresent, true);
+    assert.equal(stale.metrics.sourceReferenceOffered, true);
+    assert.equal(stale.metrics.staleInstructionPresent, false);
+    assert.equal(stale.metrics.staleSourceRecorded, true);
+    assert.equal(stale.metrics.conflictPolicyState.invalidatedSources.length, 1);
 
     const persisted = run.report.scenarios.find((scenario) => scenario.id === "persisted_invalidation_reopen");
     assert.equal(persisted.metrics.oldSourceExcluded, true);

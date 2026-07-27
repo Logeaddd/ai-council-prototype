@@ -26,7 +26,8 @@ export function parseRoundModelResult(rawText, nativeToolCalls = []) {
     task_delegations: [],
     delegation_handoff: undefined,
     confidence: undefined,
-    memory_candidates: []
+    memory_candidates: [],
+    context_invalidations: []
   };
 }
 
@@ -41,7 +42,8 @@ export function parseRoundResponse(rawText) {
       reason: String(parsed.reason || "No new objection."),
       resolved_ids: normalizeResolvedIds(parsed.resolved_ids),
       task_contract: normalizeTaskContract(parsed.task_contract),
-      memory_candidates: normalizeStringArray(parsed.memory_candidates)
+      memory_candidates: normalizeStringArray(parsed.memory_candidates),
+      context_invalidations: normalizeContextInvalidationCandidates(parsed.context_invalidations)
     };
   }
   if (parsed.status === "error" || parsed.status === "unavailable") {
@@ -67,7 +69,8 @@ export function parseRoundResponse(rawText) {
     task_delegations: normalizeTaskDelegations(parsed.task_delegations ?? parsed.delegations),
     delegation_handoff: normalizeDelegationHandoff(parsed.delegation_handoff ?? parsed.handoff),
     confidence: normalizeConfidence(parsed.confidence),
-    memory_candidates: normalizeStringArray(parsed.memory_candidates)
+    memory_candidates: normalizeStringArray(parsed.memory_candidates),
+    context_invalidations: normalizeContextInvalidationCandidates(parsed.context_invalidations)
   };
 }
 
@@ -250,6 +253,31 @@ function normalizeDelegationHandoff(value) {
   const evidence = normalizeDelegationEvidence(value.evidence ?? value.handoff_evidence);
   if (!delegationId || !summary || !evidence.length) return undefined;
   return { delegation_id: delegationId, summary, evidence };
+}
+
+// The engine accepts a candidate only when its source was actually injected
+// into this exact member context. This parser deliberately keeps the shape
+// narrow, rather than trying to infer instruction changes from keywords.
+function normalizeContextInvalidationCandidates(value) {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set();
+  const candidates = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const source = item.source && typeof item.source === "object" ? item.source : item;
+    const type = optionalString(source.type ?? source.sourceType);
+    const id = optionalString(source.id ?? source.eventId ?? source.sourceId);
+    if (!type || !id) continue;
+    const key = `${type}\u001f${id}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    candidates.push({
+      source: { type: type.slice(0, 80), id: id.slice(0, 240) },
+      reason: (optionalString(item.reason) || "current_user_instruction_replaces_retained_source").slice(0, 400)
+    });
+    if (candidates.length >= 12) break;
+  }
+  return candidates;
 }
 
 function normalizeDelegationEvidence(value) {
