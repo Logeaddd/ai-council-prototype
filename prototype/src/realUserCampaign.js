@@ -316,12 +316,12 @@ function delegatedBriefTemplate(seed, random) {
     domain: "bounded_research_delegation_and_owner_delivery",
     deliverable: file,
     delegationRequired: true,
-    initialQuestion: `Create the verified release brief at ${file}. Work as a delivery team: the delivery owner must first delegate a narrow, read-only research task to Critic (assignee_id "critic") to inspect ${source} and return a bounded handoff naming the source and extracted release facts. Do not write the final brief until that handoff is available. The owner must then integrate the handoff into valid JSON with release, window and status fields, and validate the artifact. The contributor must not write the deliverable or finalize the task.`,
+    initialQuestion: `Create the verified release brief at ${file}. Work as a delivery team: the delivery owner must first use the native delegate_task control to create a narrow, read-only research task for Critic (assignee_id "critic") to inspect ${source} and return a bounded handoff naming the source and extracted release facts. Do not write the final brief until that handoff is available. The owner must then integrate the handoff into valid JSON with release, window and status fields, and validate the artifact. The contributor must not write the deliverable or finalize the task.`,
     edits: [
-      { prompt: "Update the existing release brief to add source set to research_note. Preserve the research-derived release and window, keep valid JSON, and have the owner validate it." },
+      { prompt: "Update the existing release brief to add a top-level string field named source with exactly value research_note. Do not replace it with a research_note object. Preserve the research-derived release and window, keep valid JSON, and have the owner validate it." },
       { prompt: "Update the same release brief to add audience set to internal. Preserve every current research-derived field and validate the current artifact." },
       { prompt: "Use only the latest requirement: status must be approved while release, window, source and audience remain present. Do not recreate the project or redo the completed research handoff. Validate the JSON." },
-      { prompt: "Make the final requested release-brief update in the same artifact. Keep the handoff-derived release/window, source research_note, audience internal and status approved. The delivery owner must validate the finished JSON." }
+      { prompt: "Make the final requested release-brief update in the same artifact. Keep the handoff-derived release/window, a top-level string source equal to research_note, audience internal and status approved. The delivery owner must validate the finished JSON." }
     ],
     reversalPrompt: "Use the current release-brief requirements only. Do not restore an obsolete status or discard the completed research handoff.",
     recallPrompt: `Inspect the retained task context, the current ${file}, and the recorded contributor handoff. Continue the existing delivery from the newest requirement without creating a replacement project.`,

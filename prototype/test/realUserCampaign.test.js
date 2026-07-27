@@ -83,7 +83,7 @@ test("delegated brief campaign requires an owner-integrated read-only research h
   assert.equal(campaign.task.id, "delegated-brief");
   assert.equal(campaign.task.delegationRequired, true);
   assert.equal(campaign.hiddenVerifier.requiresDelegation, true);
-  assert.match(campaign.task.initialQuestion, /delegate a narrow, read-only research task to Critic/i);
+  assert.match(campaign.task.initialQuestion, /native delegate_task control/i);
   assert.equal(JSON.stringify(publicScenario).includes(campaign.hiddenVerifier.expected.release), false);
   assert.equal(JSON.stringify(publicScenario).includes(campaign.fixtures[0].content), false);
 });

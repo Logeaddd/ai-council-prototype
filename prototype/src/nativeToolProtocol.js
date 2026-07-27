@@ -10,7 +10,7 @@ const FULL_TIER_TOOLS = [
   "skill_disable", "skill_remove", "extract_archive", "create_archive", "execute_command", "process_control", "run_code",
   "install_package", "provision_tool", "run_tests", "git_operation", "browser_control", "mcp_search_npm", "mcp_install_npm",
   "mcp_uninstall", "mcp_list_tools", "mcp_call", "mcp_list_resources", "mcp_read_resource",
-  "mcp_list_prompts", "mcp_get_prompt"
+  "mcp_list_prompts", "mcp_get_prompt", "delegate_task"
 ];
 
 const STRING = { type: "string" };
@@ -111,7 +111,14 @@ const PROPERTY_DEFINITIONS = {
   skillMarkdown: STRING,
   force: BOOLEAN,
   create: BOOLEAN,
-  mode: STRING
+  mode: STRING,
+  delegationType: { ...NON_EMPTY_STRING, description: "Bounded delegation type: research, implementation, or unblocker." },
+  assigneeId: { ...NON_EMPTY_STRING, description: "Stable ID of the specific contributor." },
+  task: { ...NON_EMPTY_STRING, description: "Narrow delegated slice, never the full user request." },
+  expectedEvidence: { type: "array", minItems: 1, items: NON_EMPTY_STRING, description: "Concrete evidence the contributor must hand back." },
+  allowedTools: STRING_LIST,
+  allowWorkspaceMutation: BOOLEAN,
+  allowedPaths: STRING_LIST
 };
 
 const TOOL_SPECS = {
@@ -151,7 +158,8 @@ const TOOL_SPECS = {
   skill_install: spec("Install a validated skill from a catalog, URL, or supplied markdown.", ["skillId", "catalogId", "skillUrl", "skillMarkdown", "overwrite", "timeoutMs"]),
   skill_enable: spec("Enable an installed skill for this group.", ["skillId"], ["skillId"]),
   skill_disable: spec("Disable a skill for this group.", ["skillId"], ["skillId"]),
-  skill_remove: spec("Remove an installed skill.", ["skillId"], ["skillId"])
+  skill_remove: spec("Remove an installed skill.", ["skillId"], ["skillId"]),
+  delegate_task: spec("Create one bounded contributor handoff. Only the delivery owner may use it; it never transfers final ownership.", ["delegationType", "assigneeId", "task", "expectedEvidence", "allowedTools", "allowWorkspaceMutation", "allowedPaths"], ["delegationType", "assigneeId", "task", "expectedEvidence"])
 };
 
 export function nativeToolDefinitions(permissionTier = "text", options = {}) {

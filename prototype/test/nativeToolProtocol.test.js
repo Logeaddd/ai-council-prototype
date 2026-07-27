@@ -50,6 +50,30 @@ test("native provisioning schema preserves researched source fields", () => {
   assert.equal(requests[0].discoveryQuery, "example cli official install");
 });
 
+test("native delegation schema carries a bounded contributor handoff request", () => {
+  const delegation = nativeToolDefinitions("full", { tools: ["delegate_task"] })[0];
+  assert.equal(delegation.name, "delegate_task");
+  assert.deepEqual(delegation.inputSchema.required, ["reason", "delegationType", "assigneeId", "task", "expectedEvidence"]);
+
+  const [request] = normalizeNativeToolCalls([{
+    id: "call_delegate",
+    name: "delegate_task",
+    input: {
+      delegationType: "research",
+      assigneeId: "researcher",
+      task: "Read the source fact only.",
+      expectedEvidence: ["Source file and extracted fact"],
+      allowedTools: ["read_file"],
+      allowWorkspaceMutation: false,
+      reason: "Ask a contributor to verify the bounded fact."
+    }
+  }]);
+  assert.equal(request.tool, "delegate_task");
+  assert.equal(request.assigneeId, "researcher");
+  assert.equal(request.delegationTask, "Read the source fact only.");
+  assert.deepEqual(request.expectedEvidence, ["Source file and extracted fact"]);
+});
+
 test("native provider calls normalize into the existing tool request protocol", () => {
   const requests = normalizeNativeToolCalls([{
     id: "call_1",

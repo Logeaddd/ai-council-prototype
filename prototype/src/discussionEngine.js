@@ -389,6 +389,50 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
         }
       };
 
+      const registerNativeDelegation = async (request) => {
+        if (agent.id !== session.executionState?.executorId) {
+          return { ok: false, code: "delegation_owner_required", error: "Only the durable delivery owner can create a bounded delegation." };
+        }
+        const delegation = {
+          type: String(request.delegationType || "").trim().toLowerCase(),
+          assignee_id: String(request.assigneeId || "").trim(),
+          task: String(request.delegationTask || "").trim(),
+          expected_evidence: Array.isArray(request.expectedEvidence) ? request.expectedEvidence : [],
+          allowed_tools: Array.isArray(request.allowedTools) ? request.allowedTools : [],
+          allow_workspace_mutation: request.allowWorkspaceMutation === true,
+          allowed_paths: Array.isArray(request.allowedPaths) ? request.allowedPaths : []
+        };
+        if (!delegation.type || !delegation.assignee_id || !delegation.task || !delegation.expected_evidence.length) {
+          return { ok: false, code: "invalid_delegation_request", error: "delegate_task needs delegationType, assigneeId, task, and expectedEvidence." };
+        }
+        response.task_delegations = [...(response.task_delegations || []), delegation];
+        advanceExecutionState({
+          state: session.executionState,
+          session,
+          agent,
+          groupPath: options.groupPath,
+          question: executionQuestion,
+          response
+        });
+        refreshExecutionCheckpoint();
+        executionDirective = executionInstruction(session.executionState, agent);
+        const registered = (session.executionState?.ownership?.delegations || []).find((item) => (
+          item.assignedBy === agent.id
+          && item.assigneeId === delegation.assignee_id
+          && item.task === delegation.task
+          && item.status === "pending"
+        ));
+        if (!registered) {
+          return { ok: false, code: "delegation_rejected", error: "The requested delegation was rejected by the ownership boundary." };
+        }
+        return {
+          ok: true,
+          delegationId: registered.id,
+          assigneeId: registered.assigneeId,
+          nextAction: "Wait for this contributor handoff before the owner advances final delivery."
+        };
+      };
+
       processResponseFileOperations(response);
 
       if (response.status === "speak" && !response.tool_requests?.length && accumulatedRejectedFileOperationProposals.length) {
@@ -480,7 +524,8 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
             ...continuationVerifiedToolResults(continuationContext)
           ],
           delegation: activeDelegationForAgent(session.executionState, agent),
-          blockVerifiedContinuationCommands: Boolean(continuationContext && isPlainContinuationRequest(question))
+          blockVerifiedContinuationCommands: Boolean(continuationContext && isPlainContinuationRequest(question)),
+          delegateTaskTool: registerNativeDelegation
         });
         accumulatedToolRequests.push(...toolResult.accepted);
         accumulatedToolResults.push(...toolResult.results);

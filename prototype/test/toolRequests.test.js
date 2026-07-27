@@ -2229,6 +2229,28 @@ function listen(server) {
   return new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
 }
 
+test("delegate_task routes through the live delivery controller instead of pretending to be a shell tool", async () => {
+  const result = await executeToolRequests({
+    permissionTier: "full",
+    groupPath: fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-delegate-tool-")),
+    agent: { id: "owner", name: "Owner" },
+    requests: [{
+      tool: "delegate_task",
+      delegationType: "research",
+      assigneeId: "researcher",
+      task: "Read one source fact.",
+      expectedEvidence: ["Source fact"],
+      allowedTools: ["read_file"],
+      allowWorkspaceMutation: false,
+      reason: "Create a bounded research handoff."
+    }],
+    delegateTaskTool: async (request) => ({ ok: true, delegationId: `delegation:1:1:${request.assigneeId}` })
+  });
+  assert.equal(result.rejected.length, 0);
+  assert.equal(result.results[0].status, "completed");
+  assert.equal(result.results[0].result.delegationId, "delegation:1:1:researcher");
+});
+
 function close(server) {
   return new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
 }

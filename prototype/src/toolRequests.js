@@ -81,7 +81,8 @@ const ALLOWED_TOOLS = new Set([
   "skill_install",
   "skill_enable",
   "skill_disable",
-  "skill_remove"
+  "skill_remove",
+  "delegate_task"
 ]);
 const FILE_TOOLS = new Set(["list_directory", "read_file", "search_files", "grep_content"]);
 const CONTEXT_TOOLS = new Set(["search_context", "load_context"]);
@@ -99,7 +100,7 @@ const BROWSER_TOOLS = new Set(["browser_control"]);
 const DATABASE_TOOLS = new Set(["database_query"]);
 const MCP_TOOLS = new Set(["mcp_list_tools", "mcp_call", "mcp_list_resources", "mcp_read_resource", "mcp_list_prompts", "mcp_get_prompt", "mcp_search_npm", "mcp_install_npm", "mcp_uninstall"]);
 const SKILL_TOOLS = new Set(["skill_read", "skill_list", "skill_search", "skill_install", "skill_enable", "skill_disable", "skill_remove"]);
-const FULL_PERMISSION_TOOLS = new Set(["extract_archive", "create_archive", "workspace_edit", "execute_command", "process_control", "run_code", "install_package", "provision_tool", "run_tests", "git_operation", "browser_control", "mcp_list_tools", "mcp_call", "mcp_list_resources", "mcp_read_resource", "mcp_list_prompts", "mcp_get_prompt", "mcp_search_npm", "mcp_install_npm", "mcp_uninstall", "skill_list", "skill_search", "skill_install", "skill_enable", "skill_disable", "skill_remove"]);
+const FULL_PERMISSION_TOOLS = new Set(["extract_archive", "create_archive", "workspace_edit", "execute_command", "process_control", "run_code", "install_package", "provision_tool", "run_tests", "git_operation", "browser_control", "mcp_list_tools", "mcp_call", "mcp_list_resources", "mcp_read_resource", "mcp_list_prompts", "mcp_get_prompt", "mcp_search_npm", "mcp_install_npm", "mcp_uninstall", "skill_list", "skill_search", "skill_install", "skill_enable", "skill_disable", "skill_remove", "delegate_task"]);
 
 export function normalizeToolRequests(value) {
   if (!Array.isArray(value)) return [];
@@ -443,6 +444,16 @@ function failureStrategyFamily(item = {}) {
 
 async function executeOne(request, options) {
   try {
+    if (request.tool === "delegate_task") {
+      if (typeof options.delegateTaskTool !== "function") {
+        return resultRecord(request, { status: "failed", code: "delegation_controller_unavailable", error: "No active delivery controller can create a bounded delegation." });
+      }
+      const result = await options.delegateTaskTool(request);
+      if (result?.ok === false) {
+        return resultRecord(request, { status: "failed", code: String(result.code || "delegation_rejected"), error: String(result.error || "The bounded delegation was rejected."), result });
+      }
+      return resultRecord(request, { status: "completed", result: result || { ok: true } });
+    }
     if (FILE_TOOLS.has(request.tool)) {
       const result = executeFileTool(request, {
         groupPath: options.groupPath,
@@ -1013,6 +1024,13 @@ function normalizeToolRequest(item, index) {
     skillId: stringField(item.skillId || item.skill_id || item.catalogId || item.catalog_id),
     skillUrl: stringField(item.skillUrl || item.skill_url || item.url),
     skillMarkdown: stringField(item.skillMarkdown || item.skill_markdown || item.markdown),
+    delegationType: stringField(item.delegationType || item.delegation_type || item.type),
+    assigneeId: stringField(item.assigneeId || item.assignee_id),
+    delegationTask: stringField(item.delegationTask || item.delegation_task || item.task),
+    expectedEvidence: arrayOfStrings(item.expectedEvidence || item.expected_evidence),
+    allowedTools: arrayOfStrings(item.allowedTools || item.allowed_tools),
+    allowWorkspaceMutation: Boolean(item.allowWorkspaceMutation || item.allow_workspace_mutation),
+    allowedPaths: arrayOfStrings(item.allowedPaths || item.allowed_paths),
     mode: stringField(item.mode),
     maxRows: normalizeOptionalNumber(item.maxRows || item.max_rows),
     headers: objectField(item.headers),
