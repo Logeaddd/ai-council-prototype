@@ -240,36 +240,24 @@ function currentCampaignDelegationEvidence(report = {}, options = {}) {
     };
   }
 
-  const reportDir = path.dirname(reportPath);
-  const sessionRoot = path.resolve(reportDir, "data", "workspace-ui", "campaign-group", "sessions");
-  if (!isPathWithin(sessionRoot, reportDir) || !fs.existsSync(sessionRoot) || !fs.statSync(sessionRoot).isDirectory()) {
+  const receipt = readReceiptSessions(
+    report.collaboration?.executionReceipt,
+    "ai-council.collaboration-execution-receipt.v1",
+    reportPath,
+    { requireCompleteDirectory: true }
+  );
+  if (receipt.error) {
     return {
       required: true,
       passed: false,
-      checks: [campaignEvidenceCheck("durable_campaign_sessions", false, "persisted_campaign_sessions_missing")]
+      checks: [campaignEvidenceCheck("durable_collaboration_execution_receipt", false, receipt.error)]
     };
   }
 
-  const sessions = fs.readdirSync(sessionRoot, { withFileTypes: true })
-    .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
-    .sort((left, right) => left.name.localeCompare(right.name))
-    .flatMap((entry) => {
-      try {
-        const session = JSON.parse(fs.readFileSync(path.join(sessionRoot, entry.name), "utf8"));
-        return session && typeof session === "object" ? [session] : [];
-      } catch {
-        return [];
-      }
-    });
-  if (!sessions.length) {
-    return {
-      required: true,
-      passed: false,
-      checks: [campaignEvidenceCheck("durable_campaign_sessions", false, "no_readable_session_records")]
-    };
-  }
-
-  return verifyCampaignCollaboration({ requiresDelegation: true, file: targetFile }, sessions);
+  return {
+    ...verifyCampaignCollaboration({ requiresDelegation: true, file: targetFile }, receipt.sessions),
+    executionReceipt: { schema: receipt.schema, sessionCount: receipt.sessions.length }
+  };
 }
 
 function campaignEvidenceCheck(id, passed, evidence) {
@@ -301,20 +289,10 @@ function hasCurrentCapabilityUseEvidence(report = {}, options = {}) {
 }
 
 function receiptMatchesCapabilityEvidence(receipt, evidence, reportPath) {
-  if (receipt?.schema !== "ai-council.capability-execution-receipt.v1" || !Array.isArray(receipt.sessionFiles) || !reportPath) return false;
-  const reportDir = path.dirname(reportPath);
-  const sessionRoot = path.resolve(reportDir, "data", "workspace-ui", "campaign-group", "sessions");
+  const receiptSessions = readReceiptSessions(receipt, "ai-council.capability-execution-receipt.v1", reportPath);
+  if (receiptSessions.error) return false;
   const resultsById = new Map();
-  for (const source of receipt.sessionFiles) {
-    const relativePath = String(source?.path || "").replaceAll("/", path.sep);
-    if (!relativePath || path.isAbsolute(relativePath)) return false;
-    const filePath = path.resolve(reportDir, relativePath);
-    if (!isPathWithin(filePath, sessionRoot) || !fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) return false;
-    const bytes = fs.readFileSync(filePath);
-    if (!constantTimeEqualHex(sha256(bytes), source?.sha256)) return false;
-    let session;
-    try { session = JSON.parse(bytes.toString("utf8")); } catch { return false; }
-    if (String(session?.id || "") !== String(source?.sessionId || "")) return false;
+  for (const session of receiptSessions.sessions) {
     for (const result of session.toolExecutionResults || []) {
       const id = String(result?.id || "");
       if (!id || resultsById.has(id)) return false;
@@ -322,6 +300,52 @@ function receiptMatchesCapabilityEvidence(receipt, evidence, reportPath) {
     }
   }
   return evidence.uses.every((use) => receiptUseMatches(use, resultsById));
+}
+
+function readReceiptSessions(receipt, schema, reportPath, options = {}) {
+  if (receipt?.schema !== schema || !Array.isArray(receipt.sessionFiles) || !receipt.sessionFiles.length || !reportPath) {
+    return { error: "missing_or_invalid_execution_receipt" };
+  }
+  const reportDir = path.dirname(reportPath);
+  const sessionRoot = path.resolve(reportDir, "data", "workspace-ui", "campaign-group", "sessions");
+  if (!isPathWithin(sessionRoot, reportDir) || !fs.existsSync(sessionRoot) || !fs.statSync(sessionRoot).isDirectory()) {
+    return { error: "persisted_campaign_sessions_missing" };
+  }
+
+  const sources = [...receipt.sessionFiles];
+  const sessions = [];
+  const seenPaths = new Set();
+  const seenSessionIds = new Set();
+  for (const source of sources) {
+    const relativePath = String(source?.path || "").replaceAll("/", path.sep);
+    if (!relativePath || path.isAbsolute(relativePath)) return { error: "invalid_receipt_session_path" };
+    const filePath = path.resolve(reportDir, relativePath);
+    const normalizedPath = path.relative(reportDir, filePath).replaceAll("\\", "/");
+    if (!isPathWithin(filePath, sessionRoot) || seenPaths.has(normalizedPath) || !fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
+      return { error: "missing_or_duplicate_receipt_session" };
+    }
+    const bytes = fs.readFileSync(filePath);
+    if (!constantTimeEqualHex(sha256(bytes), source?.sha256)) return { error: "receipt_session_hash_mismatch" };
+    let session;
+    try { session = JSON.parse(bytes.toString("utf8")); } catch { return { error: "invalid_receipt_session_json" }; }
+    const sessionId = String(session?.id || "");
+    if (!sessionId || sessionId !== String(source?.sessionId || "") || seenSessionIds.has(sessionId)) {
+      return { error: "invalid_or_duplicate_receipt_session_id" };
+    }
+    seenPaths.add(normalizedPath);
+    seenSessionIds.add(sessionId);
+    sessions.push(session);
+  }
+
+  if (options.requireCompleteDirectory === true) {
+    const persistedPaths = fs.readdirSync(sessionRoot, { withFileTypes: true })
+      .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
+      .map((entry) => path.relative(reportDir, path.join(sessionRoot, entry.name)).replaceAll("\\", "/"));
+    if (persistedPaths.length !== seenPaths.size || persistedPaths.some((item) => !seenPaths.has(item))) {
+      return { error: "collaboration_receipt_does_not_cover_all_sessions" };
+    }
+  }
+  return { schema, sessions };
 }
 
 function receiptUseMatches(use, resultsById) {

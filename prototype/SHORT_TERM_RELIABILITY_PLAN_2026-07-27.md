@@ -287,7 +287,7 @@ Completed on 2026-07-27:
   while failing its required capability family. The formal report at
   `harness/reports/product-harness-2026-07-27T10-14-19-216Z.json` therefore
   reports 7/10 (70 percent), not 8/10, and capability acquisition 0/3.
-  T105 and T117 remain incomplete; T106 and T119 are complete. This machine
+  T105 and T117 remain incomplete; T106 is complete. This machine
   currently has no `AI_COUNCIL_API_BASE_URL`, `AI_COUNCIL_API_KEY`, or
   `AI_COUNCIL_MODEL` configured, so no new real-provider campaign was started
   and no local evidence is represented as a replacement.
@@ -302,6 +302,14 @@ Completed on 2026-07-27:
   752/753 with 0 failures and 1 Windows platform skip. The resulting formal
   report is `harness/reports/product-harness-2026-07-27T10-31-26-387Z.json`;
   it remains incomplete for the same unconfigured real-provider campaign.
+* Delegated-collaboration evidence now follows the same durable rule in
+  `e6d45b3`: campaign reports must contain hashes for their complete persisted
+  session snapshot, and product gating reloads those exact files to verify
+  native delegation provenance, delegation timestamps, current contributor
+  evidence, and the owner's later target write. Cached `collaboration.passed`
+  fields no longer count. The retained older collaboration reports lack the
+  new native/timestamped evidence and receipt, so T119 is deliberately
+  incomplete until a fresh real-provider campaign supplies it.
 
 Still open before the real-provider release gate:
 

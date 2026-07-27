@@ -269,6 +269,8 @@ test("seeded campaign drives HTTP/SSE stages, member disturbances and interrupti
     assert.equal(run.report.sessions.interrupted.length, 2);
     assert.equal(run.report.minimumUsableDelivery.passed, true);
     assert.equal(run.report.capabilityAcquisition.executionReceipt.schema, "ai-council.capability-execution-receipt.v1");
+    assert.equal(run.report.collaboration.executionReceipt.schema, "ai-council.collaboration-execution-receipt.v1");
+    assert.equal(run.report.collaboration.executionReceipt.sessionFiles.length > 0, true);
     assert.equal(run.report.persistence.passed, true);
     assert.equal(run.report.persistence.checks.every((check) => check.passed), true);
     assert.equal(run.report.recovery.passed, true);

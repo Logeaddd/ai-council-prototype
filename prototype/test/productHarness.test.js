@@ -192,8 +192,12 @@ test("product harness can require real-provider bounded-delegation evidence", ()
   fs.writeFileSync(path.join(reportDir, "report.json"), JSON.stringify(report), "utf8");
   assert.equal(evaluateProductHarness({ root, manifest, testEvidence: { status: "passed" } }).status, "incomplete", "a cached report field cannot substitute for persisted session evidence");
 
-  writeNativeResearchHandoffSession(reportDir, report.scenario.task.deliverable);
+  const sessionPath = writeNativeResearchHandoffSession(reportDir, report.scenario.task.deliverable);
+  attachCollaborationExecutionReceipt(report, reportDir);
+  fs.writeFileSync(path.join(reportDir, "report.json"), JSON.stringify(report), "utf8");
   assert.equal(evaluateProductHarness({ root, manifest, testEvidence: { status: "passed" } }).status, "complete");
+  fs.appendFileSync(sessionPath, "\n");
+  assert.equal(evaluateProductHarness({ root, manifest, testEvidence: { status: "passed" } }).status, "incomplete", "session hash drift invalidates a collaboration receipt");
 });
 
 test("a bounded collaboration gate does not count unrelated campaign failures in its reliability window", () => {
@@ -212,7 +216,7 @@ test("a bounded collaboration gate does not count unrelated campaign failures in
   const writeReport = (name, taskId, status, completedAt, collaboration = false) => {
     const dir = path.join(reportsRoot, name);
     fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(path.join(dir, "report.json"), JSON.stringify({
+    const report = {
       schema: "ai-council.real-user-campaign-run.v1",
       status,
       seed: 8,
@@ -225,8 +229,12 @@ test("a bounded collaboration gate does not count unrelated campaign failures in
       recovery: { passed: status === "passed", checks: status === "passed" ? [{ id: "continuation_completed_visible_work", passed: true }] : [] },
       sessions: { interrupted: status === "passed" ? [{ id: `interrupted-${taskId}` }] : [] },
       collaboration: { required: true, passed: collaboration }
-    }), "utf8");
-    if (collaboration) writeNativeResearchHandoffSession(dir, "deliverables/release-brief.json");
+    };
+    if (collaboration) {
+      writeNativeResearchHandoffSession(dir, "deliverables/release-brief.json");
+      attachCollaborationExecutionReceipt(report, dir);
+    }
+    fs.writeFileSync(path.join(dir, "report.json"), JSON.stringify(report), "utf8");
   };
   writeReport("delegated-pass", "delegated-brief", "passed", "2026-07-27T00:00:00.000Z", true);
   writeReport("unrelated-failure", "zip-archive", "failed", "2026-07-27T00:01:00.000Z");
@@ -255,7 +263,8 @@ function writeNativeResearchHandoffSession(reportDir, targetFile) {
     ownerAcknowledged: true,
     handoffEvidence: [{ kind: "tool", detail: "read_file#critic-read completed" }]
   };
-  fs.writeFileSync(path.join(sessionDir, "session-native-delegation.json"), JSON.stringify({
+  const sessionPath = path.join(sessionDir, "session-native-delegation.json");
+  fs.writeFileSync(sessionPath, JSON.stringify({
     id: "session-native-delegation",
     createdAt: "2026-07-27T00:01:00.000Z",
     executionState: { ownership: { delegations: [delegation] } },
@@ -264,6 +273,27 @@ function writeNativeResearchHandoffSession(reportDir, targetFile) {
       { id: "owner-write", tool: "workspace_edit", status: "completed", createdAt: "2026-07-27T00:00:02.000Z", source_agent_id: "builder", path: targetFile, result: { ok: true, path: targetFile } }
     ]
   }), "utf8");
+  return sessionPath;
+}
+
+function attachCollaborationExecutionReceipt(report, reportDir) {
+  const sessionDir = path.join(reportDir, "data", "workspace-ui", "campaign-group", "sessions");
+  const sessionFiles = fs.readdirSync(sessionDir, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
+    .sort((left, right) => left.name.localeCompare(right.name))
+    .map((entry) => {
+      const filePath = path.join(sessionDir, entry.name);
+      const bytes = fs.readFileSync(filePath);
+      return {
+        path: path.relative(reportDir, filePath).replaceAll("\\", "/"),
+        sessionId: String(JSON.parse(bytes.toString("utf8")).id || ""),
+        sha256: createHash("sha256").update(bytes).digest("hex")
+      };
+    });
+  report.collaboration.executionReceipt = {
+    schema: "ai-council.collaboration-execution-receipt.v1",
+    sessionFiles
+  };
 }
 
 test("product harness requires a real multi-family matrix and cannot count repeated seeds or fabricated acquisition", () => {

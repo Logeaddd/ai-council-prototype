@@ -239,7 +239,10 @@ export async function runSeededRealUserCampaign(options = {}) {
       ...toolEvidence.acquisition,
       executionReceipt: createCapabilityExecutionReceipt(groupPath, sessionEntries, toolEvidence.acquisition.evidence)
     };
-    const collaboration = verifyCampaignCollaboration(campaign.hiddenVerifier, sessions);
+    const collaboration = {
+      ...verifyCampaignCollaboration(campaign.hiddenVerifier, sessions),
+      executionReceipt: createCollaborationExecutionReceipt(groupPath, sessionEntries)
+    };
     const deliveryLayers = classifyCampaignDelivery(artifactDelivery);
     const attemptedModelCalls = sessions.reduce((total, session) => total + Number(session.modelCallCount || 0), 0);
     const budgetLedger = readCampaignBudgetLedger(groupPath);
@@ -740,6 +743,18 @@ function createCapabilityExecutionReceipt(groupPath, sessionEntries = [], eviden
   return {
     schema: "ai-council.capability-execution-receipt.v1",
     sessionFiles
+  };
+}
+
+function createCollaborationExecutionReceipt(groupPath, sessionEntries = []) {
+  const runDir = path.resolve(groupPath, "..", "..", "..");
+  return {
+    schema: "ai-council.collaboration-execution-receipt.v1",
+    sessionFiles: (sessionEntries || []).map(({ session, filePath }) => ({
+      path: path.relative(runDir, filePath).replaceAll("\\", "/"),
+      sessionId: String(session?.id || ""),
+      sha256: createHash("sha256").update(fs.readFileSync(filePath)).digest("hex")
+    }))
   };
 }
 
