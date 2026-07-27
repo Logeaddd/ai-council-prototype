@@ -904,9 +904,10 @@ export function CouncilApp() {
           onOpenInstructions={() => setSettingsOpen(true)}
         />
 
-        <main className="flex min-w-0 flex-1 flex-col">
+        <main className="flex min-h-0 min-w-0 flex-1 flex-col">
           <div
             ref={transcriptScrollRef}
+            data-testid="transcript-scroll-region"
             onScroll={updateTranscriptScrollPosition}
             className="min-h-0 flex-1 overflow-y-auto"
           >

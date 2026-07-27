@@ -89,7 +89,7 @@ test("persisted capability switches block direct server execution routes", async
   }
 });
 
-test("local API requires the per-server token and rejects cross-origin or non-JSON mutations", async () => {
+test("local API uses a HttpOnly per-server cookie and rejects cross-origin or non-JSON mutations", async () => {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-server-auth-"));
   const port = await availablePort();
   const child = spawn(process.execPath, [path.join(root, "src", "server.js")], {
@@ -112,11 +112,18 @@ test("local API requires the per-server token and rejects cross-origin or non-JS
     await waitForServer(port, child, () => output);
     const rootPage = await fetch(`http://127.0.0.1:${port}/`);
     const html = await rootPage.text();
-    assert.match(html, new RegExp(`name="ai-council-local-api-token" content="${localApiToken}"`));
+    assert.doesNotMatch(html, /ai-council-local-api-token/);
+    assert.doesNotMatch(html, new RegExp(localApiToken));
+    assert.match(String(rootPage.headers.get("set-cookie") || ""), new RegExp(`ai_council_local_api_token=${localApiToken}; HttpOnly; SameSite=Strict; Path=/`));
 
     const missingToken = await fetch(`http://127.0.0.1:${port}/api/providers`);
     assert.equal(missingToken.status, 401);
     assert.equal((await missingToken.json()).code, "local_api_auth_required");
+
+    const cookieAuthenticated = await fetch(`http://127.0.0.1:${port}/api/providers`, {
+      headers: { Cookie: `ai_council_local_api_token=${localApiToken}` }
+    });
+    assert.equal(cookieAuthenticated.status, 200);
 
     const crossOrigin = await fetch(`http://127.0.0.1:${port}/api/providers`, {
       headers: {

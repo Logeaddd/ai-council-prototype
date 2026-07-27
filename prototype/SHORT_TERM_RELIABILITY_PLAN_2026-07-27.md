@@ -362,6 +362,21 @@ Completed on 2026-07-27:
   latency or exact-lexical-recall gap currently justifies an FTS5 or vector
   parallel retrieval system. The audit does not establish paraphrase/semantic
   recall, which remains a conditional T116 question for real-provider tests.
+* The current worktree now has a real Electron transcript-follow probe for
+  the reported "new messages do not stay in view" failure. It creates a
+  temporary local group through the production UI/API path, drives the
+  renderer's live event flow, verifies a finite transcript scroll viewport
+  follows incoming output at the bottom, then scrolls upward and verifies
+  later output does not take control back from the reader. The probe exposed
+  a separate product fault: injecting the local API bearer token into the
+  static Next document made hydration discard the stylesheet links, leaving
+  the transcript without its actual scroll container. The server now issues a
+  same-origin `HttpOnly; SameSite=Strict` cookie instead; the renderer no
+  longer receives the token and the untouched static document retains CSS.
+  `npm run renderer:build`, the transcript probe, existing private-draft and
+  file-drop Electron probes, and the full `npm test` run (768 passed, 0
+  failed, 1 Windows-only platform skip) passed locally. This is desktop UI
+  and local API evidence only, not a Provider capability claim.
 
 Still open before the real-provider release gate:
 

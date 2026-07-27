@@ -862,9 +862,12 @@ function serveStatic(res, pathname) {
     const document = fs.readFileSync(filePath, "utf8");
     res.writeHead(200, {
       "Content-Type": types[ext],
-      "Cache-Control": "no-store"
+      "Cache-Control": "no-store",
+      // Keep the per-process local API credential out of the renderer DOM.
+      // Same-origin browser requests include this HttpOnly cookie automatically.
+      "Set-Cookie": localApiCookieHeader()
     });
-    res.end(injectLocalApiToken(document));
+    res.end(document);
     return;
   }
   res.writeHead(200, { "Content-Type": types[ext] || "application/octet-stream" });
@@ -1234,7 +1237,7 @@ function resolveLocalApiToken(env = process.env) {
 }
 
 function assertTrustedLocalApiRequest(req) {
-  const suppliedToken = String(req.headers["x-ai-council-token"] || "");
+  const suppliedToken = String(req.headers["x-ai-council-token"] || "") || localApiTokenFromCookie(req.headers.cookie);
   if (!constantTimeTokenMatch(suppliedToken, localApiToken)) {
     const error = new Error("Local API authentication required.");
     error.code = "local_api_auth_required";
@@ -1274,13 +1277,18 @@ function constantTimeTokenMatch(value, expected) {
     && timingSafeEqual(actualBuffer, expectedBuffer);
 }
 
-function injectLocalApiToken(document) {
-  const meta = `<meta name="ai-council-local-api-token" content="${localApiToken}">`;
-  // The static renderer can reconcile its <head> during hydration. Keep the
-  // same local-only token in page memory so authenticated API calls survive it.
-  const tokenLiteral = JSON.stringify(localApiToken).replace(/</g, "\\u003c");
-  const bootstrap = `<script>window.__AI_COUNCIL_LOCAL_API_TOKEN__=${tokenLiteral};</script>`;
-  return String(document || "").replace(/<head(?=>|\s[^>]*>)/i, (tag) => `${tag}${meta}${bootstrap}`);
+function localApiCookieHeader() {
+  return `ai_council_local_api_token=${encodeURIComponent(localApiToken)}; HttpOnly; SameSite=Strict; Path=/`;
+}
+
+function localApiTokenFromCookie(header) {
+  const cookie = String(header || "").split(";").map((item) => item.trim()).find((item) => item.startsWith("ai_council_local_api_token="));
+  if (!cookie) return "";
+  try {
+    return decodeURIComponent(cookie.slice("ai_council_local_api_token=".length));
+  } catch {
+    return "";
+  }
 }
 
 function readCurrentAppSettings() {

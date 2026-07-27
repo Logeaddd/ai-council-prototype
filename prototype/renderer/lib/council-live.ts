@@ -289,12 +289,9 @@ function errorMessage(error: unknown) {
 }
 
 function localApiHeaders(headers: Record<string, string> = {}) {
-  const token = typeof window === "undefined"
-    ? ""
-    : String((window as typeof window & { __AI_COUNCIL_LOCAL_API_TOKEN__?: string }).__AI_COUNCIL_LOCAL_API_TOKEN__ || "")
-      || document.querySelector('meta[name="ai-council-local-api-token"]')?.getAttribute("content")
-      || ""
-  return token ? { ...headers, "X-AI-Council-Token": token } : headers
+  // The desktop server authenticates this same-origin UI with an HttpOnly
+  // cookie, so the renderer never receives or exposes the API credential.
+  return headers
 }
 
 export function groupRecordToUiGroup(record: GroupIndexRecord): Group & { path: string } {

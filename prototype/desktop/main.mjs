@@ -10,6 +10,7 @@ const HOST = "127.0.0.1";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const composerDropProbePath = String(process.env.AI_COUNCIL_E2E_COMPOSER_DROP_FILE || "").trim();
 const privateDraftProbeEnabled = process.env.AI_COUNCIL_E2E_PRIVATE_DRAFT_PROBE === "1";
+const transcriptFollowProbeEnabled = process.env.AI_COUNCIL_E2E_TRANSCRIPT_FOLLOW_PROBE === "1";
 
 let mainWindow;
 
@@ -90,7 +91,7 @@ async function startDesktop() {
   });
 
   mainWindow.once("ready-to-show", () => {
-    if (!composerDropProbePath && !privateDraftProbeEnabled) mainWindow.show();
+    if (!composerDropProbePath && !privateDraftProbeEnabled && !transcriptFollowProbeEnabled) mainWindow.show();
   });
   mainWindow.on("closed", () => {
     mainWindow = null;
@@ -117,6 +118,19 @@ async function startDesktop() {
     } catch (error) {
       process.exitCode = 1;
       console.error("AI_COUNCIL_E2E_PRIVATE_DRAFT_FAILED", error);
+    } finally {
+      setTimeout(() => app.quit(), 50);
+    }
+  } else if (transcriptFollowProbeEnabled) {
+    try {
+      mainWindow.show();
+      mainWindow.focus();
+      const result = await runTranscriptFollowProbe(mainWindow);
+      console.log(`AI_COUNCIL_E2E_TRANSCRIPT_FOLLOW=${JSON.stringify(result)}`);
+      if (!result.ok) process.exitCode = 1;
+    } catch (error) {
+      process.exitCode = 1;
+      console.error("AI_COUNCIL_E2E_TRANSCRIPT_FOLLOW_FAILED", error);
     } finally {
       setTimeout(() => app.quit(), 50);
     }
@@ -170,14 +184,10 @@ async function runPrivateDraftProbe(window) {
   const created = await window.webContents.executeJavaScript(`
     (async () => {
       async function request(path, body) {
-        const token = window.__AI_COUNCIL_LOCAL_API_TOKEN__
-          || document.querySelector('meta[name="ai-council-local-api-token"]')?.getAttribute("content")
-          || "";
         const response = await fetch(path, {
           method: body ? "POST" : "GET",
           headers: {
             ...(body ? { "Content-Type": "application/json" } : {}),
-            ...(token ? { "X-AI-Council-Token": token } : {}),
           },
           body: body ? JSON.stringify(body) : undefined,
         });
@@ -306,6 +316,128 @@ async function runPrivateDraftProbe(window) {
       };
     })()
   `, true);
+}
+
+async function runTranscriptFollowProbe(window) {
+  const memberCount = 10;
+  const created = await window.webContents.executeJavaScript(`
+    (async () => {
+      async function request(path, body) {
+        const response = await fetch(path, {
+          method: body ? "POST" : "GET",
+          headers: {
+            ...(body ? { "Content-Type": "application/json" } : {}),
+          },
+          body: body ? JSON.stringify(body) : undefined,
+        });
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.error || response.statusText);
+        return payload;
+      }
+      const health = await request("/api/health");
+      return request("/api/workspace/init", {
+        root: health.allowedWorkspaceRoot,
+        groupFolderName: "transcript-follow-probe",
+        members: Array.from({ length: ${memberCount} }, (_, index) => ({
+          seatId: "probe_member_" + (index + 1),
+          displayName: "Probe Member " + (index + 1),
+          model: "mock-builder",
+          role: "ordinary",
+        })),
+      });
+    })()
+  `, true);
+  if (!created?.groupPath || created?.seats?.length !== memberCount) throw new Error("transcript_probe_group_not_created");
+
+  await window.loadURL(window.webContents.getURL());
+  await focusProbeElement(window, "[data-testid='group-chat-draft']", "transcript_probe_composer_missing");
+  const question = `Transcript follow probe. ${"This deliberately creates visible transcript height. ".repeat(420)}`;
+  await typeProbeText(window, "[data-testid='group-chat-draft']", question, "transcript_probe_text_input_failed");
+  window.webContents.sendInputEvent({ type: "keyDown", keyCode: "ENTER" });
+  window.webContents.sendInputEvent({ type: "keyUp", keyCode: "ENTER" });
+
+  const atBottomDuringLiveUpdates = await window.webContents.executeJavaScript(`
+    (async () => {
+      const deadline = Date.now() + 12000;
+      while (Date.now() < deadline) {
+        const container = document.querySelector("[data-testid='transcript-scroll-region']");
+        if (container
+          && container.scrollHeight > container.clientHeight + 100
+          && container.textContent?.includes("CLI-first prototype")
+          && container.scrollTop + container.clientHeight >= container.scrollHeight - 2) {
+          return { scrollTop: container.scrollTop, scrollHeight: container.scrollHeight, clientHeight: container.clientHeight };
+        }
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      const container = document.querySelector("[data-testid='transcript-scroll-region']");
+      throw new Error("transcript_did_not_follow_live_output_at_bottom:" + JSON.stringify({
+        scrollTop: container?.scrollTop,
+        scrollHeight: container?.scrollHeight,
+        clientHeight: container?.clientHeight,
+        viewportHeight: window.innerHeight,
+        stylesheetLinks: await Promise.all([...document.querySelectorAll("link[rel='stylesheet']")].map(async (link) => {
+          try {
+            const response = await fetch(link.href, { cache: "no-store" });
+            return { href: link.href, responseUrl: response.url, status: response.status, contentType: response.headers.get("content-type"), bytes: (await response.text()).length };
+          } catch (error) {
+            return { href: link.href, error: String(error?.message || error) };
+          }
+        })),
+        stylesheets: [...document.styleSheets].map((sheet) => {
+          let selectorCount = 0;
+          let flexRule = false;
+          try {
+            selectorCount = sheet.cssRules.length;
+            flexRule = [...sheet.cssRules].some((rule) => rule.cssText?.includes(".flex{display:flex}"));
+          } catch (error) {
+            return { href: sheet.href, unreadable: String(error?.message || error) };
+          }
+          return { href: sheet.href, selectorCount, flexRule };
+        }),
+        parents: [container, container?.parentElement, container?.parentElement?.parentElement, document.body].filter(Boolean).map((element) => {
+          const style = getComputedStyle(element);
+          return { tag: element.tagName, className: element.className, height: style.height, minHeight: style.minHeight, overflowY: style.overflowY, display: style.display, flex: style.flex };
+        }),
+        text: container?.textContent?.slice(0, 300),
+        composerDisabled: document.querySelector("[data-testid='group-chat-draft']")?.disabled,
+      }));
+    })()
+  `, true);
+
+  const afterManualScroll = await window.webContents.executeJavaScript(`
+    (async () => {
+      const container = document.querySelector("[data-testid='transcript-scroll-region']");
+      if (!container) throw new Error("transcript_scroll_region_missing");
+      const heightBeforeManualScroll = container.scrollHeight;
+      container.scrollTop = 0;
+      container.dispatchEvent(new Event("scroll", { bubbles: true }));
+      const deadline = Date.now() + 12000;
+      while (Date.now() < deadline) {
+        const composer = document.querySelector("[data-testid='group-chat-draft']");
+        if (composer && !composer.disabled && container.scrollHeight > heightBeforeManualScroll) {
+          const remaining = container.scrollHeight - container.scrollTop - container.clientHeight;
+          return {
+            scrollTop: container.scrollTop,
+            scrollHeight: container.scrollHeight,
+            clientHeight: container.clientHeight,
+            remaining,
+          };
+        }
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      throw new Error("transcript_did_not_receive_later_live_updates");
+    })()
+  `, true);
+
+  if (afterManualScroll.scrollTop > 2 || afterManualScroll.remaining <= 48) {
+    throw new Error("transcript_forced_reader_back_to_bottom_after_manual_scroll");
+  }
+  return {
+    ok: true,
+    probe: "electron_transcript_follow",
+    atBottomDuringLiveUpdates,
+    afterManualScroll,
+  };
 }
 
 async function focusProbeElement(window, selector, reason) {

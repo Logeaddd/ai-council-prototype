@@ -55,14 +55,15 @@ test("renderer defaults to a warm light theme and persists optional dark mode", 
   assert.match(live, /AppearanceTheme = "light" \| "dark"/);
 });
 
-test("renderer retains the injected local API token after static head hydration", () => {
+test("renderer uses same-origin HttpOnly cookie authentication without injecting a token into the document", () => {
   const server = read("src/server.js");
   const live = read("renderer/lib/council-live.ts");
 
-  assert.match(server, /__AI_COUNCIL_LOCAL_API_TOKEN__/);
-  assert.match(server, /JSON\.stringify\(localApiToken\)/);
-  assert.match(live, /__AI_COUNCIL_LOCAL_API_TOKEN__/);
-  assert.match(live, /X-AI-Council-Token/);
+  assert.match(server, /HttpOnly; SameSite=Strict; Path=\//);
+  assert.match(server, /localApiTokenFromCookie/);
+  assert.doesNotMatch(server, /__AI_COUNCIL_LOCAL_API_TOKEN__/);
+  assert.match(live, /HttpOnly/);
+  assert.doesNotMatch(live, /X-AI-Council-Token/);
 });
 
 test("renderer uses the provided logo asset for visible branding and icons", () => {
@@ -310,8 +311,8 @@ test("desktop private-draft probe exercises the real API and browser interaction
 
   assert.match(desktop, /AI_COUNCIL_E2E_PRIVATE_DRAFT_PROBE/);
   assert.match(desktop, /\/api\/workspace\/init/);
-  assert.match(desktop, /ai-council-local-api-token/);
-  assert.match(desktop, /__AI_COUNCIL_LOCAL_API_TOKEN__/);
+  assert.doesNotMatch(desktop, /ai-council-local-api-token/);
+  assert.doesNotMatch(desktop, /__AI_COUNCIL_LOCAL_API_TOKEN__/);
   assert.match(desktop, /typeProbeText/);
   assert.match(desktop, /\[data-testid='group-chat-draft'\]/);
   assert.match(desktop, /\[data-testid='private-chat-draft'\]/);
@@ -354,6 +355,19 @@ test("transcript follows live output only while the reader remains at the bottom
   assert.match(app, /remaining <= 48/);
   assert.match(app, /scrollTop = scrollContainer\.scrollHeight/);
   assert.match(app, /onScroll=\{updateTranscriptScrollPosition\}/);
+  assert.match(app, /data-testid="transcript-scroll-region"/);
+});
+
+test("desktop transcript-follow probe drives the production renderer path", () => {
+  const desktop = read("desktop/main.mjs");
+  const probe = read("scripts/probe-electron-transcript-follow.mjs");
+  const packageJson = read("package.json");
+
+  assert.match(desktop, /AI_COUNCIL_E2E_TRANSCRIPT_FOLLOW_PROBE/);
+  assert.match(desktop, /runTranscriptFollowProbe/);
+  assert.match(desktop, /transcript_forced_reader_back_to_bottom_after_manual_scroll/);
+  assert.match(probe, /electron_transcript_follow/);
+  assert.match(packageJson, /probe:electron-transcript-follow/);
 });
 
 test("task header does not show generic AI mode helper text", () => {
