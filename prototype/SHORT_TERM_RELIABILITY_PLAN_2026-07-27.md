@@ -258,6 +258,20 @@ Completed on 2026-07-27:
   real-provider evidence window. Its retained evidence is 5/9 passing reports
   (55.6 percent) against the required 75 percent, even though the latest
   report for each current task family is passing.
+* A new paid real-provider campaign ran after this P0 change with
+  `deepseek-v4-flash`, seed `8`, and the full `$80 / 320` explicit budget:
+  `eval/real-user-campaign/p0-delegation-v4flash/campaign-node-cli-8-1785126841724/report.json`.
+  It used 43 actual calls and 21 stages (7 follow-ups, 4 required artifact
+  edits, member mutations, and two interruption/reopen cycles). The
+  physiology gate passed: real artifact creation/execution, durable task and
+  member state, 40 timestamped visible messages, two resumed sessions, and no
+  duplicate verified command replay. Its outcome-conformance diagnostic was
+  deliberately **not** conflated with that result: the final program printed
+  `Thanks, Ada!` while that scenario's exact expected text was `Thanks, Ada.`.
+  This is a real content mismatch, retained in the report as
+  `outcomeConformance=false`; it is not represented as a full task-quality
+  pass. The run adds genuine physiology evidence only and does not itself
+  prove that a real provider chooses or integrates a bounded delegation.
 
 Still open before the real-provider release gate:
 
