@@ -156,6 +156,49 @@ test("product harness can require real-provider bounded-delegation evidence", ()
   assert.equal(evaluateProductHarness({ root, manifest, testEvidence: { status: "passed" } }).status, "complete");
 });
 
+test("a bounded collaboration gate does not count unrelated campaign failures in its reliability window", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-product-collaboration-scope-"));
+  const reportsRoot = path.join(root, "eval", "campaign");
+  const manifest = { tasks: [{ id: "T119", gates: [{
+    id: "collaboration",
+    type: "real_user_campaign",
+    reportsRoot: "eval/campaign",
+    requireDelegationEvidence: true,
+    evidenceWindowPerTask: 3,
+    minimumPassRate: 1,
+    requireLatestPerTaskPass: true,
+    requiredFamilies: [{ id: "owner_research", taskIds: ["delegated-brief"] }]
+  }] }] };
+  const writeReport = (name, taskId, status, completedAt, collaboration = false) => {
+    const dir = path.join(reportsRoot, name);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "report.json"), JSON.stringify({
+      schema: "ai-council.real-user-campaign-run.v1",
+      status,
+      seed: 8,
+      completedAt,
+      providerAcceptance: { realProvider: true, observedModelCalls: 3, blockedBeforeSendModelCalls: 0 },
+      scenario: { task: { id: taskId } },
+      autonomousExecution: { passed: status === "passed", resumedAfterInterruption: status === "passed" },
+      minimumUsableDelivery: { passed: status === "passed" },
+      persistence: { passed: status === "passed" },
+      recovery: { passed: status === "passed", checks: status === "passed" ? [{ id: "continuation_completed_visible_work", passed: true }] : [] },
+      sessions: { interrupted: status === "passed" ? [{ id: `interrupted-${taskId}` }] : [] },
+      collaboration: { required: true, passed: collaboration }
+    }), "utf8");
+  };
+  writeReport("delegated-pass", "delegated-brief", "passed", "2026-07-27T00:00:00.000Z", true);
+  writeReport("unrelated-failure", "zip-archive", "failed", "2026-07-27T00:01:00.000Z");
+
+  const result = evaluateProductHarness({ root, manifest, testEvidence: { status: "passed" } });
+  const gate = result.tasks[0].gates[0];
+  assert.equal(result.status, "complete");
+  assert.equal(gate.evidence.matchingReports, 2);
+  assert.equal(gate.evidence.scopedReports, 1);
+  assert.equal(gate.evidence.evaluatedReports, 1);
+  assert.equal(gate.evidence.passRate, 1);
+});
+
 test("product harness requires a real multi-family matrix and cannot count repeated seeds or fabricated acquisition", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-product-campaign-matrix-"));
   const reportsRoot = path.join(root, "eval", "campaign");

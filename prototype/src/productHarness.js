@@ -88,7 +88,9 @@ function evaluateRealUserCampaignGate(root, gate, base) {
   const reports = findReports(reportsRoot).map((filePath) => {
     try { return { filePath, report: JSON.parse(fs.readFileSync(filePath, "utf8")) }; } catch { return null; }
   }).filter(Boolean).filter(({ report }) => report?.schema === "ai-council.real-user-campaign-run.v1");
-  const evidenceReports = selectCampaignEvidenceReports(reports, gate);
+  const requiredFamilies = Array.isArray(gate.requiredFamilies) ? gate.requiredFamilies : [];
+  const scopedReports = scopeCampaignReportsToRequiredFamilies(reports, requiredFamilies);
+  const evidenceReports = selectCampaignEvidenceReports(scopedReports, gate);
   const passedReports = evidenceReports.filter(({ report }) => (
     report.status === "passed"
     && report.providerAcceptance?.realProvider === true
@@ -102,7 +104,6 @@ function evaluateRealUserCampaignGate(root, gate, base) {
     && Number(report.providerAcceptance?.observedModelCalls || report.sessions?.modelCalls || 0) > 0
     && (gate.requireDelegationEvidence !== true || report.collaboration?.passed === true)
   ));
-  const requiredFamilies = Array.isArray(gate.requiredFamilies) ? gate.requiredFamilies : [];
   const defaultMinimumFamilyAttempts = positiveInteger(gate.minimumAttemptsPerFamily, 1);
   const defaultMinimumFamilyPasses = positiveInteger(gate.minimumPassedReportsPerFamily, 1);
   const familyEvidence = requiredFamilies.map((family) => {
@@ -154,6 +155,7 @@ function evaluateRealUserCampaignGate(root, gate, base) {
     evidence: {
       reportsRoot: path.relative(root, reportsRoot).replaceAll("\\", "/"),
       matchingReports: reports.length,
+      scopedReports: scopedReports.length,
       evaluatedReports: evidenceReports.length,
       failedReports: evidenceReports.filter(({ report }) => !campaignReportPassesGate(report, gate)).map(({ filePath }) => path.relative(root, filePath).replaceAll("\\", "/")),
       passedReports: passedReports.map(({ filePath }) => path.relative(root, filePath).replaceAll("\\", "/")),
@@ -173,6 +175,17 @@ function evaluateRealUserCampaignGate(root, gate, base) {
       passedReport: passed && passedReports.length === 1 ? path.relative(root, passedReports[0].filePath).replaceAll("\\", "/") : ""
     }
   };
+}
+
+function scopeCampaignReportsToRequiredFamilies(reports, requiredFamilies) {
+  if (!requiredFamilies.length) return reports;
+  const taskIds = new Set(requiredFamilies.flatMap((family) => (
+    Array.isArray(family?.taskIds) ? family.taskIds.map(String).filter(Boolean) : []
+  )));
+  const hasUnscopedFamily = requiredFamilies.some((family) => !Array.isArray(family?.taskIds) || family.taskIds.length === 0);
+  return taskIds.size > 0 && !hasUnscopedFamily
+    ? reports.filter(({ report }) => taskIds.has(campaignTaskId(report)))
+    : reports;
 }
 
 function selectCampaignEvidenceReports(reports, gate) {
