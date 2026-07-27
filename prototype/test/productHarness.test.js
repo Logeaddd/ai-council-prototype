@@ -252,7 +252,8 @@ test("product harness requires a real multi-family matrix and cannot count repea
   assert.equal(passed.status, "complete");
   const evidence = passed.tasks[0].gates[0].evidence;
   assert.deepEqual(new Set(evidence.distinctTaskIds), new Set(["node-cli", "image-tool-acquisition", "zip-archive"]));
-  assert.deepEqual(new Set(evidence.distinctSeeds), new Set(["1", "2", "3", "4"]));
+  assert.deepEqual(new Set(evidence.distinctSeeds), new Set(["1", "3", "4"]));
+  assert.equal(evidence.passedReports.some((report) => report.includes("fake-acquisition")), false);
   assert.equal(evidence.requiredFamilies.every((family) => family.passed), true);
 });
 

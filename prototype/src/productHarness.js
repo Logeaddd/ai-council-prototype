@@ -103,6 +103,7 @@ function evaluateRealUserCampaignGate(root, gate, base) {
     && hasCompleteContinuationEvidence(report)
     && Number(report.providerAcceptance?.observedModelCalls || report.sessions?.modelCalls || 0) > 0
     && (gate.requireDelegationEvidence !== true || report.collaboration?.passed === true)
+    && campaignReportPassesGate(report, gate)
   ));
   const defaultMinimumFamilyAttempts = positiveInteger(gate.minimumAttemptsPerFamily, 1);
   const defaultMinimumFamilyPasses = positiveInteger(gate.minimumPassedReportsPerFamily, 1);
