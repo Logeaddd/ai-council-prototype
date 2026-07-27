@@ -20,6 +20,11 @@ const baseDir = path.resolve(__dirname, "..");
 async function main() {
   const [command, ...args] = process.argv.slice(2);
 
+  if (!command || command === "--help" || command === "-h" || args.includes("--help") || args.includes("-h")) {
+    printHelp();
+    return;
+  }
+
   if (command === "run") {
     const groupPath = getArg(args, "--group", path.join(baseDir, "config", "group.example.json"));
     const question = loadQuestion(args);
@@ -427,6 +432,7 @@ function printHelp() {
   node src/cli.js real-user-campaign --group ./config/group.real.example.json --output ./eval/real-user-campaign --seed 7 --max-cost-usd 80 --max-model-calls 320
   node src/cli.js context-pressure --output ./eval/context-pressure --seed 20260714
   node src/cli.js harness-check --report ./harness/reports/latest.json
+  node src/cli.js harness-check --skip-tests --report ./harness/reports/latest.json
   node src/cli.js workspace init-group --root "D:\\AI小组工作区" --group-folder "产品决策组" --members "gpt-5,claude"
   node src/cli.js workspace replace-member --group-path "D:\\AI小组工作区\\产品决策组" --seat-id seat_01 --next-name gpt-6
   node src/cli.js workspace replace-member --group-path "D:\\AI小组工作区\\产品决策组" --seat-id seat_01 --next-name gpt-6 --new-private-folder --folder-name gpt-6-fresh
