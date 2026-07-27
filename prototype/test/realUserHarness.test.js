@@ -336,6 +336,7 @@ test("capability acquisition evidence must come from a successful current-campai
   assert.equal(installedButUnused.passed, false);
   const passed = verifyCampaignToolEvidence(verifier, [{ toolExecutionResults: [
     {
+      id: "install-image-package",
       tool: "install_package",
       status: "completed",
       result: { ok: true, packageName: "chosen-image-package", environmentPath: "shared/environments/npm" }
@@ -343,20 +344,35 @@ test("capability acquisition evidence must come from a successful current-campai
     {
       tool: "execute_command",
       status: "completed",
-      command: "node shared/environments/npm/render-image.js",
+      command: "node shared/environments/npm/render-image.js --engine chosen-image-package",
+      capabilityUsage: [{ acquisitionId: "install-image-package", acquisitionTool: "install_package", kind: "installed_package", references: ["chosen-image-package"] }],
       result: { ok: true, exitCode: 0 }
     }
   ] }]);
   assert.equal(passed.passed, true);
   assert.equal(passed.acquisition.passed, true);
   assert.deepEqual(passed.acquisition.tools, ["install_package"]);
+  assert.equal(passed.acquisition.evidence.schema, "ai-council.capability-use-evidence.v1");
+  assert.equal(passed.acquisition.evidence.uses.length, 1);
 
-  const shellPassed = verifyCampaignToolEvidence(verifier, [{ toolExecutionResults: [
-    { tool: "execute_command", status: "completed", command: "npm install chosen-image-package", result: { ok: true, exitCode: 0, stdout: "added 1 package" } },
+  const unlinkedShellInstall = verifyCampaignToolEvidence(verifier, [{ toolExecutionResults: [
+    { id: "shell-install", tool: "execute_command", status: "completed", command: "npm install chosen-image-package", result: { ok: true, exitCode: 0, stdout: "added 1 package" } },
     { tool: "execute_command", status: "completed", command: "node render-image.js", result: { ok: true, exitCode: 0 } }
   ] }]);
-  assert.equal(shellPassed.passed, true);
-  assert.deepEqual(shellPassed.acquisition.tools, ["execute_command_package_install"]);
+  assert.equal(unlinkedShellInstall.passed, false);
+
+  const linkedShellInstall = verifyCampaignToolEvidence(verifier, [{ toolExecutionResults: [
+    { id: "shell-install", tool: "execute_command", status: "completed", command: "npm install chosen-image-package", result: { ok: true, exitCode: 0, stdout: "added 1 package" } },
+    {
+      tool: "run_code",
+      status: "completed",
+      capabilityUsage: [{ acquisitionId: "shell-install", acquisitionTool: "execute_command", kind: "shell_installed_package", references: ["chosen-image-package"] }],
+      result: { ok: true, exitCode: 0 }
+    }
+  ] }]);
+  assert.equal(linkedShellInstall.passed, true);
+  assert.deepEqual(linkedShellInstall.acquisition.tools, ["execute_command_package_install"]);
+  assert.equal(linkedShellInstall.acquisition.evidence.uses[0].kind, "shell_installed_package");
 
   const maskedFailure = verifyCampaignToolEvidence(verifier, [{ toolExecutionResults: [
     { tool: "execute_command", status: "completed", command: "apt-get install image-tool | tail -5", result: { ok: true, exitCode: 0, stdout: "E: Could not open lock file: Permission denied" } },

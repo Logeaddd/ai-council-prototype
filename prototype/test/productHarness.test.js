@@ -215,7 +215,7 @@ test("product harness requires a real multi-family matrix and cannot count repea
       { id: "acquisition", taskIds: ["image-tool-acquisition"], requireAcquisitionEvidence: true }
     ]
   }] }] };
-  const writeReport = (name, { taskId, seed, acquisition = false }) => {
+  const writeReport = (name, { taskId, seed, acquisition = false, currentAcquisitionEvidence = acquisition }) => {
     const dir = path.join(reportsRoot, name);
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(path.join(dir, "report.json"), JSON.stringify({
@@ -226,7 +226,15 @@ test("product harness requires a real multi-family matrix and cannot count repea
       scenario: { task: { id: taskId } },
       autonomousExecution: { passed: true, resumedAfterInterruption: true },
       minimumUsableDelivery: { passed: true },
-      capabilityAcquisition: { passed: acquisition },
+      capabilityAcquisition: acquisition ? {
+        passed: true,
+        ...(currentAcquisitionEvidence ? {
+          evidence: {
+            schema: "ai-council.capability-use-evidence.v1",
+            uses: [{ acquisitionId: `install-${seed}`, acquisitionTool: "install_package", workTool: "run_code", kind: "installed_package", references: ["image-library"] }]
+          }
+        } : {})
+      } : { passed: false },
       persistence: { passed: true },
       recovery: { passed: true, checks: [{ id: "continuation_completed_visible_work", passed: true }] },
       sessions: { interrupted: [{ id: `interrupted-${seed}` }] }
@@ -246,6 +254,40 @@ test("product harness requires a real multi-family matrix and cannot count repea
   assert.deepEqual(new Set(evidence.distinctTaskIds), new Set(["node-cli", "image-tool-acquisition", "zip-archive"]));
   assert.deepEqual(new Set(evidence.distinctSeeds), new Set(["1", "2", "3", "4"]));
   assert.equal(evidence.requiredFamilies.every((family) => family.passed), true);
+});
+
+test("product harness refuses legacy cached acquisition booleans without a current use receipt", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-product-acquisition-receipt-"));
+  const reportDir = path.join(root, "eval", "campaign", "legacy");
+  fs.mkdirSync(reportDir, { recursive: true });
+  const manifest = { tasks: [{ id: "T", gates: [{
+    id: "matrix",
+    type: "real_user_campaign",
+    reportsRoot: "eval/campaign",
+    minimumPassedReports: 1,
+    requiredFamilies: [{ id: "acquisition", taskIds: ["image-tool-acquisition"], requireAcquisitionEvidence: true }]
+  }] }] };
+  const report = {
+    schema: "ai-council.real-user-campaign-run.v1",
+    status: "passed",
+    seed: 1,
+    providerAcceptance: { realProvider: true, observedModelCalls: 1, blockedBeforeSendModelCalls: 0 },
+    scenario: { task: { id: "image-tool-acquisition" } },
+    autonomousExecution: { passed: true, resumedAfterInterruption: true },
+    minimumUsableDelivery: { passed: true },
+    capabilityAcquisition: { passed: true },
+    persistence: { passed: true },
+    recovery: { passed: true, checks: [{ id: "continuation_completed_visible_work", passed: true }] },
+    sessions: { interrupted: [{ id: "interrupted" }] }
+  };
+  fs.writeFileSync(path.join(reportDir, "report.json"), JSON.stringify(report), "utf8");
+  assert.equal(evaluateProductHarness({ root, manifest, testEvidence: { status: "passed" } }).status, "incomplete");
+  report.capabilityAcquisition.evidence = {
+    schema: "ai-council.capability-use-evidence.v1",
+    uses: [{ acquisitionId: "install-1", acquisitionTool: "install_package", workTool: "run_code", kind: "installed_package", references: ["image-library"] }]
+  };
+  fs.writeFileSync(path.join(reportDir, "report.json"), JSON.stringify(report), "utf8");
+  assert.equal(evaluateProductHarness({ root, manifest, testEvidence: { status: "passed" } }).status, "complete");
 });
 
 test("product harness cannot hide recent campaign failures behind one success per family", () => {

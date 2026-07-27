@@ -1550,6 +1550,37 @@ test("provision_tool autonomously installs verifies and reuses a managed CLI for
   assert.equal(reused.results[0].result.status, "already_available");
 });
 
+test("later real work retains a durable link to the provisioned capability it invokes", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-provision-use-link-"));
+  const installCommand = process.platform === "win32"
+    ? "$p='shared/tools/link-demo/bin'; New-Item -ItemType Directory -Force -Path $p | Out-Null; Set-Content -Path \"$p/link-demo.cmd\" -Value '@echo off`r`necho linked'"
+    : "mkdir -p shared/tools/link-demo/bin && printf '#!/bin/sh\\necho linked\\n' > shared/tools/link-demo/bin/link-demo && chmod +x shared/tools/link-demo/bin/link-demo";
+  const provisioned = await executeToolRequests({
+    permissionTier: "full",
+    groupPath: tmp,
+    agent: { id: "full", name: "Full" },
+    round: 1,
+    requests: [{ tool: "provision_tool", toolName: "link demo", commandName: "link-demo", installCommand, shell: process.platform === "win32" ? "powershell" : "sh", reason: "Install a managed demonstration CLI." }]
+  });
+  const invoked = await executeToolRequests({
+    permissionTier: "full",
+    groupPath: tmp,
+    agent: { id: "full", name: "Full" },
+    round: 2,
+    previousResults: provisioned.results,
+    requests: [{ tool: "execute_command", command: "link-demo --version", shell: shellForNodeCommand(), reason: "Use the provisioned CLI for real work." }]
+  });
+
+  assert.equal(provisioned.results[0].status, "completed", JSON.stringify(provisioned.results[0]));
+  assert.equal(invoked.results[0].status, "completed", JSON.stringify(invoked.results[0]));
+  assert.deepEqual(invoked.results[0].capabilityUsage, [{
+    acquisitionId: provisioned.results[0].id,
+    acquisitionTool: "provision_tool",
+    kind: "provisioned_command",
+    references: ["link-demo"]
+  }]);
+});
+
 test("provision_tool rejects an unsafe researched source before executing an install command", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-provision-unsafe-discovery-"));
   const result = await executeToolRequests({

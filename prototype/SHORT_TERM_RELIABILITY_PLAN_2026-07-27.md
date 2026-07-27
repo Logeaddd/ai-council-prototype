@@ -275,6 +275,20 @@ Completed on 2026-07-27:
 
 Still open before the real-provider release gate:
 
+* Interactive command work now has a durable real PTY path: terminal input,
+  resize, offset-based output, explicit stop, workspace-change evidence, SSE
+  disconnect survival, and redaction of typed terminal input are covered by a
+  real server/PTY/filesystem regression. This is local tool-path evidence; it
+  does not prove a Provider can decide when an interactive terminal is needed.
+* Capability acquisition evidence is now an explicit receipt, not a cached
+  boolean. A later successful command, code run, test, MCP call, or skill read
+  must reference the exact earlier acquisition; the receipt stores the two
+  tool IDs, kind, and bounded non-secret references. Product-gate evaluation
+  rejects legacy reports that only say `capabilityAcquisition.passed=true`.
+  The retained image-acquisition campaign reports predate this receipt and no
+  longer satisfy that family. This deliberately reopens T105/T117 until a
+  fresh real-Provider capability-acquisition campaign completes with the new
+  evidence. A local test pass must not restore those gates.
 * Exercise delegated research, implementation, review, and unblocker work
   with real Providers across several project families. The local orchestration
   test proves the path exists; it does not prove a provider will choose good

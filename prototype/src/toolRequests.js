@@ -289,6 +289,7 @@ export async function executeToolRequests(options = {}) {
     events.push(startEvent);
     publishLiveToolStart(options, startEvent);
     const result = await executeOne(base, options);
+    attachCapabilityUsage(result, base, [...(options.previousResults || []), ...results]);
     results.push(result);
     if (result.status === "completed" && isObservationRequest(base)) {
       options.observationCache?.set(base, result.result, result);
@@ -326,6 +327,127 @@ export async function executeToolRequests(options = {}) {
     results
   });
   return { accepted, rejected, results, events };
+}
+
+// A completed install alone is not evidence that the task actually gained a
+// capability. Record the concrete later command/code reference while the
+// original request is still available, then retain only the small link ID.
+function attachCapabilityUsage(record, request, earlierResults = []) {
+  if (record?.status !== "completed") return;
+  const uses = capabilityUsageForRequest(request, earlierResults);
+  if (uses.length) record.capabilityUsage = uses;
+}
+
+function capabilityUsageForRequest(request = {}, earlierResults = []) {
+  const prior = Array.isArray(earlierResults) ? earlierResults : [];
+  const uses = [];
+  const executionText = requestExecutionText(request);
+
+  for (const acquisition of prior) {
+    if (acquisition?.status !== "completed" || acquisition?.result?.ok === false || !acquisition?.id) continue;
+    if (acquisition.tool === "provision_tool" && executableWorkRequest(request)) {
+      const references = matchingReferences(executionText, provisionReferences(acquisition));
+      if (references.length) uses.push(capabilityUsage(acquisition, "provisioned_command", references));
+    }
+    if (acquisition.tool === "install_package" && executableWorkRequest(request)) {
+      const references = matchingReferences(executionText, packageReferences(acquisition.result?.packageName || acquisition.packageName));
+      if (references.length) uses.push(capabilityUsage(acquisition, "installed_package", references));
+    }
+    if (acquisition.tool === "execute_command" && executableWorkRequest(request)) {
+      const references = matchingReferences(executionText, shellAcquisitionReferences(acquisition));
+      if (references.length) uses.push(capabilityUsage(acquisition, "shell_installed_package", references));
+    }
+    if (acquisition.tool === "mcp_install_npm" && request.tool === "mcp_call") {
+      const installedId = String(acquisition.result?.id || acquisition.serverId || "").trim();
+      if (installedId && String(request.serverId || "").trim() === installedId) {
+        uses.push(capabilityUsage(acquisition, "configured_mcp_server", [installedId]));
+      }
+    }
+    if (acquisition.tool === "skill_install" && ["skill_read", "skill_enable"].includes(request.tool)) {
+      const installedId = String(acquisition.result?.skill?.id || acquisition.skillId || "").trim();
+      if (installedId && String(request.skillId || "").trim() === installedId) {
+        uses.push(capabilityUsage(acquisition, "installed_skill", [installedId]));
+      }
+    }
+  }
+
+  return dedupeCapabilityUsage(uses);
+}
+
+function executableWorkRequest(request = {}) {
+  return ["execute_command", "run_code", "run_tests"].includes(request.tool);
+}
+
+function requestExecutionText(request = {}) {
+  return [request.command, request.code, request.cwd, request.runner]
+    .map((value) => String(value || ""))
+    .join("\n")
+    .toLowerCase();
+}
+
+function provisionReferences(record = {}) {
+  return [...new Set([
+    record.commandName,
+    record.toolName,
+    record.result?.command,
+    record.result?.strategy?.packageId,
+    record.executablePath
+  ].map(normalizeCapabilityReference).filter(Boolean))];
+}
+
+function packageReferences(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return [];
+  const withoutRange = raw.split(/[<>=!~\s\[]/, 1)[0];
+  const secondAt = raw.startsWith("@") ? raw.indexOf("@", 1) : raw.indexOf("@");
+  const withoutAtVersion = secondAt > 0 ? raw.slice(0, secondAt) : raw;
+  return [...new Set([raw, withoutRange, withoutAtVersion].map(normalizeCapabilityReference).filter(Boolean))];
+}
+
+function shellAcquisitionReferences(record = {}) {
+  if (Number(record.result?.exitCode) !== 0) return [];
+  const command = String(record.command || record.result?.command || "");
+  const patterns = [
+    /\b(?:npm|pnpm|yarn)\s+(?:add|install)\s+(?:--[^\s]+\s+)*["']?([^\s"';&|]+)/i,
+    /\b(?:python(?:3)?|py)(?:\.exe)?\s+-m\s+pip\s+install\s+(?:--[^\s]+\s+)*["']?([^\s"';&|]+)/i,
+    /\bpip3?\s+install\s+(?:--[^\s]+\s+)*["']?([^\s"';&|]+)/i,
+    /\bcargo\s+(?:add|install)\s+["']?([^\s"';&|]+)/i,
+    /\bgo\s+(?:get|install)\s+["']?([^\s"';&|]+)/i,
+    /\bgem\s+install\s+["']?([^\s"';&|]+)/i,
+    /\bwinget\s+install\s+(?:--id\s+)?["']?([^\s"';&|]+)/i,
+    /\b(?:choco|scoop|brew)\s+install\s+["']?([^\s"';&|]+)/i,
+    /\bapt(?:-get)?\s+install\s+(?:-[^\s]+\s+)*["']?([^\s"';&|]+)/i
+  ];
+  const found = patterns.flatMap((pattern) => packageReferences(command.match(pattern)?.[1] || ""));
+  return [...new Set(found)];
+}
+
+function normalizeCapabilityReference(value) {
+  return String(value || "").trim().replaceAll("\\", "/").toLowerCase();
+}
+
+function matchingReferences(text, references) {
+  const source = String(text || "").toLowerCase();
+  return (references || []).filter((reference) => reference.length >= 2 && source.includes(reference)).slice(0, 4);
+}
+
+function capabilityUsage(acquisition, kind, references) {
+  return {
+    acquisitionId: String(acquisition.id),
+    acquisitionTool: String(acquisition.tool),
+    kind,
+    references: references.slice(0, 4)
+  };
+}
+
+function dedupeCapabilityUsage(items) {
+  const seen = new Set();
+  return items.filter((item) => {
+    const key = `${item.acquisitionId}:${item.kind}:${item.references.join(",")}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 function isRepeatedObservation(request, previousResults = []) {

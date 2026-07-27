@@ -686,12 +686,25 @@ export function verifyCampaignToolEvidence(verifier = {}, sessions = []) {
     if (isSuccessfulShellAcquisition(item)) return { item, index, kind: "execute_command_package_install" };
     return null;
   }).filter(Boolean);
-  const usedAcquisitions = acquisitionResults.filter(({ item, index }) => results.slice(index + 1).some((later) => acquisitionFollowedByLaterWork(item, later)));
+  const acquisitionUses = acquisitionResults.flatMap(({ item, index, kind }) => results.slice(index + 1)
+    .flatMap((later) => capabilityUsageLinks(item, later).map((usage) => ({
+      acquisitionId: String(item.id || ""),
+      acquisitionTool: String(item.tool || kind),
+      workTool: String(later.tool || ""),
+      kind: String(usage.kind || ""),
+      references: Array.isArray(usage.references) ? usage.references.map(String).slice(0, 4) : []
+    }))));
+  const usedAcquisitionIds = new Set(acquisitionUses.map((item) => item.acquisitionId).filter(Boolean));
+  const usedAcquisitions = acquisitionResults.filter(({ item }) => usedAcquisitionIds.has(String(item.id || "")));
   const acquisition = {
     required: verifier.requiresAcquisition === true,
     passed: verifier.requiresAcquisition !== true || usedAcquisitions.length > 0,
     tools: [...new Set(usedAcquisitions.map(({ kind }) => kind))],
-    acquiredTools: [...new Set(acquisitionResults.map(({ kind }) => kind))]
+    acquiredTools: [...new Set(acquisitionResults.map(({ kind }) => kind))],
+    evidence: {
+      schema: "ai-council.capability-use-evidence.v1",
+      uses: acquisitionUses
+    }
   };
   if (acquisition.required) {
     checks.push(check("capability_acquired_in_current_campaign", acquisitionResults.length > 0, acquisition.acquiredTools.join(", ") || "no successful acquisition tool result"));
@@ -825,16 +838,24 @@ function normalizeCampaignPath(value) {
   return String(value || "").trim().replaceAll("\\", "/").replace(/^\.\//, "");
 }
 
-function acquisitionFollowedByLaterWork(acquisition, later) {
-  if (later.status !== "completed" || later.result?.ok === false) return false;
+function capabilityUsageLinks(acquisition, later) {
+  if (later?.status !== "completed" || later?.result?.ok === false) return [];
   const allowedLaterTools = acquisition.tool === "skill_install"
     ? new Set(["skill_read", "skill_enable", "execute_command", "run_code", "run_tests"])
     : acquisition.tool === "mcp_install_npm"
       ? new Set(["mcp_call", "mcp_list_tools", "execute_command", "run_code", "run_tests"])
       : new Set(["execute_command", "run_code", "run_tests"]);
-  return allowedLaterTools.has(later.tool)
-    && (later.tool !== "run_tests" || later.result?.passed !== false)
-    && (later.tool !== "execute_command" || Number(later.result?.exitCode) === 0);
+  if (!allowedLaterTools.has(later.tool)
+    || (later.tool === "run_tests" && later.result?.passed === false)
+    || (later.tool === "execute_command" && Number(later.result?.exitCode) !== 0)) return [];
+  return Array.isArray(later.capabilityUsage)
+    ? later.capabilityUsage.filter((usage) => (
+      String(usage?.acquisitionId || "") === String(acquisition.id || "")
+      && String(usage?.acquisitionTool || "") === String(acquisition.tool || "")
+      && Array.isArray(usage?.references)
+      && usage.references.length > 0
+    ))
+    : [];
 }
 
 function isSuccessfulShellAcquisition(item) {

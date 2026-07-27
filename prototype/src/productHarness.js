@@ -115,7 +115,7 @@ function evaluateRealUserCampaignGate(root, gate, base) {
     const matches = passedReports.filter(({ report }) => {
       const taskId = campaignTaskId(report);
       if (taskIds.size > 0 && !taskIds.has(taskId)) return false;
-      if (family.requireAcquisitionEvidence && report.capabilityAcquisition?.passed !== true) return false;
+      if (family.requireAcquisitionEvidence && !hasCurrentCapabilityUseEvidence(report)) return false;
       return true;
     });
     const minimumAttempts = positiveInteger(family.minimumAttempts, defaultMinimumFamilyAttempts);
@@ -218,7 +218,30 @@ function latestCampaignTaskEvidence(reports, root, gate = {}) {
 
 function campaignReportPassesGate(report = {}, gate = {}) {
   return report.status === "passed"
-    && (gate.requireDelegationEvidence !== true || report.collaboration?.passed === true);
+    && (gate.requireDelegationEvidence !== true || report.collaboration?.passed === true)
+    && (!campaignTaskRequiresAcquisitionEvidence(report, gate) || hasCurrentCapabilityUseEvidence(report));
+}
+
+function campaignTaskRequiresAcquisitionEvidence(report = {}, gate = {}) {
+  const taskId = campaignTaskId(report);
+  return (Array.isArray(gate.requiredFamilies) ? gate.requiredFamilies : []).some((family) => (
+    family?.requireAcquisitionEvidence === true
+    && (!Array.isArray(family.taskIds) || family.taskIds.length === 0 || family.taskIds.map(String).includes(taskId))
+  ));
+}
+
+function hasCurrentCapabilityUseEvidence(report = {}) {
+  const evidence = report.capabilityAcquisition?.evidence;
+  if (report.capabilityAcquisition?.passed !== true) return false;
+  if (evidence?.schema !== "ai-council.capability-use-evidence.v1" || !Array.isArray(evidence.uses)) return false;
+  return evidence.uses.some((use) => (
+    String(use?.acquisitionId || "")
+    && String(use?.acquisitionTool || "")
+    && String(use?.workTool || "")
+    && String(use?.kind || "")
+    && Array.isArray(use?.references)
+    && use.references.length > 0
+  ));
 }
 
 function campaignTaskId(report) {
