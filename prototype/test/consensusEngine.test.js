@@ -28,6 +28,13 @@ test("does not treat first-round speak-without-objection as a skip consensus", (
   assert.equal(shouldStop(consensus, agents, session, { maxRounds: 3, minConsensusWeight: 0.75, stopWhenAllSkip: true }, 1), false);
 });
 
+test("an unbounded round configuration does not turn an arbitrary round number into completion", () => {
+  const session = { unresolvedObjections: {}, messages: [{ agentId: "builder", response: { status: "speak" } }] };
+  const consensus = { score: 0 };
+
+  assert.equal(shouldStop(consensus, agents, session, { maxRounds: 0, minRounds: 1, minConsensusWeight: 0.75, stopWhenAllSkip: true }, 30), false);
+});
+
 test("counts explicit non-red-team skips toward consensus", () => {
   const session = {
     unresolvedObjections: {

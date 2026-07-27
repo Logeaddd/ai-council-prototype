@@ -7756,6 +7756,49 @@ test("tool follow-up receives exact immediate API and file results before writin
   }
 });
 
+test("an unbounded group runs past the legacy three-round ceiling and stops on real consensus", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-unbounded-rounds-"));
+  let memberCalls = 0;
+  const server = http.createServer(async (req, res) => {
+    const body = JSON.parse(await readRequestBody(req));
+    const prompt = JSON.stringify(body.messages || []);
+    if (prompt.includes("FinalDecision JSON object")) {
+      writeOpenAiStream(res, JSON.stringify({ answer: "The discussion reached consensus after five rounds.", consensus_score: 1, supporting_agents: ["Builder"], dissenting_agents: [], minority_report: "", risks: [], next_actions: [], memory_candidates: [] }));
+      return;
+    }
+    memberCalls += 1;
+    if (memberCalls < 5) {
+      writeOpenAiStream(res, JSON.stringify({
+        status: "speak",
+        argument: `Round ${memberCalls} still has a concrete unresolved point.`,
+        ...(memberCalls === 1 ? { task_contract: discussionTaskContract() } : {}),
+        objections: [],
+        memory_candidates: []
+      }));
+      return;
+    }
+    writeOpenAiStream(res, JSON.stringify({ status: "skip", reason: "The issue is resolved.", memory_candidates: [] }));
+  });
+  await listen(server);
+
+  try {
+    const apiBaseUrl = `http://127.0.0.1:${server.address().port}/v1`;
+    const group = validateGroupConfig({
+      id: "unbounded-rounds",
+      name: "Unbounded Rounds",
+      settings: { maxRounds: 0, minRounds: 1, minConsensusWeight: 1, stopWhenAllSkip: true, agentTimeoutMs: 3000, allowSoloCouncil: true },
+      agents: [{ id: "builder", name: "Builder", role: "Builder", provider: "openai-compatible", apiBaseUrl, allowUnsafePrivateNetwork: true, apiKey: "test-key", model: "test-model", weight: 1, enabled: true }]
+    });
+    const { session } = await runCouncil("Discuss the current requirement until the concrete concern is resolved.", group, tmp, { groupPath: tmp });
+
+    assert.equal(memberCalls, 5);
+    assert.deepEqual(session.consensusByRound.map((item) => item.round), [1, 2, 3, 4, 5]);
+    assert.equal(session.status, "completed");
+  } finally {
+    await close(server);
+  }
+});
+
 test("HTTP/SSE delivery loop recovers from a failed acquisition, uses the alternative, and keeps final ownership", async () => {
   const groupPath = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-delivery-recovery-http-"));
   fs.mkdirSync(path.join(groupPath, "sessions"), { recursive: true });

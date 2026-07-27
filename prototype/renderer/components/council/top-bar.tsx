@@ -72,6 +72,8 @@ export function TopBar({
   onToggleRight,
   onOpenHistory,
 }: TopBarProps) {
+  const roundLabel = totalRounds > 0 ? `第 ${round} / ${totalRounds} 轮` : `第 ${round} 轮`
+  const progressWidth = totalRounds > 0 ? `${Math.min(100, (round / totalRounds) * 100)}%` : "0%"
   return (
     <header className="flex h-14 shrink-0 items-center gap-3 border-b border-border bg-card px-3">
       {/* 议会标题 + 进度 */}
@@ -80,7 +82,7 @@ export function TopBar({
           {groupName}
         </span>
         <span className="hidden items-center gap-1.5 rounded-md border border-border bg-secondary/60 px-2 py-0.5 font-mono text-[11px] text-muted-foreground sm:inline-flex">
-          第 {round} / {totalRounds} 轮
+          {roundLabel}
         </span>
       </div>
 
@@ -106,14 +108,14 @@ export function TopBar({
       </div>
 
       {/* 进度条 */}
-      <div className="hidden min-w-0 flex-1 items-center lg:flex">
+      {totalRounds > 0 ? <div className="hidden min-w-0 flex-1 items-center lg:flex">
         <div className="h-1 w-full max-w-40 overflow-hidden rounded-full bg-secondary">
           <div
             className="h-full rounded-full bg-primary transition-all"
-            style={{ width: `${(round / totalRounds) * 100}%` }}
+            style={{ width: progressWidth }}
           />
         </div>
-      </div>
+      </div> : null}
 
       <div className="ml-auto flex items-center gap-3">
         <div className="hidden items-center gap-4 xl:flex">

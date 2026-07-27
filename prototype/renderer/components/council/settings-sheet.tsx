@@ -646,10 +646,11 @@ function RulesPanel({
 
       <SettingRow label="最大轮数">
         <RangeControl
-          min={1}
+          min={0}
           max={100}
           value={totalRounds}
           unit="轮"
+          formatValue={(value) => value === 0 ? "不设上限" : `${value} 轮`}
           onChange={onTotalRoundsChange}
         />
       </SettingRow>
@@ -1384,12 +1385,14 @@ function RangeControl({
   max,
   value,
   unit,
+  formatValue,
   onChange,
 }: {
   min: number
   max: number
   value: number
   unit: string
+  formatValue?: (value: number) => string
   onChange: (value: number) => void
 }) {
   return (
@@ -1403,7 +1406,7 @@ function RangeControl({
         className="flex-1 accent-[var(--primary)]"
       />
       <span className="w-20 text-right font-mono text-sm tabular-nums text-foreground">
-        {value} {unit}
+        {formatValue ? formatValue(value) : `${value} ${unit}`}
       </span>
     </div>
   )

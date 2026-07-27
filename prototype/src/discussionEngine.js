@@ -194,7 +194,8 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
   persistRunningSession();
 
   let consensus = scoreConsensus(enabledAgents, session);
-  for (let round = 1; round <= group.settings.maxRounds; round += 1) {
+  const maxRounds = normalizeMaxRounds(group.settings.maxRounds);
+  for (let round = 1; round <= maxRounds; round += 1) {
     const agentsToCall = selectAgents(enabledAgents, session, round, firstRoundAgents);
     const results = [];
 
@@ -1464,6 +1465,12 @@ function normalizeModelCallBudget(value) {
 }
 
 function normalizeMaxToolIterations(value) {
+  const number = Number.parseInt(String(value), 10);
+  if (!Number.isFinite(number) || number <= 0) return Number.POSITIVE_INFINITY;
+  return number;
+}
+
+function normalizeMaxRounds(value) {
   const number = Number.parseInt(String(value), 10);
   if (!Number.isFinite(number) || number <= 0) return Number.POSITIVE_INFINITY;
   return number;

@@ -39,7 +39,9 @@ export function validateGroupConfig(group) {
   }
 
   group.settings = {
-    maxRounds: 3,
+    // Zero means no arbitrary round ceiling. The session still ends on a real
+    // completion condition, explicit stop, failure, or a user-set limit.
+    maxRounds: 0,
     minRounds: 1,
     minConsensusWeight: 0.75,
     stopWhenAllSkip: true,
@@ -59,8 +61,13 @@ export function validateGroupConfig(group) {
     allowSoloCouncil: false,
     ...(group.settings ?? {})
   };
-  // Keep minRounds reachable so maxRounds remains the hard stop.
-  group.settings.minRounds = Math.max(1, Math.min(Number(group.settings.minRounds) || 1, Number(group.settings.maxRounds) || 1));
+  group.settings.maxRounds = normalizeOptionalLimit(group.settings.maxRounds);
+  // A configured ceiling may constrain the minimum. With no ceiling, retain
+  // the requested minimum rather than silently reintroducing a round limit.
+  const requestedMinRounds = Math.max(1, Number.parseInt(String(group.settings.minRounds), 10) || 1);
+  group.settings.minRounds = group.settings.maxRounds > 0
+    ? Math.min(requestedMinRounds, group.settings.maxRounds)
+    : requestedMinRounds;
   group.settings.contextSearchLimit = clampInteger(group.settings.contextSearchLimit, 1, 20, 5);
   group.settings.contextArchiveInjectionLimit = clampInteger(group.settings.contextArchiveInjectionLimit, 1, 12, 5);
   group.settings.contextArchiveInjectionTokens = clampInteger(group.settings.contextArchiveInjectionTokens, 120, 4000, 900);

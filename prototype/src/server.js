@@ -976,9 +976,9 @@ function loadCouncilGroupFromRequest(body) {
 }
 
 function normalizeMaxRounds(value) {
-  const count = Number.parseInt(String(value || 1), 10);
-  if (!Number.isFinite(count)) return 1;
-  return Math.min(100, Math.max(1, count));
+  const count = Number.parseInt(String(value ?? 0), 10);
+  if (!Number.isFinite(count) || count <= 0) return 0;
+  return count;
 }
 
 function normalizeAgentTimeoutMs(value) {

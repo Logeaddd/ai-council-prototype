@@ -27,6 +27,7 @@ test("allows review-optional groups with one ordinary enabled agent", () => {
 
   assert.equal(group.agents[0].mandatoryRedTeam, undefined);
   assert.equal(group.agents[0].judge, undefined);
+  assert.equal(group.settings.maxRounds, 0);
   assert.equal(group.settings.minRounds, 1);
 });
 
@@ -100,8 +101,22 @@ test("context budget settings get defaults when absent", () => {
   assert.equal(group.settings.contextArchiveInjectionTokens, 900);
   assert.equal(group.settings.recentMessageLimit, 6);
   assert.equal(group.settings.maxToolIterations, 0);
+  assert.equal(group.settings.maxRounds, 0);
   assert.equal(group.settings.maxModelCalls, 0);
   assert.equal(group.settings.noProgressModelCalls, 0);
+});
+
+test("zero keeps an explicit round setting unbounded while a positive setting remains a user limit", () => {
+  const agent = {
+    id: "builder", name: "Builder", role: "Build", provider: "mock", apiBaseUrl: "mock://local", model: "mock", weight: 1, enabled: true
+  };
+  const unbounded = validateGroupConfig({ ...baseGroup([agent]), settings: { maxRounds: 0, minRounds: 25 } });
+  const bounded = validateGroupConfig({ ...baseGroup([agent]), settings: { maxRounds: 8, minRounds: 25 } });
+
+  assert.equal(unbounded.settings.maxRounds, 0);
+  assert.equal(unbounded.settings.minRounds, 25);
+  assert.equal(bounded.settings.maxRounds, 8);
+  assert.equal(bounded.settings.minRounds, 8);
 });
 
 test("reports missing env vars before real API runs", () => {

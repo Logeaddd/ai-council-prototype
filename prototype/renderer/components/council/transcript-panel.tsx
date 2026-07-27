@@ -69,11 +69,12 @@ function TranscriptRow({
   members: AgentMember[]
 }) {
   if (item.kind === "round") {
+    const roundLabel = item.totalRounds > 0 ? `第 ${item.round} / ${item.totalRounds} 轮` : `第 ${item.round} 轮`
     return (
       <div className="flex items-center gap-3 py-3">
         <div className="h-px flex-1 bg-border" />
         <span className="font-mono text-[11px] text-muted-foreground">
-          第 {item.round} / {item.totalRounds} 轮
+          {roundLabel}
         </span>
         <div className="h-px flex-1 bg-border" />
       </div>

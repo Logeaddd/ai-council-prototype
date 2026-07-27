@@ -70,11 +70,12 @@ test("server exposes real project folder import for council context", () => {
   assert.match(importerJs, /Text files imported/);
 });
 
-test("server clamps requested autonomous max rounds", () => {
+test("server preserves an optional user round limit without inventing a ceiling", () => {
   const serverJs = fs.readFileSync(path.join(root, "src", "server.js"), "utf8");
   assert.match(serverJs, /body\.maxRounds/);
   assert.match(serverJs, /normalizeMaxRounds/);
-  assert.match(serverJs, /Math\.min\(100, Math\.max\(1, count\)\)/);
+  assert.match(serverJs, /count <= 0\) return 0/);
+  assert.doesNotMatch(serverJs, /Math\.min\(100, Math\.max\(1, count\)\)/);
 });
 
 test("server exposes group index endpoints with guarded real group deletion", () => {

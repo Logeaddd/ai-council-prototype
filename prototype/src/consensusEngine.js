@@ -40,7 +40,8 @@ export function scoreConsensus(enabledAgents, session, options = {}) {
 }
 
 export function shouldStop(consensus, enabledAgents, session, settings, round) {
-  if (round >= settings.maxRounds) return true;
+  const maxRounds = Number.parseInt(String(settings?.maxRounds ?? 0), 10);
+  if (Number.isFinite(maxRounds) && maxRounds > 0 && round >= maxRounds) return true;
   // Do not stop on consensus/all-skip before the configured minimum rounds.
   const minRounds = Math.max(1, Number(settings.minRounds) || 1);
   if (round < minRounds) return false;

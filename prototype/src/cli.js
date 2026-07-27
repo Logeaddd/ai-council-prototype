@@ -275,7 +275,7 @@ function buildEvalGroupOptions(group) {
       const cloned = JSON.parse(JSON.stringify(group));
       cloned.settings = {
         ...cloned.settings,
-        maxRounds: task.maxRounds || cloned.settings?.maxRounds || 3
+        maxRounds: task.maxRounds ?? cloned.settings?.maxRounds ?? 0
       };
       cloned.agents = cloned.agents.map((agent) => agent.mandatoryRedTeam && !agent.reviewIntensity
         ? { ...agent, reviewIntensity: task.reviewIntensity || 2 }
