@@ -123,6 +123,13 @@ Completed on 2026-07-27:
   real-provider multi-task evidence window. The report is
   `harness/reports/product-harness-2026-07-27T00-23-17-438Z.json`, bound to
   commit `6e00001`.
+* Local release-surface checks after the tool-acquisition change also passed:
+  `npm run renderer:build` completed the optimized Next.js production build,
+  and `npm run probe:electron-drop` exercised the actual Electron composer
+  drop event, confirmed default prevention, and retained `dropped-note.txt`
+  as an attachment. This is evidence for the build and drag/drop path only;
+  it is not a substitute for the real-provider release gate or broader UI
+  acceptance.
 
 Still open before the real-provider release gate:
 
