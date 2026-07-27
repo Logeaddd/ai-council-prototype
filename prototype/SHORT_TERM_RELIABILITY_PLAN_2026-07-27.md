@@ -142,6 +142,16 @@ Completed on 2026-07-27:
   retains both the requested and executed commands plus an explicit correction
   record. An actual Windows variable-preservation test and the full suite
   passed 722 tests with 0 failures and 1 platform skip.
+* The current deterministic context-pressure baseline passed at
+  `eval/context-pressure/baseline-20260727-1785113141866/report.json`. It
+  retained 146,276 characters across 160 historical messages, rebuilt the
+  public index, recalled and injected the buried exact source, removed an
+  explicitly invalidated persisted source, deduplicated 95 of 96 repeated
+  execution records, and injected all three public checkpoints for every
+  resumed member. A merely lower-priority old instruction remains visible
+  until it has an explicit source invalidation; this is deliberate because
+  keyword or single-model guesses must not silently delete retained history.
+  Semantic supersession remains a real-provider acceptance concern.
 
 Still open before the real-provider release gate:
 
