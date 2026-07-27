@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { advanceExecutionState, collaborationRequirementStatus, createExecutionState, executionInstruction, gateDeliveryRecoveryToolRequests, isDeliveryTask, selectExecutionAgents } from "../src/executionState.js";
+import { markNativeModelSource } from "../src/nativeToolProvenance.js";
 
 const agents = [
   { id: "designer", name: "Designer", enabled: true },
@@ -101,18 +102,21 @@ test("a required collaboration contract blocks material work until a real handof
   assert.equal(blocked.rejected[0].code, "collaboration_prerequisite_pending");
   assert.equal(gateDeliveryRecoveryToolRequests(state, owner, [{ tool: "delegate_task", delegationType: "research" }]).accepted.length, 1);
 
+  const nativeDelegation = markNativeModelSource({
+    type: "research", assignee_id: "researcher", task: "Find the required fact.", expected_evidence: ["Observed source fact"], allowed_tools: ["read_file"], allow_workspace_mutation: false
+  });
+  const nativeDelegationResponse = {
+    status: "speak",
+    task_delegations: [nativeDelegation]
+  };
   advanceExecutionState({
     state,
     session,
     agent: owner,
-    response: {
-      status: "speak",
-      task_delegations: [{
-        type: "research", assignee_id: "researcher", task: "Find the required fact.", expected_evidence: ["Observed source fact"], allowed_tools: ["read_file"], allow_workspace_mutation: false
-      }]
-    }
+    response: nativeDelegationResponse
   });
   const delegation = state.ownership.delegations.find((item) => item.type === "research");
+  assert.equal(delegation.native, true);
   session.toolExecutionResults.push({ id: "research-read", tool: "read_file", source_agent_id: "researcher", status: "completed", result: { ok: true, content: "FACT" } });
   advanceExecutionState({ state, session, agent: researcher, response: { status: "speak", delegation_handoff: { delegation_id: delegation.id, summary: "Found FACT.", evidence: ["read_file#research-read"] } } });
   advanceExecutionState({ state, session, agent: owner, response: { status: "speak", argument: "I will integrate the handoff." } });

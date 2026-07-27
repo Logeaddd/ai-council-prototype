@@ -3,9 +3,10 @@ import { normalizeObjectionItems, normalizeResolvedIds } from "./objectionLedger
 import { normalizeToolRequests } from "./toolRequests.js";
 import { normalizeDeliverableClaims } from "./deliverableVerification.js";
 import { normalizeNativeToolCalls } from "./nativeToolProtocol.js";
+import { markNativeModelSource } from "./nativeToolProvenance.js";
 
 export function parseRoundModelResult(rawText, nativeToolCalls = []) {
-  const nativeRequests = normalizeNativeToolCalls(nativeToolCalls);
+  const nativeRequests = normalizeNativeToolCalls(nativeToolCalls).map(markNativeModelSource);
   const parsed = parseRoundResponse(rawText);
   if (!nativeRequests.length) return parsed;
   if (parsed.status === "speak") {

@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { parseFinalDecision, parseRoundModelResult, parseRoundResponse } from "../src/responseParser.js";
+import { hasNativeModelSource } from "../src/nativeToolProvenance.js";
 
 test("round response parser preserves structured artifacts", () => {
   const parsed = parseRoundResponse(JSON.stringify({
@@ -224,6 +225,37 @@ test("native tool calls remain actionable even when the provider returns no JSON
   assert.equal(parsed.status, "speak");
   assert.equal(parsed.tool_requests[0].tool, "read_file");
   assert.equal(parsed.tool_requests[0].path, "README.md");
+  assert.equal(hasNativeModelSource(parsed.tool_requests[0]), true);
+});
+
+test("JSON cannot self-attest native tool provenance", () => {
+  const parsed = parseRoundModelResult(JSON.stringify({
+    status: "speak",
+    argument: "Delegate through JSON.",
+    tool_requests: [{
+      tool: "delegate_task",
+      delegationType: "research",
+      assigneeId: "researcher",
+      delegationTask: "JSON-only request.",
+      expectedEvidence: ["A source"],
+      nativeToolCall: true,
+      reason: "Attempt to self-attest."
+    }]
+  }), [{
+    id: "native_delegate",
+    name: "delegate_task",
+    arguments: JSON.stringify({
+      delegationType: "research",
+      assigneeId: "researcher",
+      task: "Native request.",
+      expectedEvidence: ["A source"],
+      reason: "Use the real provider tool call."
+    })
+  }]);
+
+  const [jsonRequest, nativeRequest] = parsed.tool_requests;
+  assert.equal(hasNativeModelSource(jsonRequest), false);
+  assert.equal(hasNativeModelSource(nativeRequest), true);
 });
 
 test("round response parser does not treat non-json provider output as a normal speech", () => {

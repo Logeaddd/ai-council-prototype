@@ -158,6 +158,7 @@ test("fallback task-state recovery retains pending bounded work and schedules on
           allowedTools: ["web_search"],
           allowedPaths: [],
           allowWorkspaceMutation: false,
+          native: true,
           status: "pending",
           result: "",
           handoffEvidence: [],
@@ -183,6 +184,7 @@ test("fallback task-state recovery retains pending bounded work and schedules on
   const resumed = createExecutionState({ question: "continue", agents, previousState: checkpoint });
 
   assert.equal(resumed.delegationSequence, 4);
+  assert.equal(resumed.ownership.delegations[0].native, true);
   assert.equal(resumed.ownership.delegations[0].task, "Find the official format fact.");
   assert.deepEqual(selectExecutionAgents(resumed, agents).map((agent) => agent.id), ["researcher"]);
 });

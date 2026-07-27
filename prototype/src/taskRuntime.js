@@ -606,6 +606,7 @@ function compactDelegation(value = {}) {
     allowedTools: normalizeTextList(value.allowedTools || value.allowed_tools).slice(0, 24),
     allowedPaths: normalizeTextList(value.allowedPaths || value.allowed_paths).slice(0, 16),
     allowWorkspaceMutation: Boolean(value.allowWorkspaceMutation ?? value.allow_workspace_mutation),
+    native: value.native === true,
     result: String(value.result || "").slice(0, 600),
     handoffEvidence: compactDelegationEvidence(value.handoffEvidence || value.handoff_evidence),
     ownerAcknowledged: value.ownerAcknowledged === true,

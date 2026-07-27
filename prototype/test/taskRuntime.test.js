@@ -267,6 +267,7 @@ test("task run preserves a pending bounded delegation through interruption and r
         allowedTools: ["web_search", "fetch_url"],
         allowedPaths: [],
         allowWorkspaceMutation: false,
+        native: true,
         status: "pending",
         result: "",
         handoffEvidence: [],
@@ -290,6 +291,7 @@ test("task run preserves a pending bounded delegation through interruption and r
   const delegation = resumed.execution.ownership.delegations[0];
   assert.equal(resumed.execution.delegationSequence, 3);
   assert.equal(delegation.status, "pending");
+  assert.equal(delegation.native, true);
   assert.equal(delegation.task, "Find the required format fact.");
   assert.deepEqual(delegation.expectedEvidence, ["Official source"]);
   assert.deepEqual(delegation.allowedTools, ["web_search", "fetch_url"]);

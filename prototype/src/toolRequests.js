@@ -43,6 +43,7 @@ import path from "node:path";
 import { hasMaterialWorkspaceChange, isObservationRequest, observationValueForConsumer } from "./observationCache.js";
 import { executeWorkspaceEdit } from "./workspaceEditTools.js";
 import { recordCapabilityToolResults } from "./capabilityFacts.js";
+import { hasNativeModelSource } from "./nativeToolProvenance.js";
 
 const ALLOWED_TOOLS = new Set([
   "fetch_url",
@@ -615,7 +616,7 @@ async function executeOne(request, options) {
       if (typeof options.delegateTaskTool !== "function") {
         return resultRecord(request, { status: "failed", code: "delegation_controller_unavailable", error: "No active delivery controller can create a bounded delegation." });
       }
-      const result = await options.delegateTaskTool(request);
+      const result = await options.delegateTaskTool(request, { nativeToolCall: request.nativeToolCall === true });
       if (result?.ok === false) {
         return resultRecord(request, { status: "failed", code: String(result.code || "delegation_rejected"), error: String(result.error || "The bounded delegation was rejected."), result });
       }
@@ -1121,6 +1122,7 @@ function normalizeToolRequest(item, index) {
   return {
     id: String(item.id || makeId("tool")).trim(),
     tool,
+    nativeToolCall: hasNativeModelSource(item),
     query: stringField(item.query),
     url: stringField(item.url),
     path: stringField(item.path),

@@ -28,8 +28,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { createObservationCache, hasMaterialWorkspaceChange } from "./observationCache.js";
-import { activeDelegationForAgent, advanceExecutionState, collaborationRequirementStatus, createExecutionState, executionInstruction, gateDeliveryRecoveryToolRequests, requiresWorkspaceExecution, selectExecutionAgents } from "./executionState.js";
+import { acknowledgeOwnerDelegations, activeDelegationForAgent, advanceExecutionState, collaborationRequirementStatus, createExecutionState, executionInstruction, gateDeliveryRecoveryToolRequests, hasPendingWorkDelegations, requiresWorkspaceExecution, selectExecutionAgents } from "./executionState.js";
 import { nativeToolDefinitions } from "./nativeToolProtocol.js";
+import { markNativeModelSource } from "./nativeToolProvenance.js";
 import { readPublicEventHotCache } from "./publicEventJournal.js";
 import { appendTaskRunEvent, createTaskRun, readTaskRun, recordTaskRunArtifactVerification, recordTaskRunFileEvidence, recordTaskRunToolAttempts, syncTaskRunFromSession } from "./taskRuntime.js";
 
@@ -205,6 +206,10 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
       const agentStartedAt = nowIso();
       const seat = findWorkspaceSeat(workspaceGroup, agent);
       const transcriptVisibility = contextVisibilityForAgent(agent, workMode);
+      if (acknowledgeOwnerDelegations(session.executionState, agent)) {
+        refreshExecutionCheckpoint();
+        persistRunningSession();
+      }
       let executionDirective = executionInstruction(session.executionState, agent);
       const memberContext = buildMemberContext(agent, session, {
         question,
@@ -420,7 +425,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
         executionDirective = executionInstruction(session.executionState, agent);
       };
 
-      const registerNativeDelegation = async (request) => {
+      const registerNativeDelegation = async (request, provenance = {}) => {
         if (agent.id !== session.executionState?.executorId) {
           return { ok: false, code: "delegation_owner_required", error: "Only the durable delivery owner can create a bounded delegation." };
         }
@@ -436,6 +441,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
         if (!delegation.type || !delegation.assignee_id || !delegation.task || !delegation.expected_evidence.length) {
           return { ok: false, code: "invalid_delegation_request", error: "delegate_task needs delegationType, assigneeId, task, and expectedEvidence." };
         }
+        if (provenance.nativeToolCall === true) markNativeModelSource(delegation);
         response.task_delegations = [...(response.task_delegations || []), delegation];
         advanceExecutionState({
           state: session.executionState,
@@ -465,7 +471,9 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
       };
 
       establishTaskContractBeforeActions(response);
-      processResponseFileOperations(response);
+      if (!ownerRequestedDelegation(response, session.executionState, agent)) {
+        processResponseFileOperations(response);
+      }
 
       if (response.status === "speak" && !response.tool_requests?.length && accumulatedRejectedFileOperationProposals.length) {
         const rejectedAttempt = buildInterimModelMessage({
@@ -528,7 +536,16 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
         }
         toolIterations += 1;
         const requestedToolTimeoutMs = positiveDuration(group.settings.toolTimeoutMs);
-        const recoveryGate = gateDeliveryRecoveryToolRequests(session.executionState, agent, response.tool_requests || []);
+        const ownerDelegationTurn = ownerRequestedDelegation(response, session.executionState, agent);
+        const allRequestedTools = response.tool_requests || [];
+        const deferredForDelegation = ownerDelegationTurn
+          ? allRequestedTools.filter((request) => String(request?.tool || "").trim().toLowerCase() !== "delegate_task")
+            .map((request) => deferredToolRequestForDelegation(request))
+          : [];
+        const executableRequests = ownerDelegationTurn
+          ? allRequestedTools.filter((request) => String(request?.tool || "").trim().toLowerCase() === "delegate_task")
+          : allRequestedTools;
+        const recoveryGate = gateDeliveryRecoveryToolRequests(session.executionState, agent, executableRequests);
         const executedToolResult = await executeToolRequests({
           requests: recoveryGate.accepted,
           permissionTier: fileOperationPermissionTier,
@@ -565,7 +582,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
         });
         const toolResult = {
           ...executedToolResult,
-          rejected: [...recoveryGate.rejected, ...executedToolResult.rejected],
+          rejected: [...recoveryGate.rejected, ...executedToolResult.rejected, ...deferredForDelegation],
           events: [
             ...recoveryGate.rejected.map((item) => ({
               type: "tool_failure",
@@ -579,7 +596,19 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
               error: item.error,
               createdAt: item.createdAt
             })),
-            ...executedToolResult.events
+            ...executedToolResult.events,
+            ...deferredForDelegation.map((item) => ({
+              type: "tool_failure",
+              id: item.id,
+              tool: item.tool,
+              round,
+              agentId: agent.id,
+              agentName: agent.name,
+              status: item.status,
+              code: item.code,
+              error: item.error,
+              createdAt: item.createdAt
+            }))
           ]
         };
         accumulatedToolRequests.push(...toolResult.accepted);
@@ -618,6 +647,8 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
           refreshExecutionCheckpoint();
           executionDirective = executionInstruction(session.executionState, agent);
         }
+        const ownerMustWaitForDelegation = agent.id === session.executionState?.executorId
+          && hasPendingWorkDelegations(session.executionState);
         persistRunningSession();
         if (session.taskRun) {
           yield {
@@ -628,6 +659,17 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
         }
         for (const event of toolResult.events || []) {
           yield event;
+        }
+
+        if (ownerMustWaitForDelegation) {
+          response = {
+            ...response,
+            tool_requests: [],
+            argument: "The bounded delegation is active. Wait for the contributor's durable handoff before writing, building, validating, or finalizing the delivery."
+          };
+          rawTextForMessage = "";
+          errorForMessage = "";
+          break;
         }
 
         if (hasReachedVerificationCheckpoint(session, agent)) {
@@ -2208,6 +2250,24 @@ function nativeToolTurnFromResponse(callOutcome = {}, response = {}) {
   return {
     text: String(callOutcome.nativeAssistantText || callOutcome.rawTextForMessage || ""),
     toolCalls
+  };
+}
+
+function ownerRequestedDelegation(response = {}, executionState = {}, agent = {}) {
+  return agent?.id === executionState?.executorId
+    && (Array.isArray(response?.tool_requests) ? response.tool_requests : []).some((request) => (
+      String(request?.tool || "").trim().toLowerCase() === "delegate_task"
+    ));
+}
+
+function deferredToolRequestForDelegation(request = {}) {
+  return {
+    id: String(request.id || `delegation_deferred:${request.tool || "tool"}`),
+    tool: String(request.tool || ""),
+    status: "rejected",
+    code: "delegation_handoff_required",
+    error: "The delivery owner requested a bounded delegation in this response. All other same-turn actions are deferred until the contributor handoff is durable and acknowledged.",
+    createdAt: nowIso()
   };
 }
 

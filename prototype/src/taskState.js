@@ -221,6 +221,7 @@ function normalizeExecutionOwnership(value, execution = {}) {
         allowedTools: normalizeTextList(item.allowedTools || item.allowed_tools).slice(0, 24),
         allowedPaths: normalizeTextList(item.allowedPaths || item.allowed_paths).slice(0, 16),
         allowWorkspaceMutation: Boolean(item.allowWorkspaceMutation ?? item.allow_workspace_mutation),
+        native: item.native === true,
         result: String(item.result || "").slice(0, 600),
         handoffEvidence: normalizeDelegationEvidence(item.handoffEvidence || item.handoff_evidence),
         ownerAcknowledged: item.ownerAcknowledged === true,

@@ -12,6 +12,7 @@ import { executeToolRequests } from "../src/toolRequests.js";
 import { executeReadListFileOperations } from "../src/fileOperationReader.js";
 import { writeContextArchive, writeGroupSession } from "../src/storage.js";
 import { createObservationCache } from "../src/observationCache.js";
+import { markNativeModelSource } from "../src/nativeToolProvenance.js";
 
 test("controlled file tool requests list, read, search, and grep real workspace files", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-tools-"));
@@ -2348,6 +2349,7 @@ function listen(server) {
 }
 
 test("delegate_task routes through the live delivery controller instead of pretending to be a shell tool", async () => {
+  let provenance;
   const result = await executeToolRequests({
     permissionTier: "full",
     groupPath: fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-delegate-tool-")),
@@ -2362,11 +2364,38 @@ test("delegate_task routes through the live delivery controller instead of prete
       allowWorkspaceMutation: false,
       reason: "Create a bounded research handoff."
     }],
-    delegateTaskTool: async (request) => ({ ok: true, delegationId: `delegation:1:1:${request.assigneeId}` })
+    delegateTaskTool: async (request, source) => {
+      provenance = source;
+      return { ok: true, delegationId: `delegation:1:1:${request.assigneeId}` };
+    }
   });
   assert.equal(result.rejected.length, 0);
   assert.equal(result.results[0].status, "completed");
   assert.equal(result.results[0].result.delegationId, "delegation:1:1:researcher");
+  assert.equal(provenance.nativeToolCall, false);
+});
+
+test("delegate_task receives native provenance only from the internal provider marker", async () => {
+  let provenance;
+  const request = markNativeModelSource({
+    tool: "delegate_task",
+    delegationType: "research",
+    assigneeId: "researcher",
+    delegationTask: "Read one source.",
+    expectedEvidence: ["Source fact"],
+    reason: "Use a real native call."
+  });
+  const result = await executeToolRequests({
+    requests: [request],
+    permissionTier: "full",
+    agent: { id: "builder", name: "Builder" },
+    delegateTaskTool: async (_request, source) => {
+      provenance = source;
+      return { ok: true };
+    }
+  });
+  assert.equal(result.results[0].status, "completed");
+  assert.equal(provenance.nativeToolCall, true);
 });
 
 function close(server) {

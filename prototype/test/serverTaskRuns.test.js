@@ -144,6 +144,8 @@ test("real server HTTP/SSE preserves a bounded contributor handoff and lets only
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-server-delegation-"));
   const groupPath = path.join(sandbox, "group");
   fs.mkdirSync(groupPath, { recursive: true });
+  fs.mkdirSync(path.join(groupPath, "shared"), { recursive: true });
+  fs.writeFileSync(path.join(groupPath, "shared", "research.txt"), "FACT_FROM_RESEARCH\n", "utf8");
   fs.writeFileSync(path.join(groupPath, "group.json"), JSON.stringify({
     id: "server-delegation",
     name: "Server Delegation",
@@ -186,6 +188,8 @@ test("real server HTTP/SSE preserves a bounded contributor handoff and lets only
     assert.equal(writes.length, 1, JSON.stringify(events.map((event) => ({ type: event.type, tool: event.tool, agentId: event.agentId, error: event.error, message: event.message?.displayText }))));
     assert.equal(writes[0].agentId, "builder");
     assert.equal(fs.readFileSync(path.join(groupPath, "shared", "delegated.txt"), "utf8"), "FACT_FROM_RESEARCH\n");
+    assert.equal(fs.existsSync(path.join(groupPath, "shared", "eager-before-handoff.txt")), false);
+    assert.equal(events.some((event) => event.type === "tool_failure" && event.tool === "workspace_edit" && event.code === "delegation_handoff_required" && event.agentId === "builder"), true);
 
     const taskEvent = events.find((event) => event.type === "task_run" && event.taskRun?.id);
     assert.ok(taskEvent);
@@ -194,8 +198,10 @@ test("real server HTTP/SSE preserves a bounded contributor handoff and lets only
     assert.equal(detail.body.taskRun.state, "completed", JSON.stringify(detail.body.taskRun));
     const delegation = detail.body.taskRun.execution.ownership.delegations.find((item) => item.assigneeId === "researcher");
     assert.equal(delegation.status, "completed");
+    assert.equal(delegation.native, true);
     assert.equal(delegation.ownerAcknowledged, true);
     assert.equal(delegation.result, "The source fact is FACT_FROM_RESEARCH.");
+    assert.equal(delegation.handoffEvidence.some((item) => item.kind === "tool" && item.detail.includes("read_file")), true);
     assert.equal(delegation.handoffEvidence.some((item) => item.detail.includes("FACT_FROM_RESEARCH")), true);
   } finally {
     child.kill();
@@ -601,12 +607,22 @@ async function startMalformedIntakeProvider() {
 async function startDelegatingProvider() {
   let intakeHandled = false;
   let ownerWriteIssued = false;
+  let researcherReadIssued = false;
   const server = http.createServer(async (req, res) => {
     const body = JSON.parse(await readBody(req));
     const prompt = JSON.stringify(body.messages || []);
     let payload;
     if (prompt.includes("FinalDecision JSON object")) {
       payload = finalDecision();
+    } else if (prompt.includes("[Delegated research work]") && !researcherReadIssued) {
+      researcherReadIssued = true;
+      payload = {
+        status: "speak",
+        argument: "Read the bounded source file before returning the handoff.",
+        tool_requests: [{ tool: "read_file", path: "shared/research.txt", reason: "Read the one delegated source fact." }],
+        objections: [],
+        memory_candidates: []
+      };
     } else if (prompt.includes("[Delegated research work]")) {
       const delegationId = prompt.match(/Delegation:\s*([^\.\n]+)/)?.[1]?.trim() || "delegation:0:1:researcher";
       payload = {
@@ -629,7 +645,7 @@ async function startDelegatingProvider() {
       };
     } else if (!intakeHandled && prompt.includes("[Task intake owner]")) {
       intakeHandled = true;
-      payload = {
+      const contract = {
         status: "speak",
         argument: "Delegate the required research fact before writing.",
         task_contract: {
@@ -639,19 +655,29 @@ async function startDelegatingProvider() {
           requires_verification: true,
           deliverables: ["shared/delegated.txt"],
           completion_criteria: ["The document contains the delegated fact.", "A local command verifies the document."],
-          next_action: "Delegate the source fact, then write the document."
+          next_action: "Delegate the source fact, then write the document.",
+          collaboration: { required: true, before_first_mutation: true, minimum_delegations: 1, types: ["research"], reason: "The user explicitly requires a research handoff." }
         },
-        task_delegations: [{
-          type: "research",
-          assignee_id: "researcher",
-          task: "Find the one source fact needed for the document.",
-          expected_evidence: ["One source fact"],
-          allowed_tools: ["web_search"],
-          allow_workspace_mutation: false
-        }],
         objections: [],
         memory_candidates: []
       };
+      writeOpenAiContentAndNativeToolStream(res, contract, [{
+        tool: "delegate_task",
+        delegationType: "research",
+        assigneeId: "researcher",
+        delegationTask: "Find the one source fact needed for the document.",
+        expectedEvidence: ["One source fact"],
+        allowedTools: ["read_file"],
+        allowWorkspaceMutation: false,
+        allowedPaths: []
+      }, {
+        tool: "workspace_edit",
+        action: "write",
+        path: "shared/eager-before-handoff.txt",
+        code: "MUST_NOT_BE_WRITTEN\n",
+        reason: "Deliberately attempt an owner write in the delegation turn."
+      }]);
+      return;
     } else if (!ownerWriteIssued) {
       ownerWriteIssued = true;
       payload = {
@@ -810,6 +836,18 @@ async function readBody(req) {
   const chunks = [];
   for await (const chunk of req) chunks.push(chunk);
   return Buffer.concat(chunks).toString("utf8");
+}
+
+function writeOpenAiContentAndNativeToolStream(res, content, request) {
+  const requests = Array.isArray(request) ? request : [request];
+  res.writeHead(200, { "Content-Type": "text/event-stream; charset=utf-8" });
+  res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: JSON.stringify(content) } }] })}\n\n`);
+  res.write(`data: ${JSON.stringify({ choices: [{ delta: { tool_calls: requests.map((item, index) => ({
+    index,
+    id: `native_tool_${index + 1}`,
+    function: { name: "ai_council_tool", arguments: JSON.stringify(item) }
+  })) } }] })}\n\n`);
+  res.end("data: [DONE]\n\n");
 }
 
 async function waitForExit(child) {
