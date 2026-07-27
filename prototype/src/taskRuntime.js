@@ -529,6 +529,7 @@ function normalizeExecution(value = {}) {
     processedToolResults: Math.max(0, Number(source.processedToolResults || 0)),
     processedFileResults: Math.max(0, Number(source.processedFileResults || 0)),
     noActionCalls: Math.max(0, Number(source.noActionCalls || 0)),
+    delegationSequence: Math.max(0, Number(source.delegationSequence || 0)),
     artifactStatus: String(source.artifactStatus || ""),
     lastAction: String(source.lastAction || ""),
     lastError: String(source.lastError || "").slice(0, 1600),
@@ -575,8 +576,29 @@ function compactDelegation(value = {}) {
     assigneeId: String(value.assigneeId || ""),
     assigneeName: String(value.assigneeName || ""),
     status: String(value.status || "pending"),
-    result: String(value.result || "").slice(0, 120)
+    task: String(value.task || "").slice(0, 1200),
+    expectedEvidence: normalizeTextList(value.expectedEvidence || value.expected_evidence).slice(0, 8),
+    allowedTools: normalizeTextList(value.allowedTools || value.allowed_tools).slice(0, 24),
+    allowedPaths: normalizeTextList(value.allowedPaths || value.allowed_paths).slice(0, 16),
+    allowWorkspaceMutation: Boolean(value.allowWorkspaceMutation ?? value.allow_workspace_mutation),
+    result: String(value.result || "").slice(0, 600),
+    handoffEvidence: compactDelegationEvidence(value.handoffEvidence || value.handoff_evidence),
+    ownerAcknowledged: value.ownerAcknowledged === true,
+    acknowledgedBy: String(value.acknowledgedBy || "")
   };
+}
+
+function compactDelegationEvidence(value) {
+  return (Array.isArray(value) ? value : []).filter((item) => item && typeof item === "object").map((item) => ({
+    kind: String(item.kind || "reported").slice(0, 40),
+    detail: String(item.detail || "").slice(0, 500)
+  })).filter((item) => item.detail).slice(0, 16);
+}
+
+function normalizeTextList(value) {
+  return (Array.isArray(value) ? value : [])
+    .filter((item) => typeof item === "string" && item.trim())
+    .map((item) => item.trim());
 }
 
 function latestOwnerTransfer(previous = {}, next = {}) {

@@ -140,6 +140,71 @@ test("a malformed intake reply stays with its owner and becomes an honest incomp
   }
 });
 
+test("real server HTTP/SSE preserves a bounded contributor handoff and lets only the owner deliver", async () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-server-delegation-"));
+  const groupPath = path.join(sandbox, "group");
+  fs.mkdirSync(groupPath, { recursive: true });
+  fs.writeFileSync(path.join(groupPath, "group.json"), JSON.stringify({
+    id: "server-delegation",
+    name: "Server Delegation",
+    permissions: { defaultTier: "text", seatTiers: { builder: "full", researcher: "full" } },
+    seats: [
+      { seatId: "builder", displayName: "Builder", enabled: true, privateFolder: "members/Builder" },
+      { seatId: "researcher", displayName: "Researcher", enabled: true, privateFolder: "members/Researcher" },
+      { seatId: "finalizer", displayName: "Finalizer", enabled: true, judge: true, privateFolder: "members/Finalizer" }
+    ]
+  }), "utf8");
+  const provider = await startDelegatingProvider();
+  const port = await availablePort();
+  const child = spawn(process.execPath, [path.join(root, "src", "server.js")], {
+    cwd: root,
+    env: {
+      ...process.env,
+      AI_COUNCIL_DATA_DIR: path.join(sandbox, "data"),
+      AI_COUNCIL_WORKSPACE_ROOT: sandbox,
+      AI_COUNCIL_UI_PORT: String(port),
+      AI_COUNCIL_UI_HOST: "127.0.0.1",
+      AI_COUNCIL_LOCAL_API_TOKEN: localApiToken
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+    windowsHide: true
+  });
+  let output = "";
+  child.stdout.on("data", (chunk) => { output += chunk; });
+  child.stderr.on("data", (chunk) => { output += chunk; });
+
+  try {
+    await waitForServer(port, child, () => output);
+    const events = await requestSse(port, "/api/council/events", {
+      question: "Create a local document using one delegated research fact, then verify it.",
+      workspaceGroupPath: groupPath,
+      runtimeGroup: runtimeGroupWithResearcher(provider.apiBaseUrl)
+    });
+    const messages = events.filter((event) => event.type === "agent_message");
+    assert.deepEqual(messages.map((event) => event.message.agentId), ["builder", "researcher", "builder"]);
+    const writes = events.filter((event) => event.type === "tool_success" && event.tool === "workspace_edit");
+    assert.equal(writes.length, 1, JSON.stringify(events.map((event) => ({ type: event.type, tool: event.tool, agentId: event.agentId, error: event.error, message: event.message?.displayText }))));
+    assert.equal(writes[0].agentId, "builder");
+    assert.equal(fs.readFileSync(path.join(groupPath, "shared", "delegated.txt"), "utf8"), "FACT_FROM_RESEARCH\n");
+
+    const taskEvent = events.find((event) => event.type === "task_run" && event.taskRun?.id);
+    assert.ok(taskEvent);
+    const detail = await requestJson(port, `/api/task-runs/${encodeURIComponent(taskEvent.taskRun.id)}?groupPath=${encodeURIComponent(groupPath)}`, undefined, "GET");
+    assert.equal(detail.status, 200);
+    assert.equal(detail.body.taskRun.state, "completed", JSON.stringify(detail.body.taskRun));
+    const delegation = detail.body.taskRun.execution.ownership.delegations.find((item) => item.assigneeId === "researcher");
+    assert.equal(delegation.status, "completed");
+    assert.equal(delegation.ownerAcknowledged, true);
+    assert.equal(delegation.result, "The source fact is FACT_FROM_RESEARCH.");
+    assert.equal(delegation.handoffEvidence.some((item) => item.detail.includes("FACT_FROM_RESEARCH")), true);
+  } finally {
+    child.kill();
+    await waitForExit(child);
+    await provider.close();
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+});
+
 test("an observer disconnect does not abort the background run and cursor replay returns only missing events", async () => {
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-server-run-replay-"));
   const groupPath = path.join(sandbox, "group");
@@ -254,6 +319,28 @@ function runtimeGroupWithHelper(apiBaseUrl) {
   };
 }
 
+function runtimeGroupWithResearcher(apiBaseUrl) {
+  const base = {
+    provider: "openai-compatible",
+    apiBaseUrl,
+    allowUnsafePrivateNetwork: true,
+    apiKey: "test-key",
+    model: "local-test-model",
+    weight: 1,
+    enabled: true
+  };
+  return {
+    id: "server-delegation",
+    name: "Server Delegation",
+    settings: { maxRounds: 3, minConsensusWeight: 1, stopWhenAllSkip: false, agentTimeoutMs: 5000, maxToolIterations: 6, allowSoloCouncil: true },
+    agents: [
+      { ...base, id: "builder", name: "Builder", role: "Builder" },
+      { ...base, id: "researcher", name: "Researcher", role: "Researcher" },
+      { ...base, id: "finalizer", name: "Finalizer", role: "Finalizer", judge: true }
+    ]
+  };
+}
+
 async function startProvider(responseDelayMs = 0) {
   let builderStep = 0;
   const server = http.createServer(async (req, res) => {
@@ -291,6 +378,94 @@ async function startMalformedIntakeProvider() {
     const payload = prompt.includes("FinalDecision JSON object")
       ? finalDecision()
       : { status: "speak", argument: "I will first think through the request.", objections: [], memory_candidates: [] };
+    const chunk = JSON.stringify({ choices: [{ delta: { content: JSON.stringify(payload) } }] });
+    res.writeHead(200, { "Content-Type": "text/event-stream" });
+    res.write(`data: ${chunk}\n\n`);
+    res.end("data: [DONE]\n\n");
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  return {
+    apiBaseUrl: `http://127.0.0.1:${address.port}/v1`,
+    close: () => new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))
+  };
+}
+
+async function startDelegatingProvider() {
+  let intakeHandled = false;
+  let ownerWriteIssued = false;
+  const server = http.createServer(async (req, res) => {
+    const body = JSON.parse(await readBody(req));
+    const prompt = JSON.stringify(body.messages || []);
+    let payload;
+    if (prompt.includes("FinalDecision JSON object")) {
+      payload = finalDecision();
+    } else if (prompt.includes("[Delegated research work]")) {
+      const delegationId = prompt.match(/Delegation:\s*([^\.\n]+)/)?.[1]?.trim() || "delegation:0:1:researcher";
+      payload = {
+        status: "speak",
+        argument: "The bounded research task is complete.",
+        delegation_handoff: {
+          delegation_id: delegationId,
+          summary: "The source fact is FACT_FROM_RESEARCH.",
+          evidence: ["Official source fact: FACT_FROM_RESEARCH"]
+        },
+        file_operations: [{
+          op: "write",
+          path: "shared/delegated.txt",
+          content: "CONTRIBUTOR_MUST_NOT_WRITE_FINAL\n",
+          reason: "Deliberately exercise the runtime delegation boundary.",
+          expected_effect: "Must be rejected because research has no write scope."
+        }],
+        objections: [],
+        memory_candidates: []
+      };
+    } else if (!intakeHandled && prompt.includes("[Task intake owner]")) {
+      intakeHandled = true;
+      payload = {
+        status: "speak",
+        argument: "Delegate the required research fact before writing.",
+        task_contract: {
+          mode: "delivery",
+          objective: "Create and verify the requested local document.",
+          requires_workspace: true,
+          requires_verification: true,
+          deliverables: ["shared/delegated.txt"],
+          completion_criteria: ["The document contains the delegated fact.", "A local command verifies the document."],
+          next_action: "Delegate the source fact, then write the document."
+        },
+        task_delegations: [{
+          type: "research",
+          assignee_id: "researcher",
+          task: "Find the one source fact needed for the document.",
+          expected_evidence: ["One source fact"],
+          allowed_tools: ["web_search"],
+          allow_workspace_mutation: false
+        }],
+        objections: [],
+        memory_candidates: []
+      };
+    } else if (!ownerWriteIssued) {
+      ownerWriteIssued = true;
+      payload = {
+        status: "speak",
+        argument: "Use the returned handoff and write the document.",
+        tool_requests: [{ tool: "workspace_edit", action: "write", path: "shared/delegated.txt", code: "FACT_FROM_RESEARCH\n", reason: "Write the final document from the delegated evidence." }],
+        objections: [],
+        memory_candidates: []
+      };
+    } else {
+      payload = {
+        status: "speak",
+        argument: "Verify the owner-created document.",
+        tool_requests: [{ tool: "run_code", language: "javascript", code: "const fs = require('fs'); if (fs.readFileSync('shared/delegated.txt', 'utf8') !== 'FACT_FROM_RESEARCH\\n') throw new Error('wrong document'); console.log('DELEGATION_OK');", reason: "Verify the owner-created final document." }],
+        objections: [],
+        memory_candidates: []
+      };
+    }
     const chunk = JSON.stringify({ choices: [{ delta: { content: JSON.stringify(payload) } }] });
     res.writeHead(200, { "Content-Type": "text/event-stream" });
     res.write(`data: ${chunk}\n\n`);

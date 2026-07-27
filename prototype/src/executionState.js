@@ -20,6 +20,7 @@ export function createExecutionState({ question, agents = [], workspaceGroup, pr
         processedToolResults: 0,
         processedFileResults: 0,
         noActionCalls: 0,
+        delegationSequence: Math.max(0, Number(previousState.delegationSequence || 0)),
         resumed: true
       };
     }
@@ -42,6 +43,7 @@ export function createExecutionState({ question, agents = [], workspaceGroup, pr
     processedToolResults: 0,
     processedFileResults: 0,
     noActionCalls: 0,
+    delegationSequence: 0,
     artifactStatus: "not_checked",
     lastAction: "",
     lastError: "",
@@ -57,6 +59,9 @@ export function selectExecutionAgents(state, agents = []) {
   const reviewers = agents.filter((agent) => (
     agent.id !== executor.id && agent.enabled !== false && !agent.judge && isReviewerLike(agent)
   ));
+  const pendingDelegates = pendingWorkDelegates(state, agents);
+  if (pendingDelegates.length) return pendingDelegates;
+  if (hasUnacknowledgedWorkDelegations(state)) return [executor];
   if (state.phase === "review") {
     const pendingReviewers = pendingReviewersForCheckpoint(state, reviewers);
     if (pendingReviewers.length) return pendingReviewers;
@@ -82,12 +87,26 @@ export function executionInstruction(state, agent) {
     return [
       `[Execution owner] You are the primary executor for this delivery task. Current phase: ${state.phase}.`,
       formatTaskContract(state.taskContract),
+      formatDelegationHandoffsForOwner(state),
       `Required next action: ${state.nextAction}`,
       formatCheckpointEvidence(state.checkpointEvidence),
       requiresWorkspace
         ? "Do not restart broad planning. Continue from the recorded checkpoint and use a real file, command, build, or test action now."
         : "Do not restart broad planning. Continue from the recorded checkpoint and take the recorded material action now.",
       state.lastError ? `Last verification error: ${state.lastError}` : ""
+    ].filter(Boolean).join("\n");
+  }
+  const workDelegation = workDelegationFor(state, agent);
+  if (workDelegation) {
+    return [
+      `[Delegated ${workDelegation.type} work] You are contributor ${agent.name} for delivery owner ${state.ownership?.ownerName || state.executorName}. Delegation: ${workDelegation.id}.`,
+      `Your bounded task: ${workDelegation.task}`,
+      `Expected handoff evidence: ${workDelegation.expectedEvidence.join("; ")}.`,
+      `Allowed tools: ${workDelegation.allowedTools.join(", ") || "read-only default"}.`,
+      workDelegation.allowWorkspaceMutation
+        ? `You may mutate only these explicitly delegated paths: ${workDelegation.allowedPaths.join(", ")}. Do not modify any final deliverable outside them.`
+        : "You have no workspace-mutation delegation. Do not write, move, delete, build, package, or otherwise mutate project outputs.",
+      "Do not restart the whole task, do not independently finalize it, and do not delegate further. Return delegation_handoff with this exact delegation_id, a concise result, and concrete evidence for the owner."
     ].filter(Boolean).join("\n");
   }
   if (isReviewerLike(agent)) {
@@ -103,6 +122,11 @@ export function executionInstruction(state, agent) {
 export function advanceExecutionState({ state, session, agent, groupPath, question, response } = {}) {
   if (!state?.active) return state;
   if (agent.id !== state.executorId) {
+    const workDelegation = workDelegationFor(state, agent);
+    if (workDelegation) {
+      completeWorkDelegation(state, workDelegation, agent, response, session);
+      return state;
+    }
     if (isReviewerLike(agent)) {
       const delegation = reviewDelegationFor(state, agent, true);
       if (delegation) {
@@ -128,6 +152,9 @@ export function advanceExecutionState({ state, session, agent, groupPath, questi
     const intake = applyTaskIntake(state, response, session);
     if (!intake.delivery) return state;
   }
+
+  acknowledgeWorkDelegationsForOwner(state, agent);
+  registerOwnerDelegations(state, response, session.groupSnapshot?.agents || []);
 
   const toolResults = (session.toolExecutionResults || []).slice(state.processedToolResults);
   const fileResults = (session.fileOperationExecutionResults || []).slice(state.processedFileResults);
@@ -192,7 +219,7 @@ export function advanceExecutionState({ state, session, agent, groupPath, questi
     return state;
   }
 
-  if (canCompleteNonWorkspaceDelivery(state, response)) {
+  if (canCompleteNonWorkspaceDelivery(state, response) && !hasOpenWorkDelegations(state)) {
     state.phase = "complete";
     state.lastAction = "non_workspace_delivery_complete";
     state.lastError = "";
@@ -450,6 +477,213 @@ function normalizeOwnership(value, state = {}) {
     transfers: Array.isArray(source.transfers) ? source.transfers.filter((item) => item && typeof item === "object").slice(-20) : [],
     delegations: Array.isArray(source.delegations) ? source.delegations.filter((item) => item && typeof item === "object").slice(-40) : []
   };
+}
+
+const WORK_DELEGATION_TYPES = new Set(["research", "implementation", "unblocker"]);
+const DEFAULT_RESEARCH_TOOLS = ["web_search", "fetch_url", "api_request", "list_directory", "read_file", "search_files", "grep_content", "search_context", "load_context"];
+
+export function activeDelegationForAgent(state, agent) {
+  return workDelegationFor(state, agent);
+}
+
+function workDelegationFor(state, agent) {
+  if (!state || !agent?.id) return undefined;
+  const ownership = normalizeOwnership(state.ownership, state);
+  return ownership.delegations.find((item) => (
+    WORK_DELEGATION_TYPES.has(item.type)
+    && item.assigneeId === agent.id
+    && ["pending", "in_progress"].includes(item.status)
+  ));
+}
+
+function pendingWorkDelegates(state, agents) {
+  const byId = new Map((agents || []).filter((agent) => agent.enabled !== false).map((agent) => [agent.id, agent]));
+  const ownership = normalizeOwnership(state.ownership, state);
+  return ownership.delegations
+    .filter((item) => WORK_DELEGATION_TYPES.has(item.type) && ["pending", "in_progress"].includes(item.status))
+    .map((item) => byId.get(item.assigneeId))
+    .filter(Boolean);
+}
+
+function hasOpenWorkDelegations(state) {
+  const ownership = normalizeOwnership(state.ownership, state);
+  return ownership.delegations.some((item) => WORK_DELEGATION_TYPES.has(item.type) && ["pending", "in_progress"].includes(item.status));
+}
+
+function hasUnacknowledgedWorkDelegations(state) {
+  const ownership = normalizeOwnership(state.ownership, state);
+  return ownership.delegations.some((item) => (
+    WORK_DELEGATION_TYPES.has(item.type)
+    && ["completed", "failed", "rejected", "superseded"].includes(item.status)
+    && item.ownerAcknowledged !== true
+  ));
+}
+
+function registerOwnerDelegations(state, response = {}, agents = []) {
+  const requested = Array.isArray(response?.task_delegations) ? response.task_delegations : [];
+  if (!requested.length || response.__taskDelegationsRegistered) return;
+  Object.defineProperty(response, "__taskDelegationsRegistered", { value: true, enumerable: false });
+  const ownership = state.ownership = normalizeOwnership(state.ownership, state);
+  const assignees = new Map((agents || []).filter((agent) => agent?.enabled !== false).map((agent) => [agent.id, agent]));
+  const added = [];
+  for (const request of requested) {
+    const type = String(request?.type || "").trim().toLowerCase();
+    const assigneeId = String(request?.assignee_id || request?.assigneeId || "").trim();
+    const task = String(request?.task || request?.question || "").trim().slice(0, 1200);
+    const expectedEvidence = normalizeContractTextList(request?.expected_evidence ?? request?.expectedEvidence).slice(0, 8);
+    const allowWorkspaceMutation = Boolean(request?.allow_workspace_mutation ?? request?.allowWorkspaceMutation);
+    const allowedPaths = normalizeDelegationPaths(request?.allowed_paths ?? request?.allowedPaths);
+    const allowedTools = normalizeDelegationTools(request?.allowed_tools ?? request?.allowedTools, type, allowWorkspaceMutation);
+    const assignee = assignees.get(assigneeId);
+    if (!WORK_DELEGATION_TYPES.has(type) || !assigneeId || assigneeId === state.executorId || !task || !expectedEvidence.length || !assignee || (allowWorkspaceMutation && !allowedPaths.length)) {
+      ownership.delegations.push({
+        id: `delegation:rejected:${state.checkpointVersion}:${++state.delegationSequence}`,
+        type: WORK_DELEGATION_TYPES.has(type) ? type : "invalid",
+        checkpointVersion: state.checkpointVersion,
+        assignedBy: ownership.ownerId,
+        assigneeId,
+        assigneeName: assignee?.name || "",
+        status: "rejected",
+        result: "invalid_or_unavailable_delegation",
+        ownerAcknowledged: false
+      });
+      continue;
+    }
+    const duplicate = ownership.delegations.some((item) => (
+      WORK_DELEGATION_TYPES.has(item.type)
+      && item.assigneeId === assigneeId
+      && item.task === task
+      && ["pending", "in_progress"].includes(item.status)
+    ));
+    if (duplicate) continue;
+    const delegation = {
+      id: `delegation:${state.checkpointVersion}:${++state.delegationSequence}:${assigneeId}`,
+      type,
+      checkpointVersion: state.checkpointVersion,
+      assignedBy: ownership.ownerId,
+      assigneeId,
+      assigneeName: assignee.name,
+      task,
+      expectedEvidence,
+      allowedTools,
+      allowedPaths,
+      allowWorkspaceMutation,
+      status: "pending",
+      result: "",
+      handoffEvidence: [],
+      ownerAcknowledged: false
+    };
+    ownership.delegations.push(delegation);
+    added.push(delegation);
+  }
+  ownership.delegations = ownership.delegations.slice(-40);
+  if (added.length) {
+    state.lastAction = `delegated:${added.map((item) => item.id).join(",")}`;
+    state.nextAction = "Wait for the specifically delegated handoffs, then integrate their evidence yourself before advancing delivery.";
+  }
+}
+
+function completeWorkDelegation(state, delegation, agent, response = {}, session = {}) {
+  const handoff = response?.delegation_handoff;
+  const actualEvidence = collectDelegationEvidence(session, agent);
+  const unavailable = ["unavailable", "error"].includes(String(response?.status || ""));
+  if (unavailable) {
+    delegation.status = "failed";
+    delegation.result = String(response?.reason || "delegated_contributor_unavailable").slice(0, 600);
+  } else if (!handoff || handoff.delegation_id !== delegation.id) {
+    delegation.status = "failed";
+    delegation.result = "missing_or_mismatched_delegation_handoff";
+  } else {
+    delegation.status = "completed";
+    delegation.result = String(handoff.summary || "delegated_work_completed").slice(0, 600);
+    delegation.handoffEvidence = uniqueDelegationEvidence([
+      ...(handoff.evidence || []).map((item) => ({ kind: "reported", detail: String(item).slice(0, 500) })),
+      ...actualEvidence
+    ]);
+  }
+  delegation.ownerAcknowledged = false;
+  state.lastAction = `delegation_handoff:${delegation.id}:${delegation.status}`;
+  state.nextAction = hasOpenWorkDelegations(state)
+    ? "Wait for the remaining delegated handoffs."
+    : "Read every delegated handoff, use or correct its evidence, then continue the delivery as the owner.";
+  if (delegation.status === "failed") {
+    state.lastError = `Delegated ${delegation.type} work from ${agent.name} failed: ${delegation.result}`;
+  }
+}
+
+function acknowledgeWorkDelegationsForOwner(state, agent) {
+  if (agent?.id !== state.executorId || !hasUnacknowledgedWorkDelegations(state)) return;
+  const ownership = state.ownership = normalizeOwnership(state.ownership, state);
+  const handoffs = ownership.delegations.filter((item) => (
+    WORK_DELEGATION_TYPES.has(item.type)
+    && ["completed", "failed", "rejected", "superseded"].includes(item.status)
+    && item.ownerAcknowledged !== true
+  ));
+  for (const delegation of handoffs) {
+    delegation.ownerAcknowledged = true;
+    delegation.acknowledgedBy = agent.id;
+  }
+  if (handoffs.length) {
+    state.lastAction = `delegation_handoffs_received:${handoffs.map((item) => item.id).join(",")}`;
+    state.nextAction = "Integrate the delegated evidence yourself. Repair gaps or perform the next material action; only the owner may advance or finalize the delivery.";
+  }
+}
+
+function collectDelegationEvidence(session = {}, agent = {}) {
+  const sourceId = String(agent.id || "");
+  const toolEvidence = (session.toolExecutionResults || [])
+    .filter((item) => item?.source_agent_id === sourceId)
+    .slice(-6)
+    .map(checkpointEvidenceItem)
+    .filter(Boolean)
+    .map((item) => ({ kind: "tool", detail: `${item.tool}#${item.id} ${item.outcome || item.status}` }));
+  const fileEvidence = (session.fileOperationExecutionResults || [])
+    .filter((item) => item?.source_agent_id === sourceId)
+    .slice(-6)
+    .map(checkpointEvidenceItem)
+    .filter(Boolean)
+    .map((item) => ({ kind: "file", detail: `${item.tool}#${item.id} ${item.outcome || item.status}` }));
+  return [...toolEvidence, ...fileEvidence];
+}
+
+function uniqueDelegationEvidence(items = []) {
+  const seen = new Set();
+  return items.filter((item) => {
+    const key = `${item?.kind || ""}\u001f${item?.detail || ""}`;
+    if (!item?.detail || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).slice(0, 16);
+}
+
+function normalizeDelegationTools(value, type, allowWorkspaceMutation) {
+  const supplied = normalizeContractTextList(value).map((item) => item.toLowerCase().replace(/-/g, "_")).slice(0, 24);
+  if (supplied.length) return supplied;
+  if (type === "research") return DEFAULT_RESEARCH_TOOLS;
+  return allowWorkspaceMutation ? ["workspace_edit", "read_file", "list_directory", "search_files", "grep_content", "run_code", "run_tests"] : DEFAULT_RESEARCH_TOOLS;
+}
+
+function normalizeDelegationPaths(value) {
+  return normalizeContractTextList(value)
+    .map((item) => item.replace(/\\/g, "/").replace(/^\.\//, ""))
+    .filter((item) => item && !item.startsWith("/") && !item.includes(".."))
+    .slice(0, 16);
+}
+
+function formatDelegationHandoffsForOwner(state) {
+  const ownership = normalizeOwnership(state?.ownership, state || {});
+  const handoffs = ownership.delegations.filter((item) => (
+    WORK_DELEGATION_TYPES.has(item.type)
+    && ["completed", "failed", "rejected", "superseded"].includes(item.status)
+  )).slice(-8);
+  if (!handoffs.length) return "";
+  return [
+    "[Durable delegated handoffs]",
+    ...handoffs.map((item) => {
+      const evidence = (item.handoffEvidence || []).map((entry) => entry.detail).join(" | ");
+      return `${item.id} (${item.type}, ${item.status}, from ${item.assigneeName || item.assigneeId}): ${item.result || "no summary"}${evidence ? ` Evidence: ${evidence}` : ""}`;
+    })
+  ].join("\n");
 }
 
 function prepareReviewDelegations(state, agents = []) {

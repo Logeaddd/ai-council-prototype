@@ -28,7 +28,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { createObservationCache, hasMaterialWorkspaceChange } from "./observationCache.js";
-import { advanceExecutionState, createExecutionState, executionInstruction, requiresWorkspaceExecution, selectExecutionAgents } from "./executionState.js";
+import { activeDelegationForAgent, advanceExecutionState, createExecutionState, executionInstruction, requiresWorkspaceExecution, selectExecutionAgents } from "./executionState.js";
 import { nativeToolDefinitions } from "./nativeToolProtocol.js";
 import { readPublicEventHotCache } from "./publicEventJournal.js";
 import { appendTaskRunEvent, createTaskRun, readTaskRun, recordTaskRunArtifactVerification, recordTaskRunFileEvidence, recordTaskRunToolAttempts, syncTaskRunFromSession } from "./taskRuntime.js";
@@ -336,7 +336,10 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
       const seenToolTargets = new Set();
       const processResponseFileOperations = (currentResponse) => {
         const fileOperationResult = applyFilePermissionTier(
-          collectFileOperationProposals(currentResponse, agent, round, options.groupPath),
+          applyDelegationFileScope(
+            collectFileOperationProposals(currentResponse, agent, round, options.groupPath),
+            activeDelegationForAgent(session.executionState, agent)
+          ),
           fileOperationPermissionTier,
           options.appSettings
         );
@@ -476,6 +479,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
             ...session.toolExecutionResults.filter((item) => item.source_agent_id === agent.id),
             ...continuationVerifiedToolResults(continuationContext)
           ],
+          delegation: activeDelegationForAgent(session.executionState, agent),
           blockVerifiedContinuationCommands: Boolean(continuationContext && isPlainContinuationRequest(question))
         });
         accumulatedToolRequests.push(...toolResult.accepted);
@@ -2738,6 +2742,43 @@ function applyFilePermissionTier(fileOperationResult, tier, appSettings) {
       }))
     ]
   };
+}
+
+function applyDelegationFileScope(fileOperationResult, delegation) {
+  if (!delegation) return fileOperationResult;
+  const accepted = [];
+  const rejected = [...(fileOperationResult.rejected || [])];
+  for (const proposal of fileOperationResult.accepted || []) {
+    const op = String(proposal.op || "").toLowerCase();
+    const mutation = !["read", "list"].includes(op);
+    const requiredTool = op === "read" ? "read_file" : op === "list" ? "list_directory" : "workspace_edit";
+    const toolAllowed = delegation.allowedTools?.includes(requiredTool);
+    const insideScope = delegationPathAllowed(proposal.path, delegation.allowedPaths);
+    if (mutation && (!toolAllowed || !delegation.allowWorkspaceMutation || !insideScope)) {
+      rejected.push({
+        ...proposal,
+        code: "delegation_scope_denied",
+        reason: "This contributor may not mutate that path outside the owner's explicit delegation."
+      });
+    } else if (!mutation && !toolAllowed) {
+      rejected.push({
+        ...proposal,
+        code: "delegation_scope_denied",
+        reason: "This contributor's delegation does not authorize file observations."
+      });
+    } else {
+      accepted.push(proposal);
+    }
+  }
+  return { accepted, rejected };
+}
+
+function delegationPathAllowed(value, allowedPaths = []) {
+  const candidate = String(value || "").replace(/\\/g, "/").replace(/^\.\//, "");
+  return (allowedPaths || []).some((allowed) => {
+    const root = String(allowed || "").replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/+$/, "");
+    return root && (candidate === root || candidate.startsWith(`${root}/`));
+  });
 }
 
 function formatDisplayText(agent, response) {

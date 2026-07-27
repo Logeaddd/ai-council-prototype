@@ -230,9 +230,41 @@ Completed on 2026-07-27:
   verification requirements alongside the current phase and next action. This
   makes the durable contract operational during long tool loops instead of
   leaving the owner with an isolated next-action reminder.
+* Bounded delivery delegation is now implemented in the current worktree.
+  Only the durable delivery owner can issue a `research`, `implementation`,
+  or `unblocker` subtask, and every delegation records its assignee, narrow
+  task, expected handoff evidence, allowed tools, optional mutable paths,
+  checkpoint version, and lifecycle status. The scheduler calls only the
+  named contributor while that handoff is pending; it returns to the owner
+  after the contributor completes or fails. Contributors cannot independently
+  declare the overall task complete, and the runtime rejects file/tool writes
+  outside their explicit delegation scope. Their structured handoff plus
+  observed tool/file evidence becomes durable TaskRun and fallback
+  `task_state` data. The owner receives and acknowledges those handoffs in
+  its next context and remains the only member permitted to advance the final
+  delivery.
+* Local protocol regression now covers the complete `server.js` HTTP/SSE path
+  for owner -> bounded research contributor -> owner write/verification. It
+  proves one contributor handoff is persisted, only the owner writes the
+  final document, task recovery retains a pending delegation, and out-of-scope
+  contributor writes are rejected. The model endpoint in this regression is a
+  deterministic loopback fixture, so it is regression evidence only, not a
+  real Provider or real-user campaign pass.
+* Current-worktree verification after bounded delegation: `npm test` and the
+  product harness test child both reached 739 passed, 0 failed, and 1 Windows
+  platform skip out of 740 tests. The harness report is
+  `harness/reports/product-harness-2026-07-27T04-30-18-422Z.json`; it remains
+  honestly `incomplete` because T105 and T117 still require a paid
+  real-provider evidence window. Its retained evidence is 5/9 passing reports
+  (55.6 percent) against the required 75 percent, even though the latest
+  report for each current task family is passing.
 
 Still open before the real-provider release gate:
 
+* Exercise delegated research, implementation, review, and unblocker work
+  with real Providers across several project families. The local orchestration
+  test proves the path exists; it does not prove a provider will choose good
+  delegation boundaries or integrate evidence correctly under pressure.
 * Add PTY only where a real task proves interactive stdin is the blocker;
   absence alone is not evidence for a parallel terminal system.
 * Run the paid real-provider campaign with its mechanical oracles, distinct

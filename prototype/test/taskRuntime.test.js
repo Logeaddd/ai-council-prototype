@@ -245,6 +245,56 @@ test("task run records an explicit durable delivery-owner transfer", () => {
   assert.equal(event.payload.reason, "previous_owner_unavailable_during_resume");
 });
 
+test("task run preserves a pending bounded delegation through interruption and resume", () => {
+  const groupPath = workspace();
+  const execution = {
+    ...activeExecution("inspect"),
+    delegationSequence: 3,
+    ownership: {
+      ownerId: "builder",
+      ownerName: "Builder",
+      version: 1,
+      transfers: [],
+      delegations: [{
+        id: "delegation:0:3:researcher",
+        type: "research",
+        checkpointVersion: 0,
+        assignedBy: "builder",
+        assigneeId: "researcher",
+        assigneeName: "Researcher",
+        task: "Find the required format fact.",
+        expectedEvidence: ["Official source"],
+        allowedTools: ["web_search", "fetch_url"],
+        allowedPaths: [],
+        allowWorkspaceMutation: false,
+        status: "pending",
+        result: "",
+        handoffEvidence: [],
+        ownerAcknowledged: false
+      }]
+    }
+  };
+  const taskRun = createTaskRun({ groupPath, sessionId: "session-delegation-before", question: "Create a report.", session: { executionState: execution } });
+  const interrupted = syncTaskRunFromSession({
+    groupPath,
+    taskRun,
+    session: { id: "session-delegation-before", status: "interrupted", interruptionReason: "client_closed", executionState: execution }
+  });
+  const resumed = createTaskRun({
+    groupPath,
+    sessionId: "session-delegation-after",
+    question: "continue",
+    resumeTaskRunId: taskRun.id,
+    session: { executionState: interrupted.execution }
+  });
+  const delegation = resumed.execution.ownership.delegations[0];
+  assert.equal(resumed.execution.delegationSequence, 3);
+  assert.equal(delegation.status, "pending");
+  assert.equal(delegation.task, "Find the required format fact.");
+  assert.deepEqual(delegation.expectedEvidence, ["Official source"]);
+  assert.deepEqual(delegation.allowedTools, ["web_search", "fetch_url"]);
+});
+
 test("background process and artifact verification are durable TaskRun evidence", () => {
   const groupPath = workspace();
   const taskRun = createTaskRun({

@@ -43,6 +43,34 @@ test("controlled file tool requests list, read, search, and grep real workspace 
   assert.equal(fs.existsSync(path.join(tmp, "shared", "logs", "tools.jsonl")), true);
 });
 
+test("delegated contributors cannot write outside the owner's explicit tool and path scope", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-delegation-scope-"));
+  const result = await executeToolRequests({
+    permissionTier: "full",
+    groupPath: tmp,
+    agent: { id: "contributor", name: "Contributor" },
+    delegation: {
+      id: "delegation:1:1:contributor",
+      type: "research",
+      allowedTools: ["read_file"],
+      allowedPaths: [],
+      allowWorkspaceMutation: false
+    },
+    requests: [{
+      tool: "workspace_edit",
+      action: "write",
+      path: "shared/final.txt",
+      code: "unauthorized",
+      reason: "Try to write the final output."
+    }]
+  });
+
+  assert.equal(result.accepted.length, 0);
+  assert.equal(result.rejected.length, 1);
+  assert.equal(result.rejected[0].code, "delegation_scope_denied");
+  assert.equal(fs.existsSync(path.join(tmp, "shared", "final.txt")), false);
+});
+
 test("repeated unchanged file observations are bounded across tool loops", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-repeat-observation-"));
   fs.writeFileSync(path.join(tmp, "build.gradle"), "plugins {}\n", "utf8");

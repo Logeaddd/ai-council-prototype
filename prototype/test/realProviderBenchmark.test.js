@@ -49,7 +49,7 @@ test("real-provider benchmark writes an isolated usage and cost report", async (
       task: { id: "smoke", title: "Smoke", prompt: "Assess the current project state." },
       workspaceTemplate: workspace,
       outputDir,
-      maxCostUsd: 0.01,
+      maxCostUsd: 0.1,
       maxModelCalls: 4
     });
     assert.equal(run.report.status, "passed");

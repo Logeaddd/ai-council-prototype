@@ -144,6 +144,24 @@ export async function executeToolRequests(options = {}) {
       appendProcessAuditLog(options.groupPath, "rejected", rejection);
       continue;
     }
+    const delegationViolation = delegationScopeViolation(normalized, options.delegation);
+    if (delegationViolation) {
+      const rejection = reject(base, "delegation_scope_denied", delegationViolation);
+      rejected.push(rejection);
+      events.push(toolEvent("tool_failure", base, { status: "rejected", code: rejection.code, error: rejection.error }));
+      appendToolAuditLog(options.groupPath, "rejected", rejection);
+      appendCommandAuditLog(options.groupPath, "rejected", rejection);
+      appendCodeRunAuditLog(options.groupPath, "rejected", rejection);
+      appendPackageAuditLog(options.groupPath, "rejected", rejection);
+      appendTestAuditLog(options.groupPath, "rejected", rejection);
+      appendApiAuditLog(options.groupPath, "rejected", rejection);
+      appendGitAuditLog(options.groupPath, "rejected", rejection);
+      appendBrowserAuditLog(options.groupPath, "rejected", rejection);
+      appendDatabaseAuditLog(options.groupPath, "rejected", rejection);
+      appendMcpAuditLog(options.groupPath, "rejected", rejection);
+      appendProcessAuditLog(options.groupPath, "rejected", rejection);
+      continue;
+    }
     if (permissionTier === "text" && !CONTEXT_TOOLS.has(normalized.tool)) {
       const rejection = reject(base, "permission_denied", "Seat has text-only permission and cannot use tools.");
       rejected.push(rejection);
@@ -885,6 +903,37 @@ async function executeOne(request, options) {
       error: error.message || "tool request failed"
     });
   }
+}
+
+function delegationScopeViolation(request, delegation) {
+  if (!delegation) return "";
+  const allowedTools = new Set((delegation.allowedTools || []).map((item) => String(item || "").toLowerCase().replace(/-/g, "_")));
+  if (!allowedTools.has(request.tool)) {
+    return `The owner delegated only these tools to this contributor: ${[...allowedTools].join(", ") || "none"}.`;
+  }
+  if (!delegatedMutationRequest(request)) return "";
+  if (!delegation.allowWorkspaceMutation) {
+    return "This contributor has no workspace-mutation delegation. Return research evidence to the owner instead of changing outputs.";
+  }
+  if (request.tool === "workspace_edit" && !delegatedPathAllowed(request.path, delegation.allowedPaths)) {
+    return "The requested workspace path is outside this contributor's explicit delegation scope.";
+  }
+  return "";
+}
+
+function delegatedMutationRequest(request) {
+  if (["workspace_edit", "execute_command", "run_code", "install_package", "provision_tool", "run_tests", "git_operation", "create_archive", "extract_archive", "mcp_install_npm", "mcp_uninstall"].includes(request.tool)) return true;
+  if (request.tool === "database_query") return String(request.mode || "query").toLowerCase() !== "query" || Boolean(request.create);
+  if (request.tool === "process_control") return ["stop", "restart"].includes(String(request.action || "").toLowerCase());
+  return false;
+}
+
+function delegatedPathAllowed(value, allowedPaths = []) {
+  const candidate = String(value || "").replace(/\\/g, "/").replace(/^\.\//, "");
+  return (allowedPaths || []).some((allowed) => {
+    const root = String(allowed || "").replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/+$/, "");
+    return root && (candidate === root || candidate.startsWith(`${root}/`));
+  });
 }
 
 function normalizeToolRequest(item, index) {

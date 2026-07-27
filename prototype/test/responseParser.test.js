@@ -89,6 +89,41 @@ test("round response parser normalizes a semantic task contract", () => {
   });
 });
 
+test("round response parser keeps bounded owner delegations and contributor handoffs", () => {
+  const parsed = parseRoundResponse(JSON.stringify({
+    status: "speak",
+    argument: "Delegate one research fact.",
+    task_delegations: [{
+      type: "research",
+      assignee_id: "researcher",
+      task: "Find the official format requirement.",
+      expected_evidence: ["Official source URL", "One concise finding"],
+      allowed_tools: ["web-search", "fetch_url"],
+      allow_workspace_mutation: false
+    }],
+    delegation_handoff: {
+      delegation_id: "delegation:1:1:researcher",
+      summary: "The official requirement was found.",
+      evidence: ["https://example.test/official"]
+    }
+  }));
+
+  assert.deepEqual(parsed.task_delegations, [{
+    type: "research",
+    assignee_id: "researcher",
+    task: "Find the official format requirement.",
+    expected_evidence: ["Official source URL", "One concise finding"],
+    allowed_tools: ["web_search", "fetch_url"],
+    allowed_paths: [],
+    allow_workspace_mutation: false
+  }]);
+  assert.deepEqual(parsed.delegation_handoff, {
+    delegation_id: "delegation:1:1:researcher",
+    summary: "The official requirement was found.",
+    evidence: ["https://example.test/official"]
+  });
+});
+
 test("a skip response retains its semantic intake contract", () => {
   const parsed = parseRoundResponse(JSON.stringify({
     status: "skip",

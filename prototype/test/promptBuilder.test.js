@@ -271,8 +271,9 @@ test("round prompt advertises artifacts in speak schema", () => {
     role: "Executor"
   }, "Question", { messages: [] }, 1);
 
-  assert.match(messages[0].content, /suggested_revision, artifacts, file_operations, tool_requests, task_contract, confidence/);
+  assert.match(messages[0].content, /suggested_revision, artifacts, file_operations, tool_requests, task_contract, task_delegations, delegation_handoff, confidence/);
   assert.match(messages[0].content, /When the context labels you \[Task intake owner\], include task_contract exactly once/);
+  assert.match(messages[0].content, /Only an \[Execution owner\] may create bounded sub-work/);
   assert.match(messages[0].content, /only to request file work/);
   assert.match(messages[0].content, /Do not invent tool results/);
   assert.match(messages[0].content, /Do not use proposed_files/);

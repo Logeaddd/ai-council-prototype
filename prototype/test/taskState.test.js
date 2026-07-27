@@ -5,7 +5,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { buildContextPromptSections, buildMemberContext } from "../src/contextBuilder.js";
 import { formatTaskStateForPrompt, readTaskState, updateExecutionCheckpoint, updateTaskStateFromSession } from "../src/taskState.js";
-import { createExecutionState } from "../src/executionState.js";
+import { createExecutionState, selectExecutionAgents } from "../src/executionState.js";
 
 test("task state ledger records public final state without private chat", () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-task-state-"));
@@ -128,4 +128,61 @@ test("task state ledger persists a resumable execution checkpoint before finaliz
   assert.equal(resumed.taskContract.objective, "Build the requested project.");
   assert.equal(resumed.ownership.transfers[0].fromId, "old-builder");
   assert.equal(resumed.ownership.delegations[0].assigneeId, "reviewer");
+});
+
+test("fallback task-state recovery retains pending bounded work and schedules only its assignee", () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-delegation-checkpoint-"));
+  updateExecutionCheckpoint(tmp, {
+    id: "session_pending_delegation",
+    question: "Create the requested report.",
+    executionState: {
+      active: true,
+      taskQuestion: "Create the requested report.",
+      executorId: "builder",
+      executorName: "Builder",
+      delegationSequence: 4,
+      ownership: {
+        ownerId: "builder",
+        ownerName: "Builder",
+        version: 1,
+        transfers: [],
+        delegations: [{
+          id: "delegation:1:4:researcher",
+          type: "research",
+          checkpointVersion: 1,
+          assignedBy: "builder",
+          assigneeId: "researcher",
+          assigneeName: "Researcher",
+          task: "Find the official format fact.",
+          expectedEvidence: ["Official source URL"],
+          allowedTools: ["web_search"],
+          allowedPaths: [],
+          allowWorkspaceMutation: false,
+          status: "pending",
+          result: "",
+          handoffEvidence: [],
+          ownerAcknowledged: false
+        }]
+      },
+      taskContract: {
+        mode: "delivery",
+        objective: "Create the requested report.",
+        requires_workspace: true,
+        requires_verification: true,
+        deliverables: ["shared/report.txt"],
+        completion_criteria: ["Verify the report."],
+        next_action: "Use the delegated source fact."
+      },
+      phase: "inspect",
+      nextAction: "Use the delegated source fact.",
+      checkpointVersion: 1
+    }
+  });
+  const checkpoint = readTaskState(tmp).executionCheckpoint;
+  const agents = [{ id: "builder", name: "Builder", enabled: true }, { id: "researcher", name: "Researcher", enabled: true }];
+  const resumed = createExecutionState({ question: "continue", agents, previousState: checkpoint });
+
+  assert.equal(resumed.delegationSequence, 4);
+  assert.equal(resumed.ownership.delegations[0].task, "Find the official format fact.");
+  assert.deepEqual(selectExecutionAgents(resumed, agents).map((agent) => agent.id), ["researcher"]);
 });

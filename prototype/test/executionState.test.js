@@ -507,3 +507,68 @@ test("checkpoint reviews are durable delegated work and complete only after ever
   assert.equal(state.phase, "complete");
   assert.equal(state.reviewedCheckpointVersion, 1);
 });
+
+test("delivery owner delegates bounded work, receives a durable handoff, and remains the only final executor", () => {
+  const owner = { id: "owner", name: "Owner", role: "Builder", enabled: true };
+  const researcher = { id: "researcher", name: "Researcher", role: "Research", enabled: true };
+  const state = createExecutionState({
+    question: "Create and verify the requested document.",
+    agents: [owner, researcher],
+    workspaceGroup: { permissions: { defaultTier: "text", seatTiers: { owner: "full", researcher: "full" } } }
+  });
+  const session = { groupSnapshot: { agents: [owner, researcher] }, toolExecutionResults: [], fileOperationExecutionResults: [] };
+
+  advanceExecutionState({
+    state,
+    session,
+    agent: owner,
+    response: {
+      status: "speak",
+      task_contract: {
+        mode: "delivery",
+        objective: "Create and verify the requested document.",
+        requires_workspace: true,
+        requires_verification: true,
+        deliverables: ["shared/document.txt"],
+        completion_criteria: ["The document is written.", "A local check verifies it."],
+        next_action: "Collect one source fact before writing the document."
+      },
+      task_delegations: [{
+        type: "research",
+        assignee_id: "researcher",
+        task: "Find the one required source fact.",
+        expected_evidence: ["Source URL", "The fact to use"],
+        allowed_tools: ["web_search"],
+        allow_workspace_mutation: false
+      }]
+    }
+  });
+
+  const delegation = state.ownership.delegations.find((item) => item.type === "research");
+  assert.ok(delegation);
+  assert.deepEqual(selectExecutionAgents(state, [owner, researcher]).map((agent) => agent.id), ["researcher"]);
+  assert.match(executionInstruction(state, researcher), /Find the one required source fact/);
+  assert.match(executionInstruction(state, researcher), /no workspace-mutation delegation/);
+
+  advanceExecutionState({
+    state,
+    session,
+    agent: researcher,
+    response: {
+      status: "speak",
+      delegation_handoff: {
+        delegation_id: delegation.id,
+        summary: "The source confirms the required fact.",
+        evidence: ["https://example.test/source", "Required fact: verified"]
+      }
+    }
+  });
+  assert.equal(delegation.status, "completed");
+  assert.equal(delegation.ownerAcknowledged, false);
+  assert.deepEqual(selectExecutionAgents(state, [owner, researcher]).map((agent) => agent.id), ["owner"]);
+
+  advanceExecutionState({ state, session, agent: owner, response: { status: "speak", argument: "I will use the returned source fact." } });
+  assert.equal(delegation.ownerAcknowledged, true);
+  assert.match(executionInstruction(state, owner), /Durable delegated handoffs/);
+  assert.equal(state.executorId, "owner");
+});

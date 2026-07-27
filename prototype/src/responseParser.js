@@ -22,6 +22,8 @@ export function parseRoundModelResult(rawText, nativeToolCalls = []) {
     artifacts: [],
     file_operations: [],
     tool_requests: nativeRequests,
+    task_delegations: [],
+    delegation_handoff: undefined,
     confidence: undefined,
     memory_candidates: []
   };
@@ -61,6 +63,8 @@ export function parseRoundResponse(rawText) {
     file_operations: normalizeFileOperations(parsed.file_operations),
     tool_requests: normalizeToolRequests(parsed.tool_requests),
     task_contract: normalizeTaskContract(parsed.task_contract),
+    task_delegations: normalizeTaskDelegations(parsed.task_delegations ?? parsed.delegations),
+    delegation_handoff: normalizeDelegationHandoff(parsed.delegation_handoff ?? parsed.handoff),
     confidence: normalizeConfidence(parsed.confidence),
     memory_candidates: normalizeStringArray(parsed.memory_candidates)
   };
@@ -187,6 +191,46 @@ function normalizeTaskContract(value) {
     completion_criteria: normalizeStringArray(value.completion_criteria ?? value.completionCriteria).slice(0, 12),
     next_action: optionalString(value.next_action ?? value.nextAction) || ""
   };
+}
+
+function normalizeTaskDelegations(value) {
+  if (!Array.isArray(value)) return [];
+  const allowedTypes = new Set(["research", "implementation", "unblocker"]);
+  return value
+    .filter((item) => item && typeof item === "object" && !Array.isArray(item))
+    .map((item) => {
+      const type = String(item.type || "").trim().toLowerCase();
+      const assigneeId = optionalString(item.assignee_id ?? item.assigneeId);
+      const task = optionalString(item.task ?? item.question);
+      const expectedEvidence = normalizeStringArray(item.expected_evidence ?? item.expectedEvidence).slice(0, 8);
+      const allowedTools = normalizeStringArray(item.allowed_tools ?? item.allowedTools)
+        .map((tool) => tool.toLowerCase().replace(/-/g, "_"))
+        .slice(0, 24);
+      const allowedPaths = normalizeStringArray(item.allowed_paths ?? item.allowedPaths).slice(0, 16);
+      const allowWorkspaceMutation = Boolean(item.allow_workspace_mutation ?? item.allowWorkspaceMutation);
+      if (!allowedTypes.has(type) || !assigneeId || !task || !expectedEvidence.length) return undefined;
+      if (allowWorkspaceMutation && !allowedPaths.length) return undefined;
+      return {
+        type,
+        assignee_id: assigneeId,
+        task,
+        expected_evidence: expectedEvidence,
+        allowed_tools: allowedTools,
+        allowed_paths: allowedPaths,
+        allow_workspace_mutation: allowWorkspaceMutation
+      };
+    })
+    .filter(Boolean)
+    .slice(0, 4);
+}
+
+function normalizeDelegationHandoff(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const delegationId = optionalString(value.delegation_id ?? value.delegationId);
+  const summary = optionalString(value.summary);
+  const evidence = normalizeStringArray(value.evidence ?? value.handoff_evidence).slice(0, 12);
+  if (!delegationId || !summary || !evidence.length) return undefined;
+  return { delegation_id: delegationId, summary, evidence };
 }
 
 function normalizeStringArray(value) {

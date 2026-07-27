@@ -177,6 +177,7 @@ function normalizeExecutionCheckpoint(value, session = {}) {
     ownership: normalizeExecutionOwnership(value.ownership, value),
     taskContract: normalizeTaskContract(value.taskContract),
     intakeAttempts: Math.max(0, Number(value.intakeAttempts || 0)),
+    delegationSequence: Math.max(0, Number(value.delegationSequence || 0)),
     phase: String(value.phase || "inspect"),
     nextAction: String(value.nextAction || ""),
     checkpointVersion: Math.max(0, Number(value.checkpointVersion) || 0),
@@ -215,10 +216,25 @@ function normalizeExecutionOwnership(value, execution = {}) {
         assigneeId: String(item.assigneeId || ""),
         assigneeName: String(item.assigneeName || ""),
         status: String(item.status || "pending"),
-        result: String(item.result || "").slice(0, 120)
+        task: String(item.task || "").slice(0, 1200),
+        expectedEvidence: normalizeTextList(item.expectedEvidence || item.expected_evidence).slice(0, 8),
+        allowedTools: normalizeTextList(item.allowedTools || item.allowed_tools).slice(0, 24),
+        allowedPaths: normalizeTextList(item.allowedPaths || item.allowed_paths).slice(0, 16),
+        allowWorkspaceMutation: Boolean(item.allowWorkspaceMutation ?? item.allow_workspace_mutation),
+        result: String(item.result || "").slice(0, 600),
+        handoffEvidence: normalizeDelegationEvidence(item.handoffEvidence || item.handoff_evidence),
+        ownerAcknowledged: item.ownerAcknowledged === true,
+        acknowledgedBy: String(item.acknowledgedBy || "")
       })).slice(-40)
       : []
   };
+}
+
+function normalizeDelegationEvidence(value) {
+  return (Array.isArray(value) ? value : []).filter((item) => item && typeof item === "object").map((item) => ({
+    kind: String(item.kind || "reported").slice(0, 40),
+    detail: String(item.detail || "").slice(0, 500)
+  })).filter((item) => item.detail).slice(0, 16);
 }
 
 function normalizeCheckpointEvidence(value) {
