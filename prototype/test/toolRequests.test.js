@@ -921,6 +921,25 @@ test("execute_command default shell supports common shell operators", async () =
   assert.match(fs.readFileSync(path.join(tmp, "fallback.txt"), "utf8"), /FALLBACK_FACT/);
 });
 
+test("execute_command unwraps a complete nested PowerShell command so variables survive", { skip: process.platform !== "win32" }, async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-command-nested-powershell-"));
+  const result = await executeToolRequests({
+    permissionTier: "full",
+    groupPath: tmp,
+    requests: [{
+      tool: "execute_command",
+      shell: "powershell",
+      command: 'powershell -Command "$value = \'nested-ok\'; $value | Write-Output"',
+      reason: "Exercise redundant PowerShell wrapper recovery."
+    }]
+  });
+  assert.equal(result.results[0].status, "completed", JSON.stringify(result.results[0]));
+  assert.match(result.results[0].result.stdout, /nested-ok/);
+  assert.match(result.results[0].result.command, /^powershell -Command/);
+  assert.equal(result.results[0].result.executedCommand, "$value = 'nested-ok'; $value | Write-Output");
+  assert.match(result.results[0].result.environment.corrections.join("\n"), /Removed a redundant powershell -Command wrapper/);
+});
+
 test("execute_command explains bash shell failures on Windows", async (t) => {
   if (process.platform !== "win32") {
     t.skip("Windows-specific shell guidance");

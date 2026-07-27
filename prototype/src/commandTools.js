@@ -18,8 +18,10 @@ const MAX_OUTPUT_BYTES = 1024 * 1024;
 export async function executeCommandTool(request, options = {}) {
   const groupRoot = resolveGroupRoot(options.groupPath);
   const cwd = resolveCommandCwd(groupRoot, request.cwd || request.path || ".", options.importedProjectRoots);
-  const command = requiredText(request.command || request.query, "command");
+  const requestedCommand = requiredText(request.command || request.query, "command");
   const shell = normalizeShell(request.shell);
+  const normalizedCommand = normalizeRedundantPowerShellWrapper(requestedCommand, shell);
+  const command = normalizedCommand.command;
   const timeoutMs = clampNumber(request.timeoutMs || options.commandTimeoutMs || options.timeoutMs, DEFAULT_TIMEOUT_MS, MIN_TIMEOUT_MS, MAX_TIMEOUT_MS);
   const maxOutputBytes = clampNumber(request.maxOutputBytes || options.maxCommandOutputBytes, DEFAULT_MAX_OUTPUT_BYTES, 1024, MAX_OUTPUT_BYTES);
   const invocation = buildShellInvocation(command, shell);
@@ -37,6 +39,8 @@ export async function executeCommandTool(request, options = {}) {
       cwd,
       groupRoot,
       command,
+      requestedCommand,
+      commandCorrection: normalizedCommand.correction,
       shell,
       timeoutMs,
       maxOutputBytes,
@@ -54,6 +58,8 @@ export async function executeCommandTool(request, options = {}) {
     groupRoot,
     changeRoot,
     command,
+    requestedCommand,
+    commandCorrection: normalizedCommand.correction,
     shell,
     timeoutMs,
     maxOutputBytes,
@@ -224,7 +230,8 @@ function commandResult(options, state) {
   return {
     ok: Boolean(state.ok),
     source: "local_command_tool",
-    command: redactSecrets(options.command),
+    command: redactSecrets(options.requestedCommand || options.command),
+    executedCommand: options.commandCorrection ? redactSecrets(options.command) : undefined,
     shell: options.shell,
     cwd: relativeCwd(options.groupRoot, options.cwd),
     background: Boolean(state.background),
@@ -243,7 +250,10 @@ function commandResult(options, state) {
     environmentHint,
     environment: {
       pathAdditions: (options.runtime?.pathAdditions || []).map(displayPath),
-      corrections: (options.runtime?.corrections || []).map(redactEmbeddedHomePath)
+      corrections: [
+        ...(options.runtime?.corrections || []).map(redactEmbeddedHomePath),
+        ...(options.commandCorrection ? [options.commandCorrection] : [])
+      ]
     },
     workspaceChanges: state.workspaceChanges || options.workspaceChanges,
     code: state.code,
@@ -291,6 +301,20 @@ function normalizeShell(value) {
   const shell = String(value || "system").trim().toLowerCase();
   if (["system", "powershell", "cmd", "bash", "sh"].includes(shell)) return shell;
   return "system";
+}
+
+function normalizeRedundantPowerShellWrapper(command, shell) {
+  const original = String(command || "");
+  if (shell !== "powershell") return { command: original, correction: "" };
+  // execute_command already launches PowerShell for this shell. A complete
+  // nested `powershell -Command "..."` expands its double-quoted variables in
+  // the outer shell first, turning valid scripts into empty-pipeline errors.
+  const match = original.match(/^\s*(?:&\s*)?(?:powershell(?:\.exe)?|pwsh(?:\.exe)?)\s+(?:-NoProfile\s+)?(?:-ExecutionPolicy\s+\S+\s+)?-Command\s+"([\s\S]*)"\s*$/i);
+  if (!match?.[1]?.trim()) return { command: original, correction: "" };
+  return {
+    command: match[1],
+    correction: "Removed a redundant powershell -Command wrapper so the already-selected PowerShell shell preserves script variables."
+  };
 }
 
 function defaultSystemShell() {
