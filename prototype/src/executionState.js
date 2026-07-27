@@ -224,8 +224,8 @@ function applyTaskIntake(state, response = {}, session = {}) {
   if (response.status == null && !observedContract) return { delivery: false };
   const contract = normalizeTaskContract(response.task_contract) || observedContract;
   if (!contract) {
-    fallbackTaskIntakeToDiscussion(state);
-    return { delivery: false };
+    retainMissingTaskContractForOwner(state, response);
+    return { delivery: false, intakeRequired: true };
   }
   state.taskContract = contract;
   if (contract.mode === "discussion") {
@@ -246,46 +246,51 @@ function applyTaskIntake(state, response = {}, session = {}) {
   return { delivery: true };
 }
 
-function fallbackTaskIntakeToDiscussion(state) {
+function retainMissingTaskContractForOwner(state, response = {}) {
   state.intakeAttempts = Number(state.intakeAttempts || 0) + 1;
-  state.taskContract = {
-    mode: "discussion",
-    objective: "",
-    requiresWorkspace: false,
-    requiresVerification: false,
-    deliverables: [],
-    completionCriteria: [],
-    nextAction: "",
-    source: "missing_task_contract_fallback"
-  };
-  state.active = false;
-  state.phase = "discussion";
-  state.lastAction = "task_contract_missing_fallback";
-  state.nextAction = "The intake response did not declare a task contract or perform an action, so normal group discussion may proceed. A later real action will still be recorded as execution evidence.";
+  state.taskContract = undefined;
+  state.active = true;
+  state.phase = "intake";
+  state.lastAction = "task_contract_missing";
+  const status = String(response?.status || "missing");
+  state.lastError = status === "unavailable"
+    ? "The intake owner was unavailable before declaring a task contract."
+    : "The intake owner responded without a valid task contract or completed tool/file evidence.";
+  state.nextAction = "Return a complete task_contract now. Do not delegate, release other members, or restart planning. Explicitly choose mode=delivery or mode=discussion and include the objective, requirements, deliverables, completion criteria, and one concrete next action.";
 }
 
-function normalizeTaskContract(value) {
+export function normalizeTaskContract(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const mode = String(value.mode || "").trim().toLowerCase();
   if (mode !== "delivery" && mode !== "discussion") return undefined;
+  const objective = String(value.objective || "").trim().slice(0, 1200);
+  const deliverables = normalizeContractTextList(value.deliverables);
+  const completionCriteria = normalizeContractTextList(value.completion_criteria ?? value.completionCriteria);
+  const nextAction = String(value.next_action ?? value.nextAction ?? "").trim().slice(0, 1200);
+  const hasWorkspaceRequirement = Object.hasOwn(value, "requires_workspace") || Object.hasOwn(value, "requiresWorkspace");
+  const hasVerificationRequirement = Object.hasOwn(value, "requires_verification") || Object.hasOwn(value, "requiresVerification");
+  // A mode alone is not a semantic contract. Requiring these fields keeps an
+  // invalid provider reply with no work evidence from releasing delivery ownership.
+  if (!objective || !completionCriteria.length || !nextAction || !hasWorkspaceRequirement || !hasVerificationRequirement || (mode === "delivery" && !deliverables.length)) return undefined;
   return {
     mode,
-    objective: String(value.objective || "").trim().slice(0, 1200),
+    objective,
     requiresWorkspace: Boolean(value.requires_workspace ?? value.requiresWorkspace),
     requiresVerification: Boolean(value.requires_verification ?? value.requiresVerification),
-    deliverables: normalizeContractTextList(value.deliverables),
-    completionCriteria: normalizeContractTextList(value.completion_criteria ?? value.completionCriteria),
-    nextAction: String(value.next_action ?? value.nextAction ?? "").trim().slice(0, 1200),
+    deliverables,
+    completionCriteria,
+    nextAction,
     source: String(value.source || "model_task_contract")
   };
 }
 
 function inferContractFromObservedAction(response = {}, session = {}) {
-  const requests = Array.isArray(response.tool_requests) ? response.tool_requests : [];
-  const fileOperations = Array.isArray(response.file_operations) ? response.file_operations : [];
   const toolResults = Array.isArray(session.toolExecutionResults) ? session.toolExecutionResults : [];
   const fileResults = Array.isArray(session.fileOperationExecutionResults) ? session.fileOperationExecutionResults : [];
-  if (!requests.length && !fileOperations.length && !toolResults.length && !fileResults.length) return undefined;
+  // Requests are only intentions. Intake can be inferred only after the
+  // runtime records a real tool/file result, so a malformed reply cannot
+  // escape the single-owner intake phase by merely proposing an action.
+  if (!toolResults.length && !fileResults.length) return undefined;
   const workspaceMutationTools = new Set([
     "execute_command", "run_code", "install_package", "provision_tool",
     "create_archive", "extract_archive", "git_operation", "database_query"
@@ -293,12 +298,9 @@ function inferContractFromObservedAction(response = {}, session = {}) {
   return {
     mode: "delivery",
     objective: "",
-    requiresWorkspace: fileOperations.some(isWorkspaceMutation)
-      || fileResults.some(isWorkspaceMutation)
-      || requests.some((request) => isWorkspaceMutation(request) || workspaceMutationTools.has(String(request?.tool || "")))
+    requiresWorkspace: fileResults.some(isWorkspaceMutation)
       || toolResults.some((result) => isWorkspaceMutation(result) || workspaceMutationTools.has(String(result?.tool || ""))),
-    requiresVerification: requests.some((request) => ["run_tests", "run_code"].includes(String(request?.tool || "")))
-      || toolResults.some((result) => ["run_tests", "run_code"].includes(String(result?.tool || ""))),
+    requiresVerification: toolResults.some((result) => ["run_tests", "run_code"].includes(String(result?.tool || ""))),
     deliverables: [],
     completionCriteria: [],
     nextAction: "",

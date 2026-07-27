@@ -17,6 +17,18 @@ import { enableSkillForGroup, installSkillMarkdown } from "../src/skillPacks.js"
 import { writeTaskState } from "../src/taskState.js";
 import { createTaskRun, readTaskRun, readTaskRunEvents, syncTaskRunFromSession } from "../src/taskRuntime.js";
 
+function discussionTaskContract() {
+  return {
+    mode: "discussion",
+    objective: "Answer the current request without carrying out workspace delivery work.",
+    requires_workspace: false,
+    requires_verification: false,
+    deliverables: [],
+    completion_criteria: ["Give a substantive response grounded in the available context."],
+    next_action: "Contribute the current analysis to the group discussion."
+  };
+}
+
 
 test("running group sessions are saved before completion and refresh after each real message", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-live-history-"));
@@ -2138,6 +2150,7 @@ test("one member can complete more than twelve useful tool iterations without an
       writeOpenAiStream(res, JSON.stringify({
         status: "speak",
         argument: `Inspecting file ${memberCalls}.`,
+        task_contract: memberCalls === 1 ? discussionTaskContract() : undefined,
         tool_requests: [{ tool: "read_file", path: `fact-${memberCalls}.txt`, reason: `Read fact ${memberCalls}.` }],
         objections: [],
         confidence: 0.5,
@@ -2600,6 +2613,7 @@ test("independent work mode isolates ordinary member prompts at the provider bou
       "alpha-model": {
         status: "speak",
         argument: "ALPHA_PROVIDER_SECRET",
+        task_contract: discussionTaskContract(),
         objections: [],
         confidence: 0.8,
         memory_candidates: []
@@ -2743,7 +2757,8 @@ test("final_state is engine-controlled and unresolved blockers override judge pr
     const payloads = [
       {
         status: "skip",
-        reason: "No objection."
+        reason: "No objection.",
+        task_contract: discussionTaskContract()
       },
       {
         status: "speak",
@@ -2946,6 +2961,7 @@ test("finalizer-only judge skips round calls and non-blocking reviewer risk does
         status: "speak",
         position: "deliverable",
         argument: "Use a direct reduce implementation with an initial zero.",
+        task_contract: discussionTaskContract(),
         objections: [],
         suggested_revision: "function sumNumbers(numbers) { return numbers.reduce((sum, n) => sum + n, 0); }",
         confidence: 0.9,
@@ -3047,6 +3063,7 @@ test("ordinary answer counterarguments require a real follow-up skip before conv
         status: "speak",
         position: "answer",
         argument: "Freedom includes responsibility. Counterargument handled inside the answer.",
+        task_contract: discussionTaskContract(),
         objections: ["Responsibility might limit freedom, but this is already answered in the argument."],
         objection_items: [
           {
@@ -4084,7 +4101,8 @@ test("final judge core overflow falls back without provider call", async () => {
     }
     const payload = {
       status: "skip",
-      reason: "No objection."
+      reason: "No objection.",
+      task_contract: requestCount === 1 ? discussionTaskContract() : undefined
     };
     writeOpenAiStream(res, JSON.stringify(payload));
   });
@@ -4171,7 +4189,8 @@ test("final judge token budget falls back without final provider call", async ()
     }
     const payload = {
       status: "skip",
-      reason: "No objection."
+      reason: "No objection.",
+      task_contract: requestCount === 1 ? discussionTaskContract() : undefined
     };
     writeOpenAiStream(res, JSON.stringify(payload));
   });
@@ -4280,7 +4299,8 @@ test("final judge cost budget falls back without final provider call", async () 
     }
     const payload = {
       status: "skip",
-      reason: "No objection."
+      reason: "No objection.",
+      task_contract: requestCount === 1 ? discussionTaskContract() : undefined
     };
     writeOpenAiStream(res, JSON.stringify(payload));
   });
@@ -4572,7 +4592,11 @@ test("workspace round prompts gate file_operations by seat permission tier", asy
     requests.push(body);
     callCount += 1;
     if (callCount <= 3) {
-      writeOpenAiStream(res, JSON.stringify({ status: "skip", reason: "Prompt captured." }));
+      writeOpenAiStream(res, JSON.stringify({
+        status: "skip",
+        reason: "Prompt captured.",
+        task_contract: callCount === 1 ? discussionTaskContract() : undefined
+      }));
       return;
     }
     writeOpenAiStream(res, JSON.stringify({
@@ -5990,6 +6014,7 @@ test("round prompts use member context sections instead of full transcript repla
       {
         status: "speak",
         argument: "Builder delivered artifact.",
+        task_contract: discussionTaskContract(),
         objections: [],
         artifacts: [{ type: "code", title: "impl.js", content: "export const impl = true;" }],
         confidence: 0.8,
@@ -6381,6 +6406,7 @@ test("private boss messages are visible only to the addressed agent", async () =
     writeOpenAiStream(res, JSON.stringify({
       status: "skip",
       reason: "No objection.",
+      task_contract: requests.length === 1 ? discussionTaskContract() : undefined,
       memory_candidates: []
     }));
   });
@@ -6608,7 +6634,11 @@ test("explicit reviewer skip is forced in round one but ordinary critic may skip
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
     requests.push(JSON.parse(Buffer.concat(chunks).toString("utf8")));
-    writeOpenAiStream(res, JSON.stringify({ status: "skip", reason: "No objection." }));
+    writeOpenAiStream(res, JSON.stringify({
+      status: "skip",
+      reason: "No objection.",
+      task_contract: requests.length === 1 ? discussionTaskContract() : undefined
+    }));
   });
   await listen(server);
   const apiBaseUrl = "http://127.0.0.1:" + server.address().port + "/v1";
@@ -6955,6 +6985,7 @@ test("member semantic memory handles non-keyword language and reaches the next m
       writeOpenAiStream(res, JSON.stringify({
         status: "skip",
         reason: "No task objection.",
+        task_contract: discussionTaskContract(),
         memory_candidates: [directive]
       }));
       return;

@@ -655,6 +655,7 @@ async function callMockAgent(agent, messages, options) {
       argument: "The current direction is sound as long as the final synthesis preserves Red Team dissent.",
       objections: [],
       suggested_revision: "Use a dedicated final Judge call after the discussion loop.",
+      ...mockTaskContractForRound(agent, round),
       confidence: 0.82,
       memory_candidates: []
     }), options);
@@ -667,6 +668,7 @@ async function callMockAgent(agent, messages, options) {
       argument: "The prototype is worth building, but it must not claim debate automatically improves truth.",
       objections: round === 1 ? ["False convergence risk", "Provider timeout risk"] : ["Keep dissent visible in final output"],
       suggested_revision: "Treat Red Team dissent as preserved context rather than a blocker.",
+      ...mockTaskContractForRound(agent, round),
       confidence: 0.78,
       memory_candidates: []
     }), options);
@@ -685,10 +687,29 @@ async function callMockAgent(agent, messages, options) {
     argument: "A CLI-first prototype is the fastest way to validate configuration, discussion, consensus, and memory queues.",
     objections: [],
     suggested_revision: "Keep the first version local and inspectable.",
-    ...(round === 1 && agent.mockTaskContract ? { task_contract: agent.mockTaskContract } : {}),
+    ...mockTaskContractForRound(agent, round),
     confidence: 0.84,
     memory_candidates: ["P0 should stay CLI-first until the core loop works."]
   }), options);
+}
+
+function mockTaskContractForRound(agent, round) {
+  if (round !== 1) return {};
+  if (agent.mockTaskContract) return { task_contract: agent.mockTaskContract };
+  // The deterministic mock is a protocol fixture, so it must comply with the
+  // same intake contract as a real Provider. Its default task is discussion;
+  // delivery-specific tests declare mockTaskContract explicitly.
+  return {
+    task_contract: {
+      mode: "discussion",
+      objective: "Discuss the user's request without carrying out workspace work.",
+      requires_workspace: false,
+      requires_verification: false,
+      deliverables: [],
+      completion_criteria: ["Provide a substantive answer grounded in the available context."],
+      next_action: "Contribute the current analysis to the group discussion."
+    }
+  };
 }
 
 function emitMockText(text, options = {}) {

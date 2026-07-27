@@ -53,6 +53,45 @@ test("task run persists a canonical workspace binding and evidence event stream"
   assert.equal(readTaskRunEvents(groupPath, taskRun.id, { limit: null }).length, 2);
 });
 
+test("task run checkpoints preserve semantic intake state for an interrupted owner", () => {
+  const groupPath = workspace();
+  const execution = {
+    ...activeExecution("intake"),
+    taskQuestion: "Arbitrary-language delivery request.",
+    intakeAttempts: 1,
+    lastAction: "task_contract_missing",
+    lastError: "The intake owner responded without a valid task contract or completed tool/file evidence.",
+    taskContract: {
+      mode: "delivery",
+      objective: "Create the requested local artifact.",
+      requires_workspace: true,
+      requires_verification: true,
+      deliverables: ["shared/result.txt"],
+      completion_criteria: ["Verify the artifact with a local command."],
+      next_action: "Write the artifact."
+    }
+  };
+  const taskRun = createTaskRun({
+    groupPath,
+    sessionId: "session-intake",
+    question: execution.taskQuestion,
+    session: { executionState: execution }
+  });
+  const stored = readTaskRun(groupPath, taskRun.id);
+  assert.equal(stored.execution.taskQuestion, execution.taskQuestion);
+  assert.equal(stored.execution.intakeAttempts, 1);
+  assert.equal(stored.execution.taskContract.mode, "delivery");
+  assert.deepEqual(stored.execution.taskContract.deliverables, ["shared/result.txt"]);
+
+  const resumed = syncTaskRunFromSession({
+    groupPath,
+    taskRun: stored,
+    session: { id: "session-intake", status: "running", executionState: execution }
+  });
+  assert.equal(resumed.execution.taskContract.nextAction, "Write the artifact.");
+  assert.equal(resumed.execution.lastAction, "task_contract_missing");
+});
+
 test("task run records successful tool, verification, and workspace evidence by stable attempt id", () => {
   const groupPath = workspace();
   const taskRun = createTaskRun({

@@ -88,6 +88,39 @@ test("a discussion contract releases the normal group without pretending it is d
   assert.equal(state.taskContract.mode, "discussion");
 });
 
+test("a missing intake contract keeps the single owner in intake instead of releasing the group", () => {
+  const state = createExecutionState({ question: "Create the requested result in the requested location.", agents, workspaceGroup });
+  advanceExecutionState({
+    state,
+    session: { toolExecutionResults: [], fileOperationExecutionResults: [] },
+    agent: agents[1],
+    response: { status: "speak", argument: "I will investigate this request first." }
+  });
+  assert.equal(state.active, true);
+  assert.equal(state.phase, "intake");
+  assert.equal(state.executorId, "builder");
+  assert.equal(state.taskContract, undefined);
+  assert.equal(state.intakeAttempts, 1);
+  assert.equal(state.lastAction, "task_contract_missing");
+  assert.match(state.lastError, /without a valid task contract/i);
+  assert.match(state.nextAction, /complete task_contract/i);
+  assert.deepEqual(selectExecutionAgents(state, agents).map((agent) => agent.id), ["builder"]);
+});
+
+test("an incomplete task contract is not enough to release intake ownership", () => {
+  const state = createExecutionState({ question: "Do the requested task.", agents, workspaceGroup });
+  advanceExecutionState({
+    state,
+    session: { toolExecutionResults: [], fileOperationExecutionResults: [] },
+    agent: agents[1],
+    response: { status: "speak", task_contract: { mode: "delivery", objective: "Do it." } }
+  });
+  assert.equal(state.active, true);
+  assert.equal(state.phase, "intake");
+  assert.equal(state.intakeAttempts, 1);
+  assert.equal(state.taskContract, undefined);
+});
+
 test("Chinese report requests are delivery work owned by one full-permission executor", () => {
   const question = "帮我做一个关于我的世界兔子模组的调查报告，要完整全面，图文并茂，编辑在1个pdf文件里面，放在桌面上";
   const state = createExecutionState({ question, agents, workspaceGroup });

@@ -26,7 +26,19 @@ test("real-provider benchmark writes an isolated usage and cost report", async (
     const finalCall = JSON.stringify(body.messages || []).includes("FinalDecision JSON object");
     const text = finalCall
       ? JSON.stringify({ answer: "Verified.", consensus_score: 1, supporting_agents: ["Builder"], dissenting_agents: [], minority_report: "", risks: [], next_actions: [], selected_file_operation_ids: [], memory_candidates: [] })
-      : JSON.stringify({ status: "skip", reason: "No objection." });
+      : JSON.stringify({
+        status: "skip",
+        reason: "No objection.",
+        task_contract: {
+          mode: "discussion",
+          objective: "Assess the current project state.",
+          requires_workspace: false,
+          requires_verification: false,
+          deliverables: [],
+          completion_criteria: ["Provide the assessment."],
+          next_action: "Contribute the assessment to the final synthesis."
+        }
+      });
     writeOpenAiStream(res, text, { prompt_tokens: 20, completion_tokens: 5, total_tokens: 25 });
   });
   await listen(server);

@@ -89,6 +89,25 @@ test("round response parser normalizes a semantic task contract", () => {
   });
 });
 
+test("a skip response retains its semantic intake contract", () => {
+  const parsed = parseRoundResponse(JSON.stringify({
+    status: "skip",
+    reason: "No further discussion is needed.",
+    task_contract: {
+      mode: "discussion",
+      objective: "Discuss the current request.",
+      requires_workspace: false,
+      requires_verification: false,
+      deliverables: [],
+      completion_criteria: ["Provide an answer."],
+      next_action: "Allow the group discussion to continue."
+    }
+  }));
+  assert.equal(parsed.status, "skip");
+  assert.equal(parsed.task_contract.mode, "discussion");
+  assert.equal(parsed.task_contract.next_action, "Allow the group discussion to continue.");
+});
+
 test("round response parser preserves unavailable status", () => {
   const parsed = parseRoundResponse(JSON.stringify({
     status: "unavailable",

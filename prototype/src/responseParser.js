@@ -37,6 +37,7 @@ export function parseRoundResponse(rawText) {
       status: "skip",
       reason: String(parsed.reason || "No new objection."),
       resolved_ids: normalizeResolvedIds(parsed.resolved_ids),
+      task_contract: normalizeTaskContract(parsed.task_contract),
       memory_candidates: normalizeStringArray(parsed.memory_candidates)
     };
   }

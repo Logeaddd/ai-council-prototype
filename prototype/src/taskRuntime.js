@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { writeTextFileAtomically } from "./atomicFile.js";
 import { nowIso } from "./types.js";
+import { normalizeTaskContract } from "./executionState.js";
 
 export const TASK_RUN_SCHEMA = "ai-council.task-run.v1";
 export const TASK_RUN_EVENT_SCHEMA = "ai-council.task-run-event.v1";
@@ -518,6 +519,9 @@ function normalizeExecution(value = {}) {
     executorId: String(source.executorId || ""),
     executorName: String(source.executorName || ""),
     ownership: normalizeOwnership(source.ownership, source),
+    taskQuestion: String(source.taskQuestion || ""),
+    taskContract: normalizeTaskContract(source.taskContract),
+    intakeAttempts: Math.max(0, Number(source.intakeAttempts || 0)),
     phase: String(source.phase || ""),
     nextAction: String(source.nextAction || ""),
     checkpointVersion: Math.max(0, Number(source.checkpointVersion || 0)),
@@ -589,6 +593,9 @@ function mergeExecution(previous = {}, current = {}) {
   return normalizeExecution({
     ...prior,
     ...next,
+    taskQuestion: next.taskQuestion || prior.taskQuestion,
+    taskContract: next.taskContract ?? prior.taskContract,
+    intakeAttempts: next.intakeAttempts ?? prior.intakeAttempts,
     // Tool-owned process state must survive normal session checkpoints until
     // a later process-control result supersedes it.
     activeProcesses: prior.activeProcesses,

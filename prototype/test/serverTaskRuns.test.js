@@ -74,6 +74,72 @@ test("real server HTTP/SSE flow exposes durable TaskRun evidence from real local
   }
 });
 
+test("a malformed intake reply stays with its owner and becomes an honest incomplete run", async () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-server-intake-contract-"));
+  const groupPath = path.join(sandbox, "group");
+  fs.mkdirSync(groupPath, { recursive: true });
+  fs.writeFileSync(path.join(groupPath, "group.json"), JSON.stringify({
+    id: "server-intake-contract",
+    name: "Server Intake Contract",
+    permissions: { defaultTier: "text", seatTiers: { builder: "full", helper: "full" } },
+    seats: [
+      { seatId: "builder", displayName: "Builder", enabled: true, privateFolder: "members/Builder" },
+      { seatId: "helper", displayName: "Helper", enabled: true, privateFolder: "members/Helper" },
+      { seatId: "finalizer", displayName: "Finalizer", enabled: true, judge: true, privateFolder: "members/Finalizer" }
+    ]
+  }), "utf8");
+  const provider = await startMalformedIntakeProvider();
+  const port = await availablePort();
+  const child = spawn(process.execPath, [path.join(root, "src", "server.js")], {
+    cwd: root,
+    env: {
+      ...process.env,
+      AI_COUNCIL_DATA_DIR: path.join(sandbox, "data"),
+      AI_COUNCIL_WORKSPACE_ROOT: sandbox,
+      AI_COUNCIL_UI_PORT: String(port),
+      AI_COUNCIL_UI_HOST: "127.0.0.1",
+      AI_COUNCIL_LOCAL_API_TOKEN: localApiToken
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+    windowsHide: true
+  });
+  let output = "";
+  child.stdout.on("data", (chunk) => { output += chunk; });
+  child.stderr.on("data", (chunk) => { output += chunk; });
+
+  try {
+    await waitForServer(port, child, () => output);
+    const events = await requestSse(port, "/api/council/events", {
+      question: "Cree un resultado solicitado en la ubicacion solicitada y compruebelo.",
+      workspaceGroupPath: groupPath,
+      runtimeGroup: runtimeGroupWithHelper(provider.apiBaseUrl)
+    });
+    const messages = events.filter((event) => event.type === "agent_message");
+    assert.equal(messages.length, 2, JSON.stringify(messages));
+    assert.equal(messages.every((event) => event.message?.agentId === "builder"), true, JSON.stringify(messages));
+    assert.equal(events.some((event) => event.type === "tool_success" && event.agentId !== "builder"), false);
+    assert.equal(events.some((event) => event.type === "tool_success"), false);
+    const completed = events.find((event) => event.type === "done");
+    assert.equal(completed?.result?.session?.status, "incomplete", JSON.stringify(completed));
+    assert.equal(completed?.result?.session?.executionState?.phase, "intake");
+    assert.equal(completed?.result?.session?.executionState?.intakeAttempts, 2);
+    assert.equal(completed?.result?.session?.executionState?.lastAction, "task_contract_missing");
+
+    const taskEvent = events.find((event) => event.type === "task_run" && event.taskRun?.id);
+    assert.ok(taskEvent, "SSE must publish the blocked intake TaskRun");
+    const detail = await requestJson(port, `/api/task-runs/${encodeURIComponent(taskEvent.taskRun.id)}?groupPath=${encodeURIComponent(groupPath)}`, undefined, "GET");
+    assert.equal(detail.status, 200);
+    assert.equal(detail.body.taskRun.execution.phase, "intake");
+    assert.equal(detail.body.taskRun.execution.intakeAttempts, 2);
+    assert.match(detail.body.taskRun.execution.lastError, /without a valid task contract/i);
+  } finally {
+    child.kill();
+    await waitForExit(child);
+    await provider.close();
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+});
+
 test("an observer disconnect does not abort the background run and cursor replay returns only missing events", async () => {
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-server-run-replay-"));
   const groupPath = path.join(sandbox, "group");
@@ -166,6 +232,28 @@ function runtimeGroup(apiBaseUrl) {
   };
 }
 
+function runtimeGroupWithHelper(apiBaseUrl) {
+  const base = {
+    provider: "openai-compatible",
+    apiBaseUrl,
+    allowUnsafePrivateNetwork: true,
+    apiKey: "test-key",
+    model: "local-test-model",
+    weight: 1,
+    enabled: true
+  };
+  return {
+    id: "server-intake-contract",
+    name: "Server Intake Contract",
+    settings: { maxRounds: 2, minConsensusWeight: 1, stopWhenAllSkip: false, agentTimeoutMs: 5000, maxToolIterations: 6, allowSoloCouncil: true },
+    agents: [
+      { ...base, id: "builder", name: "Builder", role: "Builder" },
+      { ...base, id: "helper", name: "Helper", role: "Helper" },
+      { ...base, id: "finalizer", name: "Finalizer", role: "Finalizer", judge: true }
+    ]
+  };
+}
+
 async function startProvider(responseDelayMs = 0) {
   let builderStep = 0;
   const server = http.createServer(async (req, res) => {
@@ -184,6 +272,29 @@ async function startProvider(responseDelayMs = 0) {
       res.write(`data: ${chunk}\n\n`);
       res.end("data: [DONE]\n\n");
     }, responseDelayMs);
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  return {
+    apiBaseUrl: `http://127.0.0.1:${address.port}/v1`,
+    close: () => new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))
+  };
+}
+
+async function startMalformedIntakeProvider() {
+  const server = http.createServer(async (req, res) => {
+    const body = JSON.parse(await readBody(req));
+    const prompt = JSON.stringify(body.messages || []);
+    const payload = prompt.includes("FinalDecision JSON object")
+      ? finalDecision()
+      : { status: "speak", argument: "I will first think through the request.", objections: [], memory_candidates: [] };
+    const chunk = JSON.stringify({ choices: [{ delta: { content: JSON.stringify(payload) } }] });
+    res.writeHead(200, { "Content-Type": "text/event-stream" });
+    res.write(`data: ${chunk}\n\n`);
+    res.end("data: [DONE]\n\n");
   });
   await new Promise((resolve, reject) => {
     server.once("error", reject);

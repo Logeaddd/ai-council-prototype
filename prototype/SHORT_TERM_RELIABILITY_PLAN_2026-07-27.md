@@ -204,6 +204,19 @@ Completed on 2026-07-27:
   the evidence. The provider used by this test is a deterministic local
   protocol fixture, so this is local protocol evidence, not real-provider or
   real-user acceptance.
+* Intake ownership is hardened against malformed Provider replies. A normal
+  speech response without a complete semantic `task_contract` and without
+  recorded tool/file evidence now remains with the same intake owner; it does
+  not silently turn into a discussion or release other members to restart the
+  task. A contract must explicitly carry both workspace and verification
+  requirements, an objective, completion criteria, and a concrete next action
+  (plus deliverables for delivery work). `TaskRun` checkpoints now preserve
+  the task question, normalized contract, and intake-attempt count, so an
+  interrupted `continue` resumes the same interpretation rather than falling
+  back to legacy delivery guessing. The local HTTP/SSE regression confirms
+  two malformed intake turns produce one owner only and an honest
+  `incomplete` result. This remains local protocol evidence, not a paid
+  Provider campaign pass.
 
 Still open before the real-provider release gate:
 
