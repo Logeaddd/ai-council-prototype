@@ -272,6 +272,25 @@ Completed on 2026-07-27:
   `outcomeConformance=false`; it is not represented as a full task-quality
   pass. The run adds genuine physiology evidence only and does not itself
   prove that a real provider chooses or integrates a bounded delegation.
+* Unknown-tool provisioning now requires traceable discovery in `c5ba798`.
+  An unrecognised CLI or runtime must cite a publisher/platform URL that
+  matches a completed `web_search` result or exact `fetch_url` result before
+  installation. The persisted provenance records the bounded source tool ID
+  and exact/origin match, while already available PATH/managed tools may be
+  reused without repeated research. This is enforced at the real tool
+  boundary, fed back to the same delivery owner after failure, and covered by
+  local tool execution tests. The complete suite passed 752 of 753 tests with
+  0 failures and 1 Windows platform skip; the optimized renderer build passed.
+* Campaign pass accounting now applies the same capability-use receipt rule to
+  the overall passed-report count and pass rate in `821f779`. A historical
+  report that merely declares acquisition success cannot inflate the matrix
+  while failing its required capability family. The formal report at
+  `harness/reports/product-harness-2026-07-27T10-14-19-216Z.json` therefore
+  reports 7/10 (70 percent), not 8/10, and capability acquisition 0/3.
+  T105 and T117 remain incomplete; T106 and T119 are complete. This machine
+  currently has no `AI_COUNCIL_API_BASE_URL`, `AI_COUNCIL_API_KEY`, or
+  `AI_COUNCIL_MODEL` configured, so no new real-provider campaign was started
+  and no local evidence is represented as a replacement.
 
 Still open before the real-provider release gate:
 
