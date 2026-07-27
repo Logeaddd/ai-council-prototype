@@ -124,6 +124,33 @@ test("round response parser keeps bounded owner delegations and contributor hand
   });
 });
 
+test("round response parser retains structured contributor handoff evidence instead of discarding it", () => {
+  const parsed = parseRoundResponse(JSON.stringify({
+    status: "speak",
+    argument: "Research handoff complete.",
+    delegation_handoff: {
+      delegation_id: "delegation:0:1:critic",
+      summary: "Read the source file and extracted the release facts.",
+      evidence: {
+        source_filename: "inputs/release-research.txt",
+        facts: { release: "orion-8", window: "2026-Q1" },
+        encoding_notes: "plain UTF-8 key=value lines"
+      }
+    }
+  }));
+
+  assert.deepEqual(parsed.delegation_handoff, {
+    delegation_id: "delegation:0:1:critic",
+    summary: "Read the source file and extracted the release facts.",
+    evidence: [
+      "source_filename: inputs/release-research.txt",
+      "facts.release: orion-8",
+      "facts.window: 2026-Q1",
+      "encoding_notes: plain UTF-8 key=value lines"
+    ]
+  });
+});
+
 test("a skip response retains its semantic intake contract", () => {
   const parsed = parseRoundResponse(JSON.stringify({
     status: "skip",

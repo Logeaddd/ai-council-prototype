@@ -228,9 +228,42 @@ function normalizeDelegationHandoff(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const delegationId = optionalString(value.delegation_id ?? value.delegationId);
   const summary = optionalString(value.summary);
-  const evidence = normalizeStringArray(value.evidence ?? value.handoff_evidence).slice(0, 12);
+  const evidence = normalizeDelegationEvidence(value.evidence ?? value.handoff_evidence);
   if (!delegationId || !summary || !evidence.length) return undefined;
   return { delegation_id: delegationId, summary, evidence };
+}
+
+function normalizeDelegationEvidence(value) {
+  const entries = [];
+  collectDelegationEvidence(value, "", entries, 0);
+  return entries
+    .map((entry) => String(entry || "").trim())
+    .filter(Boolean)
+    .slice(0, 12);
+}
+
+function collectDelegationEvidence(value, label, entries, depth) {
+  if (entries.length >= 24 || depth > 4 || value === undefined || value === null) return;
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    const detail = String(value).trim();
+    if (detail) entries.push(label ? `${label}: ${detail}` : detail);
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const [index, item] of value.entries()) {
+      const itemLabel = label ? `${label}[${index}]` : (item && typeof item === "object" ? `[${index}]` : "");
+      collectDelegationEvidence(item, itemLabel, entries, depth + 1);
+      if (entries.length >= 24) break;
+    }
+    return;
+  }
+  if (typeof value === "object") {
+    for (const [key, item] of Object.entries(value).slice(0, 24)) {
+      const nextLabel = label ? `${label}.${key}` : key;
+      collectDelegationEvidence(item, nextLabel, entries, depth + 1);
+      if (entries.length >= 24) break;
+    }
+  }
 }
 
 function normalizeStringArray(value) {
