@@ -178,7 +178,7 @@ test("product harness can require real-provider bounded-delegation evidence", ()
     status: "passed",
     seed: 8,
     providerAcceptance: { realProvider: true, observedModelCalls: 3, blockedBeforeSendModelCalls: 0 },
-    scenario: { task: { id: "delegated-brief" } },
+    scenario: { task: { id: "delegated-brief", deliverable: "deliverables/release-brief.json" } },
     autonomousExecution: { passed: true, resumedAfterInterruption: true },
     minimumUsableDelivery: { passed: true },
     persistence: { passed: true },
@@ -190,6 +190,9 @@ test("product harness can require real-provider bounded-delegation evidence", ()
 
   report.collaboration = { required: true, passed: true };
   fs.writeFileSync(path.join(reportDir, "report.json"), JSON.stringify(report), "utf8");
+  assert.equal(evaluateProductHarness({ root, manifest, testEvidence: { status: "passed" } }).status, "incomplete", "a cached report field cannot substitute for persisted session evidence");
+
+  writeNativeResearchHandoffSession(reportDir, report.scenario.task.deliverable);
   assert.equal(evaluateProductHarness({ root, manifest, testEvidence: { status: "passed" } }).status, "complete");
 });
 
@@ -215,7 +218,7 @@ test("a bounded collaboration gate does not count unrelated campaign failures in
       seed: 8,
       completedAt,
       providerAcceptance: { realProvider: true, observedModelCalls: 3, blockedBeforeSendModelCalls: 0 },
-      scenario: { task: { id: taskId } },
+      scenario: { task: { id: taskId, deliverable: "deliverables/release-brief.json" } },
       autonomousExecution: { passed: status === "passed", resumedAfterInterruption: status === "passed" },
       minimumUsableDelivery: { passed: status === "passed" },
       persistence: { passed: status === "passed" },
@@ -223,6 +226,7 @@ test("a bounded collaboration gate does not count unrelated campaign failures in
       sessions: { interrupted: status === "passed" ? [{ id: `interrupted-${taskId}` }] : [] },
       collaboration: { required: true, passed: collaboration }
     }), "utf8");
+    if (collaboration) writeNativeResearchHandoffSession(dir, "deliverables/release-brief.json");
   };
   writeReport("delegated-pass", "delegated-brief", "passed", "2026-07-27T00:00:00.000Z", true);
   writeReport("unrelated-failure", "zip-archive", "failed", "2026-07-27T00:01:00.000Z");
@@ -235,6 +239,32 @@ test("a bounded collaboration gate does not count unrelated campaign failures in
   assert.equal(gate.evidence.evaluatedReports, 1);
   assert.equal(gate.evidence.passRate, 1);
 });
+
+function writeNativeResearchHandoffSession(reportDir, targetFile) {
+  const sessionDir = path.join(reportDir, "data", "workspace-ui", "campaign-group", "sessions");
+  fs.mkdirSync(sessionDir, { recursive: true });
+  const delegation = {
+    id: "delegation:1:1:critic",
+    type: "research",
+    assignedBy: "builder",
+    assigneeId: "critic",
+    allowWorkspaceMutation: false,
+    native: true,
+    createdAt: "2026-07-27T00:00:00.000Z",
+    status: "completed",
+    ownerAcknowledged: true,
+    handoffEvidence: [{ kind: "tool", detail: "read_file#critic-read completed" }]
+  };
+  fs.writeFileSync(path.join(sessionDir, "session-native-delegation.json"), JSON.stringify({
+    id: "session-native-delegation",
+    createdAt: "2026-07-27T00:01:00.000Z",
+    executionState: { ownership: { delegations: [delegation] } },
+    toolExecutionResults: [
+      { id: "critic-read", tool: "read_file", status: "completed", createdAt: "2026-07-27T00:00:01.000Z", source_agent_id: "critic", result: { ok: true } },
+      { id: "owner-write", tool: "workspace_edit", status: "completed", createdAt: "2026-07-27T00:00:02.000Z", source_agent_id: "builder", path: targetFile, result: { ok: true, path: targetFile } }
+    ]
+  }), "utf8");
+}
 
 test("product harness requires a real multi-family matrix and cannot count repeated seeds or fabricated acquisition", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-product-campaign-matrix-"));

@@ -2,6 +2,7 @@ import { spawn, spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { verifyCampaignCollaboration } from "./realUserHarness.js";
 
 export function runProductHarnessCheck(options = {}) {
   const root = path.resolve(options.root || process.cwd());
@@ -102,7 +103,6 @@ function evaluateRealUserCampaignGate(root, gate, base) {
     && report.recovery?.passed === true
     && hasCompleteContinuationEvidence(report)
     && Number(report.providerAcceptance?.observedModelCalls || report.sessions?.modelCalls || 0) > 0
-    && (gate.requireDelegationEvidence !== true || report.collaboration?.passed === true)
     && campaignReportPassesGate(report, gate, { reportPath: filePath })
   ));
   const defaultMinimumFamilyAttempts = positiveInteger(gate.minimumAttemptsPerFamily, 1);
@@ -165,6 +165,12 @@ function evaluateRealUserCampaignGate(root, gate, base) {
       minimumDistinctSeeds,
       evidenceWindowPerTask: optionalPositiveInteger(gate.evidenceWindowPerTask),
       requireDelegationEvidence: gate.requireDelegationEvidence === true,
+      delegationEvidence: gate.requireDelegationEvidence === true
+        ? evidenceReports.map(({ report, filePath }) => ({
+          report: path.relative(root, filePath).replaceAll("\\", "/"),
+          ...currentCampaignDelegationEvidence(report, { reportPath: filePath })
+        }))
+        : [],
       passRate,
       minimumPassRate,
       requireLatestPerTaskPass: gate.requireLatestPerTaskPass === true,
@@ -219,8 +225,55 @@ function latestCampaignTaskEvidence(reports, root, gate = {}) {
 
 function campaignReportPassesGate(report = {}, gate = {}, options = {}) {
   return report.status === "passed"
-    && (gate.requireDelegationEvidence !== true || report.collaboration?.passed === true)
+    && (gate.requireDelegationEvidence !== true || currentCampaignDelegationEvidence(report, options).passed === true)
     && (!campaignTaskRequiresAcquisitionEvidence(report, gate) || hasCurrentCapabilityUseEvidence(report, options));
+}
+
+function currentCampaignDelegationEvidence(report = {}, options = {}) {
+  const reportPath = String(options.reportPath || "");
+  const targetFile = String(report?.scenario?.task?.deliverable || "").trim();
+  if (!reportPath || !targetFile) {
+    return {
+      required: true,
+      passed: false,
+      checks: [campaignEvidenceCheck("durable_campaign_sessions", false, "missing_report_path_or_task_deliverable")]
+    };
+  }
+
+  const reportDir = path.dirname(reportPath);
+  const sessionRoot = path.resolve(reportDir, "data", "workspace-ui", "campaign-group", "sessions");
+  if (!isPathWithin(sessionRoot, reportDir) || !fs.existsSync(sessionRoot) || !fs.statSync(sessionRoot).isDirectory()) {
+    return {
+      required: true,
+      passed: false,
+      checks: [campaignEvidenceCheck("durable_campaign_sessions", false, "persisted_campaign_sessions_missing")]
+    };
+  }
+
+  const sessions = fs.readdirSync(sessionRoot, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
+    .sort((left, right) => left.name.localeCompare(right.name))
+    .flatMap((entry) => {
+      try {
+        const session = JSON.parse(fs.readFileSync(path.join(sessionRoot, entry.name), "utf8"));
+        return session && typeof session === "object" ? [session] : [];
+      } catch {
+        return [];
+      }
+    });
+  if (!sessions.length) {
+    return {
+      required: true,
+      passed: false,
+      checks: [campaignEvidenceCheck("durable_campaign_sessions", false, "no_readable_session_records")]
+    };
+  }
+
+  return verifyCampaignCollaboration({ requiresDelegation: true, file: targetFile }, sessions);
+}
+
+function campaignEvidenceCheck(id, passed, evidence) {
+  return { id, passed, evidence };
 }
 
 function campaignTaskRequiresAcquisitionEvidence(report = {}, gate = {}) {
