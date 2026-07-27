@@ -143,6 +143,16 @@ Completed on 2026-07-27:
   not provider reasoning, collaboration, or delivery completion.
   After the production renderer build, the probe passed three consecutive
   isolated Electron runs; the existing drag/drop Electron probe also passed.
+* Product harness rerun at `3dbc510` produced
+  `harness/reports/product-harness-2026-07-27T01-26-09-820Z.json`.
+  Its embedded full suite passed 724 of 725 tests with 0 failures and 1
+  platform skip. T106 remains complete at 7/7 gates; T105 is 6/7 and T117 is
+  2/3 because the real-provider campaign window remains 5/9 (55.6 percent),
+  below the 75 percent gate. The latest report for each of five required task
+  families is passing, but that does not erase four historical failed reports.
+  No `AI_COUNCIL_API_BASE_URL`, `AI_COUNCIL_API_KEY`, or
+  `AI_COUNCIL_MODEL` was configured for a new paid-window run, so this report
+  is a local re-evaluation of retained evidence, not new Provider evidence.
 * Native provider-tool schemas now have regression coverage in `3760bd5` for
   retaining `discoverySourceUrl` and `discoveryQuery` through the closed
   schema and request-normalization path. The follow-up full suite passed
