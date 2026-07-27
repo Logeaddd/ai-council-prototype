@@ -135,6 +135,13 @@ Completed on 2026-07-27:
   schema and request-normalization path. The follow-up full suite passed
   721 tests with 0 failures and 1 platform skip. This is local protocol
   evidence only; it does not increase the real-provider campaign pass rate.
+* Windows command recovery now handles the complete redundant
+  `powershell -Command "..."` form in `439113a`. When the request already
+  selected `shell=powershell`, the tool runs the inner script directly so
+  PowerShell variables cannot be expanded away by an outer wrapper. The result
+  retains both the requested and executed commands plus an explicit correction
+  record. An actual Windows variable-preservation test and the full suite
+  passed 722 tests with 0 failures and 1 platform skip.
 
 Still open before the real-provider release gate:
 
