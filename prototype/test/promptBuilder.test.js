@@ -289,7 +289,7 @@ test("round prompt advertises artifacts in speak schema", () => {
   assert.match(messages[0].content, /With shell=powershell, provide the PowerShell script directly/);
   assert.match(messages[0].content, /publisher SHA-256/);
   assert.match(messages[0].content, /discoverySourceUrl/);
-  assert.match(messages[0].content, /Discovery evidence is not a trust guarantee/);
+  assert.match(messages[0].content, /Discovery provenance is not a trust guarantee/);
   assert.match(messages[0].content, /api_request/);
   assert.match(messages[0].content, /search saved public group history/);
   assert.match(messages[0].content, /search_context/);

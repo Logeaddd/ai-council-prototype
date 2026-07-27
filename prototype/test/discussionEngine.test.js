@@ -124,7 +124,7 @@ test("unknown tool source failures require researched acquisition evidence inste
   }]);
   assert.match(instruction, /Request web_search now/);
   assert.match(instruction, /discoverySourceUrl/);
-  assert.match(instruction, /do not repeat an empty provision_tool request/i);
+  assert.match(instruction, /source must match completed web_search\/fetch_url evidence/i);
 });
 
 test("continuation restores the durable TaskRun checkpoint before older session caches", async () => {

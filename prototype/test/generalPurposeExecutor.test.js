@@ -9,6 +9,7 @@ import { enforceRequestedArtifactRequirements } from "../src/deliverableVerifica
 test("general-purpose executor matrix provisions tools and verifies source data document and package outputs", async () => {
   const groupPath = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-general-matrix-"));
   const minimalPdfBase64 = "JVBERi0xLjQKMSAwIG9iago8PCAvVHlwZSAvQ2F0YWxvZyAvUGFnZXMgMiAwIFIgPj4KZW5kb2JqCjIgMCBvYmoKPDwgL1R5cGUgL1BhZ2VzIC9LaWRzIFszIDAgUl0gL0NvdW50IDEgPj4KZW5kb2JqCjMgMCBvYmoKPDwgL1R5cGUgL1BhZ2UgL1BhcmVudCAyIDAgUiAvTWVkaWFCb3ggWzAgMCAyMDAgMjAwXSAvQ29udGVudHMgNCAwIFIgPj4KZW5kb2JqCjQgMCBvYmoKPDwgL0xlbmd0aCAwID4+CnN0cmVhbQoKZW5kc3RyZWFtCmVuZG9iagp4cmVmCjAgNQowMDAwMDAwMDAwIDY1NTM1IGYgCjAwMDAwMDAwMDkgMDAwMDAgbiAKMDAwMDAwMDA1OCAwMDAwMCBuIAowMDAwMDAwMTE1IDAwMDAwIG4gCjAwMDAwMDAyMDIgMDAwMDAgbiAKdHJhaWxlcgo8PCAvU2l6ZSA1IC9Sb290IDEgMCBSID4+CnN0YXJ0eHJlZgoyNTEKJSVFT0YK";
+  const discoverySourceUrl = "http://127.0.0.1:1/docmaker-install";
   const installCommand = process.platform === "win32"
     ? `$p='shared/tools/docmaker/bin'; New-Item -ItemType Directory -Force -Path $p | Out-Null; Set-Content -Path "$p/docmaker.cmd" -Value @('@echo off','node -e "require(''fs'').writeFileSync(process.argv[1], Buffer.from(''${minimalPdfBase64}'',''base64''))" %1')`
     : `mkdir -p shared/tools/docmaker/bin && printf '%s\\n' '#!/usr/bin/env node' 'require("fs").writeFileSync(process.argv[2], Buffer.from("${minimalPdfBase64}", "base64"));' > shared/tools/docmaker/bin/docmaker && chmod +x shared/tools/docmaker/bin/docmaker`;
@@ -18,12 +19,20 @@ test("general-purpose executor matrix provisions tools and verifies source data 
     groupPath,
     agent: { id: "executor", name: "Executor" },
     round: 1,
+    previousResults: [{
+      id: "tool_web_search_docmaker",
+      tool: "web_search",
+      status: "completed",
+      result: { results: [{ url: discoverySourceUrl, title: "Docmaker publisher installation" }] }
+    }],
     requests: [{
       tool: "provision_tool",
       toolName: "docmaker",
       commandName: "docmaker",
       installCommand,
       shell: process.platform === "win32" ? "powershell" : "sh",
+      discoverySourceUrl,
+      discoveryQuery: "docmaker publisher installation",
       verifyCommand: process.platform === "win32" ? "& docmaker shared/tools/docmaker/probe.pdf; if (!(Test-Path shared/tools/docmaker/probe.pdf)) { exit 1 }" : "docmaker shared/tools/docmaker/probe.pdf && test -s shared/tools/docmaker/probe.pdf",
       reason: "Acquire the missing document generator."
     }]

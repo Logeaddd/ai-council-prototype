@@ -27,7 +27,10 @@ export async function provisionTool(request, options = {}) {
   const key = normalizeKey(name);
   const known = KNOWN_TOOLS[key] || {};
   const command = requiredText(request.commandName || request.executable || known.command || name, "command name");
-  const discovery = await resolveDiscoveryEvidence(request);
+  const discoveryOptions = {
+    requiresDiscoveryTrace: Boolean(options.requireDiscoveryTrace) && Object.keys(known).length === 0,
+    discoveryTrace: options.discoveryTrace
+  };
   const managedRoot = path.join(groupRoot, "shared", "tools");
   const installRoot = path.join(managedRoot, safeSegment(key || command));
   fs.mkdirSync(installRoot, { recursive: true });
@@ -47,6 +50,7 @@ export async function provisionTool(request, options = {}) {
     installRoot
   );
   if (before.ok) {
+    const discovery = await resolveDiscoveryEvidence(request, { ...discoveryOptions, requiresDiscoveryTrace: false });
     return provisionResult({
       name,
       command,
@@ -55,6 +59,8 @@ export async function provisionTool(request, options = {}) {
       provenance: attachDiscoveryEvidence(prior?.provenance || systemPathProvenance(command), discovery)
     });
   }
+
+  const discovery = await resolveDiscoveryEvidence(request, discoveryOptions);
 
   const strategy = chooseStrategy(request, known, installRoot);
   if (!strategy.type || strategy.type === "unavailable") {
@@ -410,6 +416,7 @@ function safeProvenance(value) {
     discoverySourceUrl: safeProvenanceUrl(source.discoverySourceUrl),
     discoveryQuery: String(source.discoveryQuery || "").slice(0, 240),
     discoveryMethod: String(source.discoveryMethod || "").slice(0, 80),
+    discoveryTrace: safeDiscoveryTrace(source.discoveryTrace),
     redirects: Array.isArray(source.redirects) ? source.redirects.map(safeProvenanceUrl).filter(Boolean).slice(0, MAX_REDIRECTS) : [],
     transport: String(source.transport || ""),
     contentType: String(source.contentType || "").slice(0, 240),
@@ -424,17 +431,30 @@ function safeProvenance(value) {
   };
 }
 
-async function resolveDiscoveryEvidence(request) {
+async function resolveDiscoveryEvidence(request, options = {}) {
   const source = String(request.discoverySourceUrl || request.discovery_source_url || "").trim();
-  if (!source) return {};
+  if (!source) {
+    if (options.requiresDiscoveryTrace) {
+      throw toolError("tool_source_required", "An unknown tool requires a publisher or platform source URL found through web_search or fetch_url before installation.");
+    }
+    return {};
+  }
   try {
+    const safeSource = safeProvenanceUrl(await assertSafeDownloadUrl(source));
+    const trace = safeDiscoveryTrace(options.discoveryTrace);
+    if (options.requiresDiscoveryTrace && (!trace.sourceTool || !trace.sourceId || !trace.match)) {
+      throw toolError("discovery_evidence_missing", "The unknown tool source must match a completed web_search result or an exact completed fetch_url before installation.");
+    }
     return {
-      discoverySourceUrl: safeProvenanceUrl(await assertSafeDownloadUrl(source)),
+      discoverySourceUrl: safeSource,
       discoveryQuery: String(request.discoveryQuery || request.discovery_query || request.toolName || request.name || "").trim().slice(0, 240),
-      discoveryMethod: "agent_web_research"
+      discoveryMethod: "agent_web_research",
+      ...(trace.sourceTool ? { discoveryTrace: trace } : {})
     };
   } catch (error) {
-    error.code = "unsafe_discovery_source";
+    if (!['tool_source_required', 'discovery_evidence_missing'].includes(error.code)) {
+      error.code = "unsafe_discovery_source";
+    }
     throw error;
   }
 }
@@ -442,6 +462,17 @@ async function resolveDiscoveryEvidence(request) {
 function attachDiscoveryEvidence(provenance, discovery) {
   if (!discovery?.discoverySourceUrl) return provenance;
   return { ...(provenance || {}), ...discovery };
+}
+
+function safeDiscoveryTrace(value) {
+  const trace = value && typeof value === "object" ? value : {};
+  const sourceTool = String(trace.sourceTool || "");
+  const match = String(trace.match || "");
+  return {
+    sourceTool: ["web_search", "fetch_url"].includes(sourceTool) ? sourceTool : "",
+    sourceId: String(trace.sourceId || "").replace(/[^A-Za-z0-9_.:-]/g, "").slice(0, 160),
+    match: ["exact_url", "same_origin"].includes(match) ? match : ""
+  };
 }
 
 function systemPathProvenance(command) {

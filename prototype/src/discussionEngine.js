@@ -2532,7 +2532,7 @@ export function buildToolFollowupInstruction(results = [], rejected = []) {
   const completed = (Array.isArray(results) ? results : []).filter((item) => item?.status === "completed" && item.result?.ok !== false);
   const failedCommands = (Array.isArray(results) ? results : []).filter((item) => item?.tool === "execute_command" && item?.status === "failed");
   const failedManagedInstalls = (Array.isArray(results) ? results : []).filter((item) => item?.tool === "install_package" && item?.status === "failed");
-  const sourceRequiredProvisions = (Array.isArray(results) ? results : []).filter((item) => item?.tool === "provision_tool" && item?.status === "failed" && ["tool_source_required", "unsafe_discovery_source"].includes(item?.code));
+  const sourceRequiredProvisions = (Array.isArray(results) ? results : []).filter((item) => item?.tool === "provision_tool" && item?.status === "failed" && ["tool_source_required", "unsafe_discovery_source", "discovery_evidence_missing"].includes(item?.code));
   const failedSkillReads = (Array.isArray(results) ? results : []).filter((item) => item?.tool === "skill_read" && item?.status === "failed");
   const invalidSkillRequests = (Array.isArray(rejected) ? rejected : []).filter((item) => item?.code === "invalid_tool" && /^skill(?::|$)/i.test(String(item.tool || "")));
   if (failedCommands.length) {
@@ -2545,7 +2545,7 @@ export function buildToolFollowupInstruction(results = [], rejected = []) {
   }
   for (const item of sourceRequiredProvisions) {
     const tool = item.toolName || item.commandName || "the missing tool";
-    lines.push(`Provisioning ${JSON.stringify(tool)} has no safe acquisition source yet. Request web_search now for the publisher's or platform package manager's installation page, then make a materially different provision_tool request with manager/packageId or HTTPS downloadUrl, discoverySourceUrl set to the page you used, discoveryQuery set to the search terms, and SHA-256 when the publisher provides one. A discovery URL is evidence only, not a substitute for download integrity verification; do not repeat an empty provision_tool request or run an arbitrary copied shell script.`);
+    lines.push(`Provisioning ${JSON.stringify(tool)} lacks a traceable acquisition source. Request web_search now for the publisher's or platform package manager's installation page, or fetch the exact public page, then make a materially different provision_tool request with manager/packageId or HTTPS downloadUrl, discoverySourceUrl set to that observed source, discoveryQuery set to the search terms, and SHA-256 when the publisher provides one. The source must match completed web_search/fetch_url evidence. It is discovery provenance only, not a substitute for download integrity verification; do not repeat an empty request or run an arbitrary copied shell script.`);
   }
   for (const item of failedSkillReads) {
     const skillId = item.skillId || "the requested skill";

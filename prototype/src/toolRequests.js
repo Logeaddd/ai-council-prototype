@@ -288,7 +288,7 @@ export async function executeToolRequests(options = {}) {
     const startEvent = toolEvent("tool_start", base, { status: "running" });
     events.push(startEvent);
     publishLiveToolStart(options, startEvent);
-    const result = await executeOne(base, options);
+    const result = await executeOne(base, { ...options, currentResults: results });
     attachCapabilityUsage(result, base, [...(options.previousResults || []), ...results]);
     results.push(result);
     if (result.status === "completed" && isObservationRequest(base)) {
@@ -448,6 +448,51 @@ function dedupeCapabilityUsage(items) {
     seen.add(key);
     return true;
   });
+}
+
+function discoveryTraceForProvision(request = {}, priorResults = []) {
+  const source = normalizedDiscoveryUrl(request.discoverySourceUrl || request.discovery_source_url);
+  if (!source) return undefined;
+  for (const item of Array.isArray(priorResults) ? priorResults : []) {
+    if (item?.status !== "completed" || item?.result?.ok === false) continue;
+    if (item.tool === "fetch_url") {
+      const candidate = normalizedDiscoveryUrl(item.result?.url || item.url);
+      if (candidate && candidate === source) {
+        return { sourceTool: "fetch_url", sourceId: String(item.id || ""), match: "exact_url" };
+      }
+    }
+    if (item.tool === "web_search") {
+      const candidates = Array.isArray(item.result?.results) ? item.result.results : [];
+      for (const candidate of candidates) {
+        const url = normalizedDiscoveryUrl(candidate?.url || candidate?.link || candidate?.href);
+        if (!url) continue;
+        if (url === source) return { sourceTool: "web_search", sourceId: String(item.id || ""), match: "exact_url" };
+        if (sameDiscoveryOrigin(url, source)) return { sourceTool: "web_search", sourceId: String(item.id || ""), match: "same_origin" };
+      }
+    }
+  }
+  return undefined;
+}
+
+function normalizedDiscoveryUrl(value) {
+  try {
+    const url = new URL(String(value || ""));
+    url.username = "";
+    url.password = "";
+    url.search = "";
+    url.hash = "";
+    return url.toString();
+  } catch {
+    return "";
+  }
+}
+
+function sameDiscoveryOrigin(left, right) {
+  try {
+    return new URL(left).origin === new URL(right).origin;
+  } catch {
+    return false;
+  }
 }
 
 function isRepeatedObservation(request, previousResults = []) {
@@ -819,6 +864,8 @@ async function executeOne(request, options) {
         maxWorkspaceSnapshotEntries: options.maxWorkspaceSnapshotEntries,
         maxWorkspaceChanges: options.maxWorkspaceChanges,
         managedToolRoots: options.managedToolRoots,
+        requireDiscoveryTrace: true,
+        discoveryTrace: discoveryTraceForProvision(request, [...(options.previousResults || []), ...options.currentResults || []]),
         signal: options.signal
       });
       return resultRecord(request, {

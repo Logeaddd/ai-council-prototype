@@ -1528,6 +1528,7 @@ test("provision_tool autonomously installs verifies and reuses a managed CLI for
     groupPath: tmp,
     agent: { id: "full", name: "Full" },
     round: 1,
+    previousResults: recordedSearchEvidence("http://127.0.0.1:1/publisher-install-guide"),
     requests: [{ tool: "provision_tool", toolName: "demo", commandName: "demo", installCommand, shell: process.platform === "win32" ? "powershell" : "sh", discoverySourceUrl: "http://127.0.0.1:1/publisher-install-guide?temporary-token=not-for-logs", discoveryQuery: "demo cli official install", reason: "Install missing CLI." }]
   });
   const reused = await executeToolRequests({
@@ -1560,7 +1561,8 @@ test("later real work retains a durable link to the provisioned capability it in
     groupPath: tmp,
     agent: { id: "full", name: "Full" },
     round: 1,
-    requests: [{ tool: "provision_tool", toolName: "link demo", commandName: "link-demo", installCommand, shell: process.platform === "win32" ? "powershell" : "sh", reason: "Install a managed demonstration CLI." }]
+    previousResults: recordedSearchEvidence("http://127.0.0.1:1/link-demo-install"),
+    requests: [{ tool: "provision_tool", toolName: "link demo", commandName: "link-demo", installCommand, shell: process.platform === "win32" ? "powershell" : "sh", discoverySourceUrl: "http://127.0.0.1:1/link-demo-install", discoveryQuery: "link demo publisher install", reason: "Install a managed demonstration CLI." }]
   });
   const invoked = await executeToolRequests({
     permissionTier: "full",
@@ -1595,6 +1597,20 @@ test("provision_tool rejects an unsafe researched source before executing an ins
   assert.equal(fs.existsSync(path.join(tmp, "shared", "tools", "unsafe-demo")), false);
 });
 
+test("provision_tool requires an observed discovery trace for unknown tools", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-provision-trace-required-"));
+  const result = await executeToolRequests({
+    permissionTier: "full",
+    groupPath: tmp,
+    agent: { id: "full", name: "Full" },
+    round: 1,
+    requests: [{ tool: "provision_tool", toolName: "trace-demo", commandName: "trace-demo", installCommand: "Write-Output should-not-run", discoverySourceUrl: "http://127.0.0.1:1/trace-demo-install", reason: "Reject an unobserved discovery URL." }]
+  });
+  assert.equal(result.results[0].status, "failed");
+  assert.equal(result.results[0].code, "discovery_evidence_missing");
+  assert.equal(fs.existsSync(path.join(tmp, "shared", "tools", "trace-demo")), false);
+});
+
 test("provision_tool downloads and extracts a real tool archive before verification", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-provision-download-"));
   const executableName = process.platform === "win32" ? "downloaded.cmd" : "downloaded";
@@ -1618,11 +1634,14 @@ test("provision_tool downloads and extracts a real tool archive before verificat
       groupPath: tmp,
       agent: { id: "full", name: "Full" },
       round: 1,
+      previousResults: recordedSearchEvidence(`http://127.0.0.1:${address.port}/install`),
       requests: [{
         tool: "provision_tool",
         toolName: "downloaded",
         commandName: "downloaded",
         downloadUrl: `http://127.0.0.1:${address.port}/downloaded.zip?temporary-token=not-for-logs`,
+        discoverySourceUrl: `http://127.0.0.1:${address.port}/install`,
+        discoveryQuery: "downloaded publisher install",
         sha256: archiveSha256,
         verifyCommand,
         reason: "Download the missing CLI archive."
@@ -1668,11 +1687,14 @@ test("provision_tool rejects checksum mismatches and removes the untrusted artif
       groupPath: tmp,
       agent: { id: "full", name: "Full" },
       round: 1,
+      previousResults: recordedSearchEvidence(`http://127.0.0.1:${address.port}/install`),
       requests: [{
         tool: "provision_tool",
         toolName: "checksum-demo",
         commandName: "checksum-demo",
         downloadUrl: `http://127.0.0.1:${address.port}/checksum-demo.zip`,
+        discoverySourceUrl: `http://127.0.0.1:${address.port}/install`,
+        discoveryQuery: "checksum demo publisher install",
         sha256: "0".repeat(64),
         reason: "Exercise checksum rejection."
       }]
@@ -1701,11 +1723,14 @@ test("provision_tool checks every redirect target before downloading", async () 
       groupPath: tmp,
       agent: { id: "full", name: "Full" },
       round: 1,
+      previousResults: recordedSearchEvidence(`http://127.0.0.1:${address.port}/install`),
       requests: [{
         tool: "provision_tool",
         toolName: "redirect-demo",
         commandName: "redirect-demo",
         downloadUrl: `http://127.0.0.1:${address.port}/redirect.zip`,
+        discoverySourceUrl: `http://127.0.0.1:${address.port}/install`,
+        discoveryQuery: "redirect demo publisher install",
         reason: "Reject a redirect outside the allowed download protocol."
       }]
     });
@@ -2282,6 +2307,15 @@ function processTool(groupPath, request) {
     round: 2,
     requests: [{ tool: "process_control", reason: "Manage a background process.", ...request }]
   });
+}
+
+function recordedSearchEvidence(url, id = "observed-search") {
+  return [{
+    id,
+    tool: "web_search",
+    status: "completed",
+    result: { ok: true, results: [{ url }] }
+  }];
 }
 
 async function waitFor(check, timeoutMs) {
