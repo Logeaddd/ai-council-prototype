@@ -251,7 +251,7 @@ export async function runSeededRealUserCampaign(options = {}) {
       budgetLedger,
       realProvider: options.allowMockProvider !== true
     });
-    const persistence = verifyCampaignPersistence(groupPath, sessions, group);
+    const persistence = verifyCampaignPersistence(groupPath, sessions, group, campaign);
     const replayRecovery = verifyNoDuplicateVerifiedWork(interruptedSessions, sessions, interruptedActivities);
     const resumption = verifyCampaignResumption(interruptedSessions, sessions);
     const recovery = {
@@ -614,7 +614,7 @@ export function campaignProviderFailureReason(session = {}) {
   return `All participating provider calls were unavailable: ${providerReasons[0].slice(0, 1200)}`;
 }
 
-export function verifyCampaignPersistence(groupPath, sessions, runtimeGroup) {
+export function verifyCampaignPersistence(groupPath, sessions, runtimeGroup, campaign = null) {
   const checks = [];
   const taskStatePath = path.join(groupPath, "shared", "task_state.json");
   let taskState;
@@ -636,7 +636,53 @@ export function verifyCampaignPersistence(groupPath, sessions, runtimeGroup) {
   checks.push(check("visible_history_timestamped", timestampsPresent, `${rawVisibleMessages.length} persisted visible messages`));
   checks.push(check("visible_history_complete", visibleHistoryComplete, `${rawVisibleMessages.length}/${renderedVisibleMessages.length} visible messages`));
   checks.push(check("visible_history_chronological", chronological, `${sessions.length} persisted sessions`));
+
+  // A campaign's scripted user stages are the authoritative account of what
+  // reached the real HTTP/SSE entry point. Compare the whole ordered sequence,
+  // including repeated "continue" prompts, so a dropped user turn cannot hide
+  // behind otherwise valid assistant transcript entries.
+  const expectedUserQuestions = campaignUserStageQuestions(campaign);
+  if (expectedUserQuestions.length) {
+    const actualUserQuestions = orderedCampaignSessions(sessions).map((session) => String(session.question || "").trim());
+    const questionsPersisted = sameQuestionMultiset(expectedUserQuestions, actualUserQuestions);
+    const questionsChronological = questionsPersisted && sameQuestionSequence(expectedUserQuestions, actualUserQuestions);
+    const evidence = JSON.stringify({ expected: expectedUserQuestions, actual: actualUserQuestions });
+    checks.push(check("user_stage_questions_persisted", questionsPersisted, evidence));
+    checks.push(check("user_stage_questions_chronological", questionsChronological, evidence));
+  }
   return { passed: checks.every((item) => item.passed), checks };
+}
+
+function campaignUserStageQuestions(campaign) {
+  const requestStages = new Set(["initial", "user", "followup", "reopen", "interrupt"]);
+  return (campaign?.stages || [])
+    .filter((stage) => requestStages.has(stage?.kind))
+    .map((stage) => String(stage.prompt || (stage.kind === "interrupt" ? "continue" : "")).trim())
+    .filter(Boolean);
+}
+
+function orderedCampaignSessions(sessions = []) {
+  return [...sessions].sort((left, right) => {
+    const time = Date.parse(left?.startedAt || left?.createdAt || "") - Date.parse(right?.startedAt || right?.createdAt || "");
+    if (time) return time;
+    return String(left?.id || "").localeCompare(String(right?.id || ""));
+  });
+}
+
+function sameQuestionMultiset(expected, actual) {
+  if (expected.length !== actual.length) return false;
+  const counts = new Map();
+  for (const question of expected) counts.set(question, (counts.get(question) || 0) + 1);
+  for (const question of actual) {
+    const remaining = counts.get(question) || 0;
+    if (!remaining) return false;
+    counts.set(question, remaining - 1);
+  }
+  return [...counts.values()].every((count) => count === 0);
+}
+
+function sameQuestionSequence(expected, actual) {
+  return expected.length === actual.length && expected.every((question, index) => question === actual[index]);
 }
 
 export function verifyNoDuplicateVerifiedWork(interruptedSessions = [], sessions = [], interruptedActivities = []) {

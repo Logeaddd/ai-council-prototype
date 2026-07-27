@@ -273,6 +273,8 @@ test("seeded campaign drives HTTP/SSE stages, member disturbances and interrupti
     assert.equal(run.report.collaboration.executionReceipt.sessionFiles.length > 0, true);
     assert.equal(run.report.persistence.passed, true);
     assert.equal(run.report.persistence.checks.every((check) => check.passed), true);
+    assert.equal(run.report.persistence.checks.find((check) => check.id === "user_stage_questions_persisted")?.passed, true);
+    assert.equal(run.report.persistence.checks.find((check) => check.id === "user_stage_questions_chronological")?.passed, true);
     assert.equal(run.report.recovery.passed, true);
     assert.equal(run.report.recovery.checks.every((check) => check.passed), true);
     assert.equal(path.isAbsolute(run.report.externalWorkspacePath), true);
@@ -303,6 +305,53 @@ test("campaign persistence rejects missing visible-message timestamps and lost m
     assert.equal(persistence.passed, false);
     assert.equal(persistence.checks.find((check) => check.id === "visible_history_timestamped")?.passed, false);
     assert.equal(persistence.checks.find((check) => check.id === "member_state_persisted")?.passed, false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("campaign persistence rejects swallowed and reordered user-stage questions", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-user-question-persistence-"));
+  const campaign = {
+    stages: [
+      { kind: "initial", prompt: "create the artifact" },
+      { kind: "followup", prompt: "edit the artifact" },
+      { kind: "interrupt" },
+      { kind: "reopen", prompt: "continue" }
+    ]
+  };
+  const group = { agents: [{ id: "worker", name: "Worker", role: "ordinary", enabled: true }] };
+  try {
+    fs.mkdirSync(path.join(root, "shared"), { recursive: true });
+    fs.writeFileSync(path.join(root, "shared", "task_state.json"), "{}", "utf8");
+    fs.writeFileSync(path.join(root, "group.json"), JSON.stringify({
+      seats: [{ seatId: "worker", displayName: "Worker", role: "ordinary", enabled: true }]
+    }), "utf8");
+    const session = (id, question, second) => ({
+      id,
+      question,
+      createdAt: `2026-07-27T00:00:0${second}.000Z`,
+      startedAt: `2026-07-27T00:00:0${second}.000Z`,
+      messages: []
+    });
+
+    const swallowed = verifyCampaignPersistence(root, [
+      session("session_01", "create the artifact", 1),
+      session("session_02", "edit the artifact", 2),
+      session("session_03", "continue", 3)
+    ], group, campaign);
+    assert.equal(swallowed.passed, false);
+    assert.equal(swallowed.checks.find((check) => check.id === "user_stage_questions_persisted")?.passed, false);
+
+    const reordered = verifyCampaignPersistence(root, [
+      session("session_01", "edit the artifact", 1),
+      session("session_02", "create the artifact", 2),
+      session("session_03", "continue", 3),
+      session("session_04", "continue", 4)
+    ], group, campaign);
+    assert.equal(reordered.passed, false);
+    assert.equal(reordered.checks.find((check) => check.id === "user_stage_questions_persisted")?.passed, true);
+    assert.equal(reordered.checks.find((check) => check.id === "user_stage_questions_chronological")?.passed, false);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

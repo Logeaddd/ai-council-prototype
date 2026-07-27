@@ -250,6 +250,12 @@ Completed on 2026-07-27:
   contributor writes are rejected. The model endpoint in this regression is a
   deterministic loopback fixture, so it is regression evidence only, not a
   real Provider or real-user campaign pass.
+* Campaign persistence verification now compares every scripted user request
+  (`initial`, `user`, `followup`, `interrupt`, and `reopen`) with the ordered
+  persisted `session.question` sequence. It separately fails a swallowed turn
+  and a reordered turn, including repeated `continue` requests. The seeded
+  HTTP/SSE regression exercises the passing path. This is local persistence
+  coverage, not a claim that a paid Provider campaign has passed.
 * Current-worktree verification after bounded delegation: `npm test` and the
   product harness test child both reached 739 passed, 0 failed, and 1 Windows
   platform skip out of 740 tests. The harness report is
