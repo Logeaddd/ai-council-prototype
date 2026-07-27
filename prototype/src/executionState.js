@@ -20,6 +20,7 @@ export function createExecutionState({ question, agents = [], workspaceGroup, pr
         processedToolResults: 0,
         processedFileResults: 0,
         noActionCalls: 0,
+        recovery: normalizeRecoveryState(previousState.recovery),
         delegationSequence: Math.max(0, Number(previousState.delegationSequence || 0)),
         resumed: true
       };
@@ -43,6 +44,7 @@ export function createExecutionState({ question, agents = [], workspaceGroup, pr
     processedToolResults: 0,
     processedFileResults: 0,
     noActionCalls: 0,
+    recovery: createRecoveryState(),
     delegationSequence: 0,
     artifactStatus: "not_checked",
     lastAction: "",
@@ -88,6 +90,7 @@ export function executionInstruction(state, agent) {
       `[Execution owner] You are the primary executor for this delivery task. Current phase: ${state.phase}.`,
       formatTaskContract(state.taskContract),
       formatDelegationHandoffsForOwner(state),
+      formatRecoveryState(state.recovery),
       `Required next action: ${state.nextAction}`,
       formatCheckpointEvidence(state.checkpointEvidence),
       requiresWorkspace
@@ -161,6 +164,7 @@ export function advanceExecutionState({ state, session, agent, groupPath, questi
   state.processedToolResults = (session.toolExecutionResults || []).length;
   state.processedFileResults = (session.fileOperationExecutionResults || []).length;
   state.checkpointEvidence = mergeCheckpointEvidence(state.checkpointEvidence, [...fileResults, ...toolResults]);
+  const recoveryUpdate = updateDeliveryRecoveryState(state, toolResults);
   const material = [...toolResults, ...fileResults].some(hasMaterialWorkspaceChange);
   const verificationResults = toolResults.filter(isVerificationResult);
   const latestVerification = verificationResults.at(-1);
@@ -177,6 +181,24 @@ export function advanceExecutionState({ state, session, agent, groupPath, questi
   const successfulVerification = latestVerification && latestVerification.status === "completed" && latestVerification.result?.ok !== false && Number(latestVerification.result?.exitCode ?? 0) === 0
     ? latestVerification
     : undefined;
+
+  if (recoveryUpdate.requiresAlternative && !material && !successfulVerification) {
+    state.phase = "repair";
+    state.checkpointVersion += 1;
+    state.lastAction = `recovery_required:${recoveryUpdate.failure.resultId}`;
+    state.lastError = recoveryUpdate.failure.error;
+    state.nextAction = recoveryAlternativeAction(recoveryUpdate.failure);
+    state.noActionCalls = 0;
+    return state;
+  }
+
+  if (recoveryUpdate.pendingCapability && !material && !successfulVerification) {
+    state.lastAction = `capability_acquired:${recoveryUpdate.pendingCapability.acquisitionId}`;
+    state.lastError = "";
+    state.nextAction = recoveryUsageAction(recoveryUpdate.pendingCapability);
+    state.noActionCalls = 0;
+    return state;
+  }
 
   if (failedVerification) {
     state.phase = "repair";
@@ -239,6 +261,327 @@ export function advanceExecutionState({ state, session, agent, groupPath, questi
     ? "You have enough inspection budget. Perform a real write, patch, command, or project setup action next."
     : "Perform the concrete pending action now; another plan-only response is not progress.";
   return state;
+}
+
+// Delivery recovery is durable evidence, not a model-facing suggestion.  It
+// records the exact acquisition/runtime strategy that failed and the later
+// result that proved an acquired capability was actually used.  This lets a
+// resumed owner continue from a real checkpoint instead of rediscovering the
+// same failed path.
+function createRecoveryState() {
+  return {
+    version: 1,
+    failures: [],
+    pendingCapabilities: [],
+    usage: []
+  };
+}
+
+function normalizeRecoveryState(value) {
+  const source = value && typeof value === "object" ? value : {};
+  return {
+    version: Math.max(1, Number(source.version || 1)),
+    failures: Array.isArray(source.failures) ? source.failures.filter(isRecoveryFailure).slice(-24) : [],
+    pendingCapabilities: Array.isArray(source.pendingCapabilities) ? source.pendingCapabilities.filter(isPendingCapability).slice(-16) : [],
+    usage: Array.isArray(source.usage) ? source.usage.filter(isCapabilityUsageRecord).slice(-32) : []
+  };
+}
+
+function isRecoveryFailure(item) {
+  return item && typeof item === "object" && String(item.fingerprint || "") && String(item.resultId || "");
+}
+
+function isPendingCapability(item) {
+  return item && typeof item === "object" && String(item.acquisitionId || "") && String(item.tool || "");
+}
+
+function isCapabilityUsageRecord(item) {
+  return item && typeof item === "object" && String(item.acquisitionId || "") && String(item.usedBy || "");
+}
+
+function updateDeliveryRecoveryState(state, toolResults = []) {
+  const recovery = state.recovery = normalizeRecoveryState(state.recovery);
+  const newlyRecordedFailures = [];
+
+  for (const result of toolResults) {
+    const failure = recoveryFailureFromResult(result);
+    if (failure && !recovery.failures.some((item) => item.resultId === failure.resultId)) {
+      recovery.failures.push(failure);
+      newlyRecordedFailures.push(failure);
+    }
+    const capability = pendingCapabilityFromResult(result);
+    if (capability && !recovery.pendingCapabilities.some((item) => item.acquisitionId === capability.acquisitionId) && !recovery.usage.some((item) => item.acquisitionId === capability.acquisitionId)) {
+      recovery.pendingCapabilities.push(capability);
+    }
+    for (const usage of Array.isArray(result?.capabilityUsage) ? result.capabilityUsage : []) {
+      const acquisitionId = String(usage?.acquisitionId || "");
+      if (!acquisitionId) continue;
+      const pendingIndex = recovery.pendingCapabilities.findIndex((item) => item.acquisitionId === acquisitionId);
+      if (pendingIndex >= 0) recovery.pendingCapabilities.splice(pendingIndex, 1);
+      if (!recovery.usage.some((item) => item.acquisitionId === acquisitionId && item.usedBy === result.id)) {
+        recovery.usage.push({
+          acquisitionId,
+          acquisitionTool: String(usage.acquisitionTool || ""),
+          kind: String(usage.kind || ""),
+          references: Array.isArray(usage.references) ? usage.references.slice(0, 4).map((item) => String(item).slice(0, 180)) : [],
+          usedBy: String(result.id || ""),
+          usedAt: String(result.createdAt || "")
+        });
+      }
+    }
+  }
+
+  resolveRecoveredFailures(recovery, toolResults);
+  recovery.failures = recovery.failures.slice(-24);
+  recovery.pendingCapabilities = recovery.pendingCapabilities.slice(-16);
+  recovery.usage = recovery.usage.slice(-32);
+  const unresolvedFailures = recovery.failures.filter((item) => !item.resolvedBy);
+  return {
+    failure: newlyRecordedFailures.at(-1),
+    requiresAlternative: Boolean(newlyRecordedFailures.length && unresolvedFailures.length),
+    pendingCapability: recovery.pendingCapabilities.at(-1)
+  };
+}
+
+function recoveryFailureFromResult(result = {}) {
+  if (!isFailedToolResult(result)) return undefined;
+  const tool = String(result.tool || "");
+  const strategy = recoveryStrategyForResult(result);
+  if (!strategy) return undefined;
+  return {
+    resultId: String(result.id || `${tool}:${strategy.fingerprint}`),
+    tool,
+    fingerprint: strategy.fingerprint,
+    family: strategy.family,
+    label: strategy.label,
+    error: recoveryErrorText(result),
+    createdAt: String(result.createdAt || "")
+  };
+}
+
+function isFailedToolResult(result = {}) {
+  return result?.status === "failed" || result?.result?.ok === false;
+}
+
+function recoveryStrategyForResult(result = {}) {
+  const tool = String(result.tool || "");
+  if (tool === "install_package") {
+    const manager = String(result.manager || result.result?.manager || "default").toLowerCase();
+    const packageName = normalizeRecoveryValue(result.packageName || result.result?.packageName || "unknown-package");
+    return {
+      family: "managed_package",
+      fingerprint: `install_package:${manager}:${packageName}`,
+      label: `${manager} package ${packageName}`
+    };
+  }
+  if (tool === "provision_tool") {
+    const command = normalizeRecoveryValue(result.commandName || result.result?.command || result.toolName || "unknown-command");
+    const source = normalizeRecoveryValue(result.packageId || result.downloadUrl || result.installCommand || result.discoverySourceUrl || "default-source");
+    return {
+      family: "tool_provision",
+      fingerprint: `provision_tool:${command}:${source}`,
+      label: `tool provisioning for ${command}`
+    };
+  }
+  if (tool === "execute_command" && isDirectPackageInstall(result)) {
+    const command = normalizeRecoveryValue(result.command || result.result?.command || "package-install");
+    return { family: "shell_package", fingerprint: `shell_package:${command}`, label: "direct package-manager command" };
+  }
+  if (tool === "execute_command" && missingExecutableName(result)) {
+    const executable = normalizeRecoveryValue(missingExecutableName(result));
+    return { family: "missing_runtime", fingerprint: `missing_runtime:${executable}`, label: `missing executable ${executable}` };
+  }
+  return undefined;
+}
+
+function isDirectPackageInstall(result = {}) {
+  return /(?:^|[;&|]\s*)(?:npm|pnpm|yarn)\s+(?:add|install)\b|\b(?:python|python3|py)(?:\.exe)?\s+-m\s+pip\s+install\b|(?:^|[;&|]\s*)pip3?\s+install\b|(?:^|[;&|]\s*)(?:cargo|gem)\s+(?:add|install)\b|(?:^|[;&|]\s*)go\s+(?:get|install)\b|(?:^|[;&|]\s*)(?:winget|choco|scoop|brew)\s+install\b|\bapt(?:-get)?\s+install\b/i.test(String(result.command || result.result?.command || ""));
+}
+
+function missingExecutableName(result = {}) {
+  const output = [result.error, result.result?.error, result.result?.stderr, result.result?.stdout].filter(Boolean).join("\n");
+  const patterns = [
+    /['"]?([A-Za-z0-9._-]+)['"]?\s+is not recognized as an internal or external command/i,
+    /(?:command not found|not found):?\s*([A-Za-z0-9._-]+)?/i,
+    /([A-Za-z0-9._-]+):\s*(?:command not found|not found)/i,
+    /The term ['"]([^'"]+)['"] is not recognized/i
+  ];
+  for (const pattern of patterns) {
+    const match = output.match(pattern);
+    if (match?.[1]) return match[1];
+  }
+  return "";
+}
+
+function recoveryErrorText(result = {}) {
+  const text = [result.error, result.result?.error, result.result?.stderr, result.result?.stdout]
+    .filter(Boolean)
+    .join("\n")
+    .replace(/\s+/g, " ")
+    .trim();
+  return (text || `The ${result.tool || "tool"} request failed.`).slice(0, 1200);
+}
+
+function pendingCapabilityFromResult(result = {}) {
+  if (result?.status !== "completed" || result?.result?.ok === false) return undefined;
+  const tool = String(result.tool || "");
+  if (!new Set(["install_package", "provision_tool", "skill_install", "mcp_install_npm"]).has(tool)) return undefined;
+  return {
+    acquisitionId: String(result.id || ""),
+    tool,
+    label: capabilityLabel(result),
+    references: capabilityReferences(result),
+    acquiredAt: String(result.createdAt || "")
+  };
+}
+
+function capabilityLabel(result = {}) {
+  if (result.tool === "install_package") return `installed package ${String(result.result?.packageName || result.packageName || "")}`.trim();
+  if (result.tool === "provision_tool") return `provisioned command ${String(result.result?.command || result.commandName || result.toolName || "")}`.trim();
+  if (result.tool === "skill_install") return `installed skill ${String(result.result?.skill?.id || result.skillId || "")}`.trim();
+  return `configured MCP server ${String(result.result?.id || result.serverId || result.packageSpec || "")}`.trim();
+}
+
+function capabilityReferences(result = {}) {
+  const values = result.tool === "install_package"
+    ? [result.result?.packageName, result.packageName]
+    : result.tool === "provision_tool"
+      ? [result.result?.command, result.commandName, result.toolName]
+      : result.tool === "skill_install"
+        ? [result.result?.skill?.id, result.skillId]
+        : [result.result?.id, result.serverId, result.packageSpec];
+  return [...new Set(values.map(normalizeRecoveryValue).filter(Boolean))].slice(0, 4);
+}
+
+function resolveRecoveredFailures(recovery, toolResults = []) {
+  for (const failure of recovery.failures) {
+    if (failure.resolvedBy) continue;
+    const alternative = (toolResults || []).find((result) => result?.status === "completed" && result?.result?.ok !== false && resolvesRecoveryFailure(failure, result));
+    if (alternative) {
+      failure.resolvedBy = String(alternative.id || alternative.tool || "alternative_action");
+      failure.resolvedAt = String(alternative.createdAt || "");
+    }
+  }
+}
+
+function resolvesRecoveryFailure(failure, result = {}) {
+  const tool = String(result.tool || "");
+  if (failure.family === "managed_package") {
+    return tool === "provision_tool" || (tool === "install_package" && recoveryStrategyForResult({ ...result, status: "failed" })?.fingerprint !== failure.fingerprint);
+  }
+  if (failure.family === "tool_provision" || failure.family === "missing_runtime") {
+    return ["provision_tool", "install_package"].includes(tool);
+  }
+  if (failure.family === "shell_package") {
+    return ["install_package", "provision_tool"].includes(tool) || (tool === "execute_command" && !isDirectPackageInstall(result));
+  }
+  return false;
+}
+
+function recoveryAlternativeAction(failure) {
+  return `The previous ${failure.label} strategy failed (${failure.error}). Do not retry that exact strategy. Choose and execute a materially different acquisition or runtime path now, then use it to create, repair, build, or verify the requested deliverable.`;
+}
+
+function recoveryUsageAction(capability) {
+  return `A capability was acquired (${capability.label}). Invoke it in a real artifact-producing, build, repair, or verification action now. Do not return to broad search, planning, or another acquisition before recording concrete use evidence.`;
+}
+
+function formatRecoveryState(value) {
+  const recovery = normalizeRecoveryState(value);
+  const unresolved = recovery.failures.filter((item) => !item.resolvedBy).slice(-3);
+  const pending = recovery.pendingCapabilities.slice(-3);
+  if (!unresolved.length && !pending.length) return "";
+  return [
+    "[Durable delivery recovery]",
+    ...unresolved.map((item) => `Failed strategy (do not repeat unchanged): ${item.label}. Evidence: ${item.error}`),
+    ...pending.map((item) => `Acquired but not yet used: ${item.label}. Required: invoke it in an artifact-producing, build, repair, or verification action.`)
+  ].join("\n");
+}
+
+// The engine calls this before executing model-proposed tools.  It only blocks
+// an exact failed acquisition retry, or read/search wandering after the owner
+// has already acquired a capability.  It deliberately does not impose a turn
+// or tool-count limit on genuine delivery work.
+export function gateDeliveryRecoveryToolRequests(state, agent, requests = []) {
+  if (!state?.active || agent?.id !== state.executorId) return { accepted: Array.isArray(requests) ? requests : [], rejected: [] };
+  const recovery = normalizeRecoveryState(state.recovery);
+  const blockedFingerprints = new Set(recovery.failures.map((item) => item.fingerprint));
+  const pending = recovery.pendingCapabilities;
+  const accepted = [];
+  const rejected = [];
+  for (const request of Array.isArray(requests) ? requests : []) {
+    const fingerprint = recoveryStrategyForRequest(request);
+    if (fingerprint && blockedFingerprints.has(fingerprint)) {
+      rejected.push(recoveryRequestRejection(request, "recovery_strategy_repeated", "This exact acquisition or runtime strategy already failed. Choose a materially different manager, source, tool, or execution path and use its real result."));
+      continue;
+    }
+    if (pending.length && isRecoveryWanderingRequest(request) && !isCapabilityActivationRequest(request, pending)) {
+      rejected.push(recoveryRequestRejection(request, "acquired_capability_must_be_used", `A previously acquired capability is still unused (${pending.map((item) => item.label).join("; ")}). Use it for a concrete artifact, build, repair, or verification action before further broad discovery or acquisition.`));
+      continue;
+    }
+    accepted.push(request);
+  }
+  return { accepted, rejected };
+}
+
+function recoveryStrategyForRequest(request = {}) {
+  const tool = String(request.tool || "").trim().toLowerCase().replace(/-/g, "_");
+  if (tool === "install_package") {
+    return `install_package:${String(request.manager || request.packageManager || "default").toLowerCase()}:${normalizeRecoveryValue(request.packageName || request.package || request.name || request.query || "unknown-package")}`;
+  }
+  if (tool === "provision_tool") {
+    const command = normalizeRecoveryValue(request.commandName || request.executable || request.toolName || request.name || request.query || "unknown-command");
+    const source = normalizeRecoveryValue(request.packageId || request.downloadUrl || request.installCommand || request.discoverySourceUrl || "default-source");
+    return `provision_tool:${command}:${source}`;
+  }
+  if (tool === "execute_command") {
+    const result = { tool, command: request.command, status: "failed", result: { stderr: "" } };
+    if (isDirectPackageInstall(result)) return `shell_package:${normalizeRecoveryValue(request.command || "package-install")}`;
+  }
+  return "";
+}
+
+function isRecoveryWanderingRequest(request = {}) {
+  const tool = String(request.tool || "").trim().toLowerCase().replace(/-/g, "_");
+  return new Set([
+    "list_directory", "read_file", "search_files", "grep_content", "web_search", "fetch_url", "api_request",
+    "skill_list", "skill_search", "mcp_search_npm", "mcp_list_tools", "mcp_list_resources", "mcp_list_prompts",
+    "install_package", "provision_tool", "skill_install", "mcp_install_npm"
+  ]).has(tool);
+}
+
+function isCapabilityActivationRequest(request = {}, pending = []) {
+  const tool = String(request.tool || "").trim().toLowerCase().replace(/-/g, "_");
+  if (["mcp_list_tools", "mcp_list_resources", "mcp_list_prompts"].includes(tool)) {
+    const requestedServer = normalizeRecoveryValue(request.serverId || "");
+    return pending.some((item) => item.tool === "mcp_install_npm" && (!requestedServer || item.references.includes(requestedServer)));
+  }
+  if (["skill_read", "skill_enable"].includes(tool)) {
+    const requestedSkill = normalizeRecoveryValue(request.skillId || "");
+    return pending.some((item) => item.tool === "skill_install" && requestedSkill && item.references.includes(requestedSkill));
+  }
+  return false;
+}
+
+function recoveryRequestRejection(request = {}, code, error) {
+  return {
+    id: String(request.id || `recovery:${makeRecoveryRequestId(request)}`),
+    tool: String(request.tool || ""),
+    status: "rejected",
+    code,
+    error,
+    createdAt: new Date().toISOString()
+  };
+}
+
+function makeRecoveryRequestId(request = {}) {
+  return `${request.tool || "tool"}:${request.commandName || request.packageName || request.path || request.query || "request"}`
+    .replace(/[^a-zA-Z0-9._-]+/g, "_")
+    .slice(0, 120);
+}
+
+function normalizeRecoveryValue(value) {
+  return String(value || "").trim().replaceAll("\\", "/").toLowerCase().slice(0, 600);
 }
 
 function preservesVerifiedCheckpoint(state, toolResults, fileResults) {

@@ -7756,6 +7756,129 @@ test("tool follow-up receives exact immediate API and file results before writin
   }
 });
 
+test("HTTP/SSE delivery loop recovers from a failed acquisition, uses the alternative, and keeps final ownership", async () => {
+  const groupPath = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-delivery-recovery-http-"));
+  fs.mkdirSync(path.join(groupPath, "sessions"), { recursive: true });
+  fs.mkdirSync(path.join(groupPath, "shared", "recovery-pkg"), { recursive: true });
+  fs.writeFileSync(path.join(groupPath, "shared", "recovery-pkg", "package.json"), JSON.stringify({ name: "recovery-local-pkg", version: "1.0.0", main: "index.js" }), "utf8");
+  fs.writeFileSync(path.join(groupPath, "shared", "recovery-pkg", "index.js"), "module.exports = { value: 'RECOVERY_OK' };\n", "utf8");
+  fs.writeFileSync(path.join(groupPath, "group.json"), JSON.stringify({
+    id: "delivery-recovery-http",
+    name: "Delivery Recovery HTTP",
+    permissions: { defaultTier: "text", seatTiers: { executor: "full" } },
+    seats: [
+      { seatId: "executor", displayName: "Executor", enabled: true, privateFolder: "members/Executor" },
+      { seatId: "finalizer", displayName: "Finalizer", enabled: true, judge: true, privateFolder: "members/Finalizer" }
+    ]
+  }), "utf8");
+
+  let step = 0;
+  const prompts = [];
+  const server = http.createServer(async (req, res) => {
+    const body = JSON.parse(await readRequestBody(req));
+    const prompt = JSON.stringify(body.messages || []);
+    prompts.push(prompt);
+    if (prompt.includes("FinalDecision JSON object")) {
+      writeOpenAiStream(res, JSON.stringify({
+        answer: "The alternate local package path was used and the requested file was verified.",
+        consensus_score: 1,
+        supporting_agents: ["Executor"],
+        dissenting_agents: [],
+        minority_report: "",
+        risks: [],
+        next_actions: [],
+        memory_candidates: []
+      }));
+      return;
+    }
+    if (step === 0) {
+      step += 1;
+      writeOpenAiStream(res, JSON.stringify({
+        status: "speak",
+        position: "executor",
+        argument: "I will acquire the local dependency and produce the requested file.",
+        task_contract: {
+          mode: "delivery",
+          objective: "Create and validate shared/recovery/result.txt using an acquired local package.",
+          requires_workspace: true,
+          requires_verification: true,
+          deliverables: ["shared/recovery/result.txt"],
+          completion_criteria: ["The file contains the package value.", "A real command validates it."],
+          next_action: "Acquire the dependency and use it to generate the file."
+        },
+        tool_requests: [{ tool: "install_package", manager: "brew", packageName: "recovery-local-pkg", reason: "Attempt the first acquisition route." }],
+        objections: [],
+        memory_candidates: []
+      }));
+      return;
+    }
+    if (step === 1) {
+      step += 1;
+      writeOpenAiNativeToolStream(res, [{ tool: "install_package", manager: "brew", packageName: "recovery-local-pkg", reason: "Retry the same failed route." }]);
+      return;
+    }
+    if (step === 2) {
+      step += 1;
+      writeOpenAiNativeToolStream(res, [{ tool: "install_package", manager: "npm", packageName: "../../recovery-pkg", reason: "Use a different managed package path." }]);
+      return;
+    }
+    if (step === 3) {
+      step += 1;
+      writeOpenAiNativeToolStream(res, [{ tool: "web_search", query: "another package", reason: "Unnecessary exploration after successful acquisition." }]);
+      return;
+    }
+    if (step === 4) {
+      step += 1;
+      writeOpenAiNativeToolStream(res, [{
+        tool: "execute_command",
+        command: "node -e \"const p=require('recovery-local-pkg'); const fs=require('fs'); fs.mkdirSync('shared/recovery',{recursive:true}); fs.writeFileSync('shared/recovery/result.txt',p.value); /* ../../recovery-pkg */\"",
+        reason: "Use the installed local package to create the requested artifact."
+      }]);
+      return;
+    }
+    if (step === 5) {
+      step += 1;
+      writeOpenAiNativeToolStream(res, [{
+        tool: "run_tests",
+        runner: "custom",
+        cwd: "shared/recovery",
+        command: "node -e \"const fs=require('fs'); if(fs.readFileSync('result.txt','utf8')!=='RECOVERY_OK') process.exit(1); console.log('RECOVERY_VERIFIED')\"",
+        reason: "Verify the requested artifact contains the acquired package value."
+      }]);
+      return;
+    }
+    writeOpenAiStream(res, JSON.stringify({ status: "speak", position: "executor", argument: "The artifact was produced and verified.", objections: [], objection_items: [], resolved_ids: [], file_operations: [], tool_requests: [], memory_candidates: [] }));
+  });
+  await listen(server);
+
+  try {
+    const apiBaseUrl = `http://127.0.0.1:${server.address().port}/v1`;
+    const group = validateGroupConfig({
+      id: "delivery-recovery-http",
+      name: "Delivery Recovery HTTP",
+      settings: { maxRounds: 2, minConsensusWeight: 1, stopWhenAllSkip: true, agentTimeoutMs: 5000, maxToolIterations: 0, allowSoloCouncil: true },
+      agents: [
+        { id: "executor", name: "Executor", role: "Builder", provider: "openai-compatible", apiBaseUrl, allowUnsafePrivateNetwork: true, apiKey: "test-key", model: "test-model", weight: 1, enabled: true },
+        { id: "finalizer", name: "Finalizer", role: "Finalizer", provider: "openai-compatible", apiBaseUrl, allowUnsafePrivateNetwork: true, apiKey: "test-key", model: "test-model", weight: 1, enabled: true, judge: true }
+      ]
+    });
+    const { session } = await runCouncil("Create and validate shared/recovery/result.txt using a package if needed.", group, groupPath, { groupPath });
+
+    assert.equal(fs.readFileSync(path.join(groupPath, "shared", "recovery", "result.txt"), "utf8"), "RECOVERY_OK");
+    assert.equal(session.rejectedToolRequests.some((item) => item.code === "recovery_strategy_repeated"), true);
+    assert.equal(session.rejectedToolRequests.some((item) => item.code === "acquired_capability_must_be_used"), true);
+    assert.equal(session.toolExecutionResults.some((item) => item.capabilityUsage?.some((usage) => usage.kind === "installed_package")), true);
+    assert.equal(session.toolExecutionResults.some((item) => item.tool === "run_tests" && item.status === "completed"), true);
+    assert.equal(session.executionState.executorId, "executor");
+    assert.equal(session.executionState.phase, "complete");
+    assert.equal(session.toolExecutionResults.every((item) => item.source_agent_id === "executor"), true);
+    assert.equal(prompts.some((prompt) => prompt.includes("Durable delivery recovery")), true);
+    assert.equal(prompts.some((prompt) => prompt.includes("acquired_capability_must_be_used")), true);
+  } finally {
+    await close(server);
+  }
+});
+
 function close(server) {
   return new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
 }

@@ -28,7 +28,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { createObservationCache, hasMaterialWorkspaceChange } from "./observationCache.js";
-import { activeDelegationForAgent, advanceExecutionState, createExecutionState, executionInstruction, requiresWorkspaceExecution, selectExecutionAgents } from "./executionState.js";
+import { activeDelegationForAgent, advanceExecutionState, createExecutionState, executionInstruction, gateDeliveryRecoveryToolRequests, requiresWorkspaceExecution, selectExecutionAgents } from "./executionState.js";
 import { nativeToolDefinitions } from "./nativeToolProtocol.js";
 import { readPublicEventHotCache } from "./publicEventJournal.js";
 import { appendTaskRunEvent, createTaskRun, readTaskRun, recordTaskRunArtifactVerification, recordTaskRunFileEvidence, recordTaskRunToolAttempts, syncTaskRunFromSession } from "./taskRuntime.js";
@@ -493,8 +493,9 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
         }
         toolIterations += 1;
         const requestedToolTimeoutMs = positiveDuration(group.settings.toolTimeoutMs);
-        const toolResult = await executeToolRequests({
-          requests: response.tool_requests || [],
+        const recoveryGate = gateDeliveryRecoveryToolRequests(session.executionState, agent, response.tool_requests || []);
+        const executedToolResult = await executeToolRequests({
+          requests: recoveryGate.accepted,
           permissionTier: fileOperationPermissionTier,
           agent,
           round,
@@ -527,6 +528,25 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
           blockVerifiedContinuationCommands: Boolean(continuationContext && isPlainContinuationRequest(question)),
           delegateTaskTool: registerNativeDelegation
         });
+        const toolResult = {
+          ...executedToolResult,
+          rejected: [...recoveryGate.rejected, ...executedToolResult.rejected],
+          events: [
+            ...recoveryGate.rejected.map((item) => ({
+              type: "tool_failure",
+              id: item.id,
+              tool: item.tool,
+              round,
+              agentId: agent.id,
+              agentName: agent.name,
+              status: item.status,
+              code: item.code,
+              error: item.error,
+              createdAt: item.createdAt
+            })),
+            ...executedToolResult.events
+          ]
+        };
         accumulatedToolRequests.push(...toolResult.accepted);
         accumulatedToolResults.push(...toolResult.results);
         accumulatedRejectedToolRequests.push(...toolResult.rejected);

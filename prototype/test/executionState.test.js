@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { advanceExecutionState, createExecutionState, executionInstruction, isDeliveryTask, selectExecutionAgents } from "../src/executionState.js";
+import { advanceExecutionState, createExecutionState, executionInstruction, gateDeliveryRecoveryToolRequests, isDeliveryTask, selectExecutionAgents } from "../src/executionState.js";
 
 const agents = [
   { id: "designer", name: "Designer", enabled: true },
@@ -571,4 +571,81 @@ test("delivery owner delegates bounded work, receives a durable handoff, and rem
   assert.equal(delegation.ownerAcknowledged, true);
   assert.match(executionInstruction(state, owner), /Durable delegated handoffs/);
   assert.equal(state.executorId, "owner");
+});
+
+test("delivery recovery persists failed acquisition strategies, blocks exact retries, and requires real use after an alternative succeeds", () => {
+  const state = createExecutionState({ question: "Create the requested project artifact.", agents, workspaceGroup });
+  const session = {
+    toolExecutionResults: [],
+    fileOperationExecutionResults: [],
+    groupSnapshot: { agents }
+  };
+  const contract = {
+    mode: "delivery",
+    objective: "Create the requested project artifact.",
+    requires_workspace: true,
+    requires_verification: true,
+    deliverables: ["shared/out/result.txt"],
+    completion_criteria: ["Run a real validation."],
+    next_action: "Create the project artifact."
+  };
+  advanceExecutionState({ state, session, agent: agents[1], question: state.taskQuestion, response: { status: "speak", task_contract: contract } });
+
+  session.toolExecutionResults.push({
+    id: "failed-first-manager",
+    tool: "install_package",
+    manager: "first-manager",
+    packageName: "chosen-package",
+    status: "failed",
+    error: "first manager is unavailable",
+    result: { ok: false, manager: "first-manager", packageName: "chosen-package", error: "first manager is unavailable" }
+  });
+  advanceExecutionState({ state, session, agent: agents[1], question: state.taskQuestion, response: { status: "speak" } });
+
+  assert.equal(state.phase, "repair");
+  assert.equal(state.recovery.failures.length, 1);
+  assert.match(executionInstruction(state, agents[1]), /Failed strategy/);
+  const firstGate = gateDeliveryRecoveryToolRequests(state, agents[1], [
+    { tool: "install_package", manager: "first-manager", packageName: "chosen-package" },
+    { tool: "install_package", manager: "npm", packageName: "chosen-package" }
+  ]);
+  assert.equal(firstGate.rejected.length, 1);
+  assert.equal(firstGate.rejected[0].code, "recovery_strategy_repeated");
+  assert.deepEqual(firstGate.accepted.map((item) => item.manager), ["npm"]);
+
+  session.toolExecutionResults.push({
+    id: "installed-alternative",
+    tool: "install_package",
+    manager: "npm",
+    packageName: "chosen-package",
+    status: "completed",
+    result: { ok: true, manager: "npm", packageName: "chosen-package" }
+  });
+  advanceExecutionState({ state, session, agent: agents[1], question: state.taskQuestion, response: { status: "speak" } });
+
+  assert.equal(state.recovery.failures[0].resolvedBy, "installed-alternative");
+  assert.deepEqual(state.recovery.pendingCapabilities.map((item) => item.acquisitionId), ["installed-alternative"]);
+  assert.match(executionInstruction(state, agents[1]), /Acquired but not yet used/);
+  const pendingGate = gateDeliveryRecoveryToolRequests(state, agents[1], [
+    { tool: "web_search", query: "another package instead" },
+    { tool: "workspace_edit", action: "write", path: "shared/out/app.js", code: "require('chosen-package');" },
+    { tool: "run_code", language: "node", code: "require('chosen-package');" }
+  ]);
+  assert.equal(pendingGate.rejected[0].code, "acquired_capability_must_be_used");
+  assert.deepEqual(pendingGate.accepted.map((item) => item.tool), ["workspace_edit", "run_code"]);
+
+  session.toolExecutionResults.push({
+    id: "use-installed-package",
+    tool: "run_code",
+    status: "completed",
+    result: { ok: true, exitCode: 0 },
+    capabilityUsage: [{ acquisitionId: "installed-alternative", acquisitionTool: "install_package", kind: "installed_package", references: ["chosen-package"] }]
+  });
+  advanceExecutionState({ state, session, agent: agents[1], question: state.taskQuestion, response: { status: "speak" } });
+
+  assert.equal(state.recovery.pendingCapabilities.length, 0);
+  assert.equal(state.recovery.usage[0].usedBy, "use-installed-package");
+  const resumed = createExecutionState({ question: "continue", agents, workspaceGroup, previousState: state });
+  assert.equal(resumed.recovery.failures[0].fingerprint, state.recovery.failures[0].fingerprint);
+  assert.equal(gateDeliveryRecoveryToolRequests(resumed, agents[1], [{ tool: "install_package", manager: "first-manager", packageName: "chosen-package" }]).rejected[0].code, "recovery_strategy_repeated");
 });
