@@ -404,7 +404,10 @@ function mockCouncilGroup(task) {
     id: `eval-${task.id}`,
     name: `Eval ${task.id}`,
     settings: {
-      maxRounds: task.maxRounds || 2,
+      // Evaluation fixtures must not manufacture a smaller default execution
+      // budget than the product. Zero means the same unbounded setting used by
+      // a newly created group; a fixture may still opt into a positive limit.
+      maxRounds: task.maxRounds ?? 0,
       minConsensusWeight: 0.75,
       stopWhenAllSkip: true,
       agentTimeoutMs: 1000

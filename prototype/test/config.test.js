@@ -1,5 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
 import { validateGroupConfig, validateRuntimeEnv } from "../src/config.js";
 
 function baseGroup(agents) {
@@ -29,6 +31,14 @@ test("allows review-optional groups with one ordinary enabled agent", () => {
   assert.equal(group.agents[0].judge, undefined);
   assert.equal(group.settings.maxRounds, 0);
   assert.equal(group.settings.minRounds, 1);
+});
+
+test("real-provider example does not restore a hidden round ceiling", () => {
+  const examplePath = path.resolve("config", "group.real.example.json");
+  const example = JSON.parse(fs.readFileSync(examplePath, "utf8"));
+  const group = validateGroupConfig(example);
+
+  assert.equal(group.settings.maxRounds, 0);
 });
 
 test("allows explicit reviewer-only groups without forcing a separate non-reviewer or judge", () => {
