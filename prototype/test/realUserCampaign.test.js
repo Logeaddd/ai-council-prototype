@@ -76,6 +76,18 @@ test("capability-acquisition campaigns require an unnamed third-party choice and
   assert.equal(JSON.stringify(publicScenario).includes(JSON.stringify(campaign.hiddenVerifier.pixels)), false);
 });
 
+test("delegated brief campaign requires an owner-integrated read-only research handoff", () => {
+  const campaign = createSeededCampaignScenario({ seed: 8 });
+  const publicScenario = publicCampaignScenario(campaign);
+
+  assert.equal(campaign.task.id, "delegated-brief");
+  assert.equal(campaign.task.delegationRequired, true);
+  assert.equal(campaign.hiddenVerifier.requiresDelegation, true);
+  assert.match(campaign.task.initialQuestion, /delegate a narrow, read-only research task to Critic/i);
+  assert.equal(JSON.stringify(publicScenario).includes(campaign.hiddenVerifier.expected.release), false);
+  assert.equal(JSON.stringify(publicScenario).includes(campaign.fixtures[0].content), false);
+});
+
 test("different seeds select deterministic task variants while preserving the campaign contract", () => {
   const campaigns = [1, 2, 3, 4, 5, 6, 7].map((seed) => createSeededCampaignScenario({ seed }));
   assert.equal(new Set(campaigns.map((campaign) => campaign.task.id)).size >= 2, true);

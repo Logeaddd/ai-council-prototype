@@ -33,7 +33,8 @@ export function createSeededCampaignScenario(options = {}) {
       domain: task.domain,
       initialQuestion: task.initialQuestion,
       deliverable: task.deliverable,
-      capabilityAcquisitionRequired: task.capabilityAcquisitionRequired === true
+      capabilityAcquisitionRequired: task.capabilityAcquisitionRequired === true,
+      delegationRequired: task.delegationRequired === true
     },
     stages: stages.map((stage, index) => ({ id: `stage_${String(index + 1).padStart(2, "0")}`, ...stage })),
     fixtures: task.fixtures || [],
@@ -305,7 +306,38 @@ function imageToolAcquisitionTemplate(seed, random) {
   };
 }
 
-const TASK_TEMPLATES = [nodeCliTemplate, pythonCliTemplate, jsonDocumentTemplate, externalNodeCliTemplate, jsonToCsvTemplate, zipArchiveTemplate, apiCollectionTemplate, imageToolAcquisitionTemplate];
+function delegatedBriefTemplate(seed, random) {
+  const source = `inputs/release-research-${seed}.txt`;
+  const file = `deliverables/release-brief-${seed}.json`;
+  const release = `orion-${seed % 17}`;
+  const window = `2026-Q${(seed % 4) + 1}`;
+  return {
+    id: "delegated-brief",
+    domain: "bounded_research_delegation_and_owner_delivery",
+    deliverable: file,
+    delegationRequired: true,
+    initialQuestion: `Create the verified release brief at ${file}. Work as a delivery team: the delivery owner must first delegate a narrow, read-only research task to Critic (assignee_id "critic") to inspect ${source} and return a bounded handoff naming the source and extracted release facts. Do not write the final brief until that handoff is available. The owner must then integrate the handoff into valid JSON with release, window and status fields, and validate the artifact. The contributor must not write the deliverable or finalize the task.`,
+    edits: [
+      { prompt: "Update the existing release brief to add source set to research_note. Preserve the research-derived release and window, keep valid JSON, and have the owner validate it." },
+      { prompt: "Update the same release brief to add audience set to internal. Preserve every current research-derived field and validate the current artifact." },
+      { prompt: "Use only the latest requirement: status must be approved while release, window, source and audience remain present. Do not recreate the project or redo the completed research handoff. Validate the JSON." },
+      { prompt: "Make the final requested release-brief update in the same artifact. Keep the handoff-derived release/window, source research_note, audience internal and status approved. The delivery owner must validate the finished JSON." }
+    ],
+    reversalPrompt: "Use the current release-brief requirements only. Do not restore an obsolete status or discard the completed research handoff.",
+    recallPrompt: `Inspect the retained task context, the current ${file}, and the recorded contributor handoff. Continue the existing delivery from the newest requirement without creating a replacement project.`,
+    finalPrompt: "Apply the final release-brief requirement and validate the current artifact one more time as the delivery owner.",
+    recoveryVerificationPrompt: `After recovery, have the delivery owner inspect ${file} and run a real JSON validation. Do not repeat the completed contributor research or let the contributor write the deliverable.`,
+    fixtures: [{ path: source, content: `release=${release}\nwindow=${window}\n` }],
+    hiddenVerifier: {
+      kind: "json",
+      file,
+      expected: { release, window, source: "research_note", audience: "internal", status: "approved" },
+      requiresDelegation: true
+    }
+  };
+}
+
+const TASK_TEMPLATES = [nodeCliTemplate, pythonCliTemplate, jsonDocumentTemplate, externalNodeCliTemplate, jsonToCsvTemplate, zipArchiveTemplate, apiCollectionTemplate, imageToolAcquisitionTemplate, delegatedBriefTemplate];
 
 function expectedImagePixels(spec) {
   const background = hexRgba(spec.background);

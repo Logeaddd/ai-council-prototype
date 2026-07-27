@@ -5,7 +5,7 @@ import path from "node:path";
 import zlib from "node:zlib";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { campaignProviderFailureReason, classifyCampaignDelivery, isStreamingActivityEvent, postCouncilEvents, prepareCampaignFixtures, prepareGroupWorkspace, providerCallMetrics, runSeededRealUserBaseline, runSeededRealUserCampaign, verifyCampaignDeliverable, verifyCampaignPersistence, verifyCampaignResumption, verifyCampaignToolEvidence, verifyNoDuplicateVerifiedWork, waitForHarnessHealth } from "../src/realUserHarness.js";
+import { campaignProviderFailureReason, classifyCampaignDelivery, isStreamingActivityEvent, postCouncilEvents, prepareCampaignFixtures, prepareGroupWorkspace, providerCallMetrics, runSeededRealUserBaseline, runSeededRealUserCampaign, verifyCampaignCollaboration, verifyCampaignDeliverable, verifyCampaignPersistence, verifyCampaignResumption, verifyCampaignToolEvidence, verifyNoDuplicateVerifiedWork, waitForHarnessHealth } from "../src/realUserHarness.js";
 import { createSeededCampaignScenario, EXTERNAL_ROOT_TOKEN } from "../src/realUserCampaign.js";
 
 test("seeded real-user baseline uses the HTTP/SSE route, persists interruption, continues after restart, and verifies an edited artifact", async () => {
@@ -377,6 +377,35 @@ test("campaign workspaces create a local npm boundary instead of installing into
   } finally {
     fs.rmSync(parent, { recursive: true, force: true });
   }
+});
+
+test("campaign collaboration verifier requires an acknowledged read-only handoff before the owner writes the target", () => {
+  const verifier = { requiresDelegation: true, file: "deliverables/release-brief.json" };
+  const delegation = {
+    id: "delegation:1:1:critic",
+    type: "research",
+    assignedBy: "builder",
+    assigneeId: "critic",
+    allowWorkspaceMutation: false,
+    status: "completed",
+    ownerAcknowledged: true,
+    handoffEvidence: [{ kind: "tool", detail: "read_file research-note" }]
+  };
+  const sessions = [
+    {
+      createdAt: "2026-07-27T00:00:00.000Z",
+      executionState: { ownership: { delegations: [{ ...delegation, ownerAcknowledged: false }] } },
+      toolExecutionResults: [{ tool: "read_file", status: "completed", source_agent_id: "critic", path: "inputs/research-note.txt", result: { ok: true } }]
+    },
+    {
+      createdAt: "2026-07-27T00:01:00.000Z",
+      executionState: { ownership: { delegations: [delegation] } },
+      toolExecutionResults: [{ tool: "workspace_edit", status: "completed", source_agent_id: "builder", path: verifier.file, result: { ok: true, path: verifier.file } }]
+    }
+  ];
+
+  assert.equal(verifyCampaignCollaboration(verifier, sessions).passed, true);
+  assert.equal(verifyCampaignCollaboration(verifier, sessions.slice(0, 1)).passed, false);
 });
 
 test("capability-acquisition PNG verifier checks the real binary structure, dimensions and every RGBA pixel", async () => {

@@ -125,6 +125,37 @@ test("product harness rejects fake campaign reports and accepts retained real-pr
   assert.equal(evaluateProductHarness({ root, manifest, testEvidence: { status: "passed" } }).status, "complete");
 });
 
+test("product harness can require real-provider bounded-delegation evidence", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-product-collaboration-"));
+  const manifest = { tasks: [{ id: "T119", gates: [{
+    id: "collaboration",
+    type: "real_user_campaign",
+    reportsRoot: "eval/campaign",
+    requireDelegationEvidence: true,
+    requiredFamilies: [{ id: "owner_research", taskIds: ["delegated-brief"] }]
+  }] }] };
+  const reportDir = path.join(root, "eval", "campaign", "run-1");
+  fs.mkdirSync(reportDir, { recursive: true });
+  const report = {
+    schema: "ai-council.real-user-campaign-run.v1",
+    status: "passed",
+    seed: 8,
+    providerAcceptance: { realProvider: true, observedModelCalls: 3, blockedBeforeSendModelCalls: 0 },
+    scenario: { task: { id: "delegated-brief" } },
+    autonomousExecution: { passed: true, resumedAfterInterruption: true },
+    minimumUsableDelivery: { passed: true },
+    persistence: { passed: true },
+    recovery: { passed: true, checks: [{ id: "continuation_completed_visible_work", passed: true }] },
+    sessions: { interrupted: [{ id: "interrupted-8" }] }
+  };
+  fs.writeFileSync(path.join(reportDir, "report.json"), JSON.stringify(report), "utf8");
+  assert.equal(evaluateProductHarness({ root, manifest, testEvidence: { status: "passed" } }).status, "incomplete");
+
+  report.collaboration = { required: true, passed: true };
+  fs.writeFileSync(path.join(reportDir, "report.json"), JSON.stringify(report), "utf8");
+  assert.equal(evaluateProductHarness({ root, manifest, testEvidence: { status: "passed" } }).status, "complete");
+});
+
 test("product harness requires a real multi-family matrix and cannot count repeated seeds or fabricated acquisition", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-product-campaign-matrix-"));
   const reportsRoot = path.join(root, "eval", "campaign");

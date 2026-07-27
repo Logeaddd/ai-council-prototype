@@ -234,6 +234,7 @@ export async function runSeededRealUserCampaign(options = {}) {
     const artifactDelivery = await verifyCampaignDeliverable(campaign.hiddenVerifier, groupPath);
     const sessions = listPersistedSessions(groupPath);
     const toolEvidence = verifyCampaignToolEvidence(campaign.hiddenVerifier, sessions);
+    const collaboration = verifyCampaignCollaboration(campaign.hiddenVerifier, sessions);
     const deliveryLayers = classifyCampaignDelivery(artifactDelivery);
     const attemptedModelCalls = sessions.reduce((total, session) => total + Number(session.modelCallCount || 0), 0);
     const budgetLedger = readCampaignBudgetLedger(groupPath);
@@ -253,6 +254,7 @@ export async function runSeededRealUserCampaign(options = {}) {
     const physiologyPassed = !failure
       && deliveryLayers.minimumUsableDelivery.passed
       && toolEvidence.passed
+      && collaboration.passed
       && interruptedSessions.length === 2
       && resumed
       && persistence.passed
@@ -287,6 +289,7 @@ export async function runSeededRealUserCampaign(options = {}) {
         }
         : { mode: "not_required" },
       capabilityAcquisition: toolEvidence.acquisition,
+      collaboration,
       autonomousExecution: {
         campaignStagesExecuted: timeline.filter((item) => item.result === "completed").length,
         materialActionsObserved: timeline.filter((item) => isMaterialActionType(item.type)).length,
@@ -696,6 +699,65 @@ export function verifyCampaignToolEvidence(verifier = {}, sessions = []) {
   }
   if (!checks.length) checks.push(check("required_tool_evidence", true, "not_required"));
   return { passed: checks.every((item) => item.passed), checks, acquisition };
+}
+
+export function verifyCampaignCollaboration(verifier = {}, sessions = []) {
+  if (verifier.requiresDelegation !== true) {
+    return { required: false, passed: true, checks: [check("bounded_delegation_not_required", true, "not_required")] };
+  }
+
+  const ordered = [...(sessions || [])].sort((left, right) => Date.parse(left.createdAt || "") - Date.parse(right.createdAt || ""));
+  const delegationSnapshots = new Map();
+  for (const [sessionIndex, session] of ordered.entries()) {
+    for (const delegation of session.executionState?.ownership?.delegations || []) {
+      if (!delegation?.id) continue;
+      const current = delegationSnapshots.get(delegation.id);
+      const next = { delegation, sessionIndex };
+      if (!current || delegation.ownerAcknowledged || current.delegation.ownerAcknowledged !== true) delegationSnapshots.set(delegation.id, next);
+    }
+  }
+
+  const completedResearch = [...delegationSnapshots.values()].filter(({ delegation }) => (
+    delegation.type === "research"
+    && delegation.status === "completed"
+    && delegation.allowWorkspaceMutation !== true
+    && delegation.assignedBy
+    && delegation.assigneeId
+    && delegation.assignedBy !== delegation.assigneeId
+    && delegation.ownerAcknowledged === true
+    && Array.isArray(delegation.handoffEvidence)
+    && delegation.handoffEvidence.length > 0
+  ));
+  const integrated = completedResearch.filter(({ delegation, sessionIndex }) => ordered.slice(sessionIndex).some((session) => (
+    (session.toolExecutionResults || []).some((item) => (
+      item?.tool === "workspace_edit"
+      && item?.status === "completed"
+      && item?.result?.ok !== false
+      && item?.source_agent_id === delegation.assignedBy
+      && normalizeCampaignPath(item?.path || item?.result?.path) === normalizeCampaignPath(verifier.file)
+    ))
+  )));
+  const checks = [
+    check("bounded_research_handoff_completed", completedResearch.length > 0, `${completedResearch.length} completed acknowledged read-only research handoffs`),
+    check("owner_integrated_handoff_into_target", integrated.length > 0, `${integrated.length} owner writes to ${verifier.file || "target"} after a handoff`)
+  ];
+  return {
+    required: true,
+    passed: checks.every((item) => item.passed),
+    checks,
+    delegations: completedResearch.map(({ delegation }) => ({
+      id: delegation.id,
+      type: delegation.type,
+      ownerId: delegation.assignedBy,
+      assigneeId: delegation.assigneeId,
+      evidenceCount: delegation.handoffEvidence.length,
+      ownerAcknowledged: delegation.ownerAcknowledged === true
+    }))
+  };
+}
+
+function normalizeCampaignPath(value) {
+  return String(value || "").trim().replaceAll("\\", "/").replace(/^\.\//, "");
 }
 
 function acquisitionFollowedByLaterWork(acquisition, later) {

@@ -100,6 +100,7 @@ function evaluateRealUserCampaignGate(root, gate, base) {
     && report.recovery?.passed === true
     && hasCompleteContinuationEvidence(report)
     && Number(report.providerAcceptance?.observedModelCalls || report.sessions?.modelCalls || 0) > 0
+    && (gate.requireDelegationEvidence !== true || report.collaboration?.passed === true)
   ));
   const requiredFamilies = Array.isArray(gate.requiredFamilies) ? gate.requiredFamilies : [];
   const defaultMinimumFamilyAttempts = positiveInteger(gate.minimumAttemptsPerFamily, 1);
@@ -136,7 +137,7 @@ function evaluateRealUserCampaignGate(root, gate, base) {
   const minimumDistinctSeeds = positiveInteger(gate.minimumDistinctSeeds, 1);
   const minimumPassRate = campaignPassRate(gate.minimumPassRate);
   const passRate = evidenceReports.length > 0 ? passedReports.length / evidenceReports.length : 0;
-  const latestTaskEvidence = latestCampaignTaskEvidence(evidenceReports, root);
+  const latestTaskEvidence = latestCampaignTaskEvidence(evidenceReports, root, gate);
   const latestTasksPassed = gate.requireLatestPerTaskPass !== true || latestTaskEvidence.every((item) => item.status === "passed");
   const matrixPassed = passedReports.length >= minimumPassedReports
     && distinctTaskIds.size >= minimumDistinctTaskIds
@@ -154,12 +155,13 @@ function evaluateRealUserCampaignGate(root, gate, base) {
       reportsRoot: path.relative(root, reportsRoot).replaceAll("\\", "/"),
       matchingReports: reports.length,
       evaluatedReports: evidenceReports.length,
-      failedReports: evidenceReports.filter(({ report }) => report.status !== "passed").map(({ filePath }) => path.relative(root, filePath).replaceAll("\\", "/")),
+      failedReports: evidenceReports.filter(({ report }) => !campaignReportPassesGate(report, gate)).map(({ filePath }) => path.relative(root, filePath).replaceAll("\\", "/")),
       passedReports: passedReports.map(({ filePath }) => path.relative(root, filePath).replaceAll("\\", "/")),
       minimumPassedReports,
       minimumDistinctTaskIds,
       minimumDistinctSeeds,
       evidenceWindowPerTask: optionalPositiveInteger(gate.evidenceWindowPerTask),
+      requireDelegationEvidence: gate.requireDelegationEvidence === true,
       passRate,
       minimumPassRate,
       requireLatestPerTaskPass: gate.requireLatestPerTaskPass === true,
@@ -187,18 +189,23 @@ function selectCampaignEvidenceReports(reports, gate) {
   });
 }
 
-function latestCampaignTaskEvidence(reports, root) {
+function latestCampaignTaskEvidence(reports, root, gate = {}) {
   const latest = new Map();
   for (const item of reports) {
     const taskId = campaignTaskId(item.report);
     if (!taskId || latest.has(taskId)) continue;
     latest.set(taskId, {
       taskId,
-      status: String(item.report.status || "unknown"),
+      status: campaignReportPassesGate(item.report, gate) ? "passed" : "failed",
       report: path.relative(root, item.filePath).replaceAll("\\", "/")
     });
   }
   return [...latest.values()];
+}
+
+function campaignReportPassesGate(report = {}, gate = {}) {
+  return report.status === "passed"
+    && (gate.requireDelegationEvidence !== true || report.collaboration?.passed === true);
 }
 
 function campaignTaskId(report) {
