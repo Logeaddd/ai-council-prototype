@@ -4,6 +4,10 @@ import { estimateMessagesTokens, estimateTokens, hasCoreOverflow, resolveEffecti
 import { formatTaskStateForPrompt } from "./taskState.js";
 
 const DEFAULT_RECENT_MESSAGES = 6;
+const DEFAULT_ACTIVE_WORKING_MEMORY_TOKENS = 900;
+const MAX_ACTIVE_WORKING_MEMORY_TOKENS = 1400;
+const MAX_ACTIVE_WORKING_MEMORY_ROUND_ANCHORS = 8;
+const MAX_ACTIVE_WORKING_MEMORY_MEMBER_ANCHORS = 2;
 const DEFAULT_ARCHIVE_CONTEXT_ITEMS = 5;
 const DEFAULT_ARCHIVE_CONTEXT_TOKENS = 900;
 const MAX_TOOL_CONTEXT_STRING_CHARS = 4000;
@@ -88,6 +92,15 @@ export function buildMemberContext(agent, session, options = {}) {
     privateBossMessages: Array.isArray(options.privateBossMessages) ? options.privateBossMessages : [],
     enabledSkills: String(options.enabledSkills || "").trim()
   };
+  const requestedRecentTranscript = selectRecentTranscript(visibleMessages, options.recentMessageLimit ?? options.groupSettings?.recentMessageLimit);
+  const activeWorkingMemory = buildActiveWorkingMemory({
+    messages: visibleMessages,
+    recentTranscript: requestedRecentTranscript,
+    sessionId: String(session?.id || "active-session"),
+    limits,
+    configuredMaxTokens: options.activeWorkingMemoryTokens ?? options.groupSettings?.activeWorkingMemoryTokens
+  });
+  summaries.activeWorkingMemory = activeWorkingMemory;
   const stableMessages = contextMessagesFromStable(stable);
   const currentTurnEvidenceBudget = resolveCurrentTurnEvidenceBudget({
     limits,
@@ -113,14 +126,14 @@ export function buildMemberContext(agent, session, options = {}) {
   const currentInstructionSource = contextSource("session_question", String(session?.id || "active-session"), {
     sessionId: String(session?.id || "active-session")
   });
-  const requestedRecentTranscript = selectRecentTranscript(visibleMessages, options.recentMessageLimit ?? options.groupSettings?.recentMessageLimit);
   const provisionalInvalidationSourceRefs = buildInvalidationSourceRefs({
     session,
     recentTranscript: requestedRecentTranscript,
     retrievedContext: summaries.retrievedContext.items,
     summarySources: summarySelection.sources,
     continuationSources: continuationSelection.sources,
-    publicEvents: summaries.publicEventHotCache.events
+    publicEvents: summaries.publicEventHotCache.events,
+    activeWorkingMemorySources: activeWorkingMemory.sources
   });
   const core = {
     ...coreBase,
@@ -150,7 +163,8 @@ export function buildMemberContext(agent, session, options = {}) {
     retrievedContext: summaries.retrievedContext.items,
     summarySources: summarySelection.sources,
     continuationSources: continuationSelection.sources,
-    publicEvents: summaries.publicEventHotCache.events
+    publicEvents: summaries.publicEventHotCache.events,
+    activeWorkingMemorySources: activeWorkingMemory.sources
   });
   coreMessages = contextMessagesFromCore(core);
   const recentMessages = recentTranscript.map((message) => ({
@@ -271,6 +285,7 @@ function buildContextReceiptDraft({ agent, session, options, context, visibleMes
     ...(currentTurnEvidence.receipt?.decisions || []),
     ...(context.summaries.retrievedContext.receipt?.decisions || []),
     ...(context.summaries.summaryContext?.decisions || []),
+    ...(context.summaries.activeWorkingMemory?.decisions || []),
     ...(context.summaries.continuationContextSelection?.decisions || [])
   ]);
   return {
@@ -625,10 +640,11 @@ function formatContextPriorityPolicy(policy = {}) {
   return `Context priority is strict: ${tiers.join(" > ")}. Current user instructions override conflicting retained history. Only validated, source-specific replacement records exclude retained sources; invalidated sources remain loadable from retained history by their exact source pointer.`;
 }
 
-function buildInvalidationSourceRefs({ session, recentTranscript, retrievedContext, summarySources, continuationSources, publicEvents }) {
+function buildInvalidationSourceRefs({ session, recentTranscript, retrievedContext, summarySources, continuationSources, publicEvents, activeWorkingMemorySources }) {
   const sessionId = String(session?.id || "active-session");
   const candidates = [
     ...(Array.isArray(recentTranscript) ? recentTranscript.map((message, index) => transcriptSource(message, sessionId, index)) : []),
+    ...(Array.isArray(activeWorkingMemorySources) ? activeWorkingMemorySources : []),
     ...(Array.isArray(retrievedContext) ? retrievedContext.map(retrievedContextSource) : []),
     ...(Array.isArray(summarySources) ? summarySources : []),
     ...(Array.isArray(continuationSources) ? continuationSources : []),
@@ -710,6 +726,7 @@ function contextSourcesBySection({ agent, session, options, context, recentTrans
     summaries: [
       ...(context.summaries.summaryContext?.sources || [])
     ],
+    active_working_memory: context.summaries.activeWorkingMemory?.sources || [],
     relevant_archived_context: retrievedSources,
     group_history_catalogue: historySources,
     recent_public_activity_cache: hotCacheSources,
@@ -830,6 +847,7 @@ export function buildContextPromptSections(context) {
       ...formatCompressedTranscriptChunks(context.summaries.compressedTranscriptChunks),
       context.summaries.publicMemorySummary ? `Public memory summary: ${context.summaries.publicMemorySummary}` : ""
     ]],
+    ["Active working memory", formatActiveWorkingMemory(context.summaries.activeWorkingMemory)],
     ["Relevant archived context", formatRetrievedContext(context.summaries.retrievedContext)],
     ["Group history catalogue", formatHistoryCatalogue(context.summaries.historyCatalogue)],
     ["Recent public activity cache", formatPublicEventHotCache(context.summaries.publicEventHotCache)],
@@ -1506,6 +1524,198 @@ function selectRecentTranscript(messages, limit = DEFAULT_RECENT_MESSAGES) {
   return messages.slice(-safeCount);
 }
 
+// This is an ephemeral, replace-on-build view over the active session, not a
+// second history store. It keeps durable handoffs plus a small cross-member
+// window visible when a long run has pushed them out of the raw recent window.
+function buildActiveWorkingMemory({ messages, recentTranscript, sessionId, limits, configuredMaxTokens }) {
+  const recent = new Set(Array.isArray(recentTranscript) ? recentTranscript : []);
+  const candidates = (Array.isArray(messages) ? messages : []).map((message, index) => ({
+    message,
+    index,
+    source: transcriptSource(message, sessionId, index),
+    structural: hasStructuredWorkingMemorySignal(message),
+    substantive: hasSubstantiveWorkingMemoryContent(message)
+  })).filter((item) => !recent.has(item.message));
+  const tokenBudget = resolveActiveWorkingMemoryTokenBudget(limits, configuredMaxTokens);
+  if (!candidates.length || tokenBudget <= 0) {
+    return {
+      entries: [],
+      sources: [],
+      decisions: candidates.map((item) => workingMemoryOmissionDecision(item, tokenBudget <= 0 ? "active_working_memory_disabled_or_no_budget" : "active_working_memory_no_candidates")),
+      tokenBudget,
+      estimatedTokens: 0,
+      candidateCount: candidates.length,
+      source: "derived_from_active_session"
+    };
+  }
+
+  const nominations = new Map();
+  const nominate = (item, reason) => {
+    if (!item?.substantive && !item?.structural) return;
+    const existing = nominations.get(item.source.id);
+    if (existing) {
+      existing.reasons.add(reason);
+      return;
+    }
+    nominations.set(item.source.id, { ...item, reasons: new Set([reason]) });
+  };
+
+  let structuralCount = 0;
+  for (const item of [...candidates].reverse()) {
+    if (!item.structural) continue;
+    nominate(item, "structured_handoff_or_contract");
+    structuralCount += 1;
+    if (structuralCount >= MAX_ACTIVE_WORKING_MEMORY_ROUND_ANCHORS) break;
+  }
+
+  const memberAnchors = new Map();
+  for (const item of [...candidates].reverse()) {
+    if (!item.substantive) continue;
+    const memberId = String(item.message?.agentId || item.message?.agentName || "unknown");
+    const count = memberAnchors.get(memberId) || 0;
+    if (count >= MAX_ACTIVE_WORKING_MEMORY_MEMBER_ANCHORS) continue;
+    nominate(item, "latest_member_work");
+    memberAnchors.set(memberId, count + 1);
+  }
+
+  const roundAnchors = new Set();
+  for (const item of [...candidates].reverse()) {
+    if (!item.substantive) continue;
+    const round = String(item.message?.round ?? "unknown");
+    if (roundAnchors.has(round)) continue;
+    nominate(item, "latest_round_work");
+    roundAnchors.add(round);
+    if (roundAnchors.size >= MAX_ACTIVE_WORKING_MEMORY_ROUND_ANCHORS) break;
+  }
+  if (!nominations.size) nominate(candidates.at(-1), "latest_available_record");
+
+  const priority = [...nominations.values()].sort((left, right) => {
+    const leftWeight = (left.structural ? 4 : 0) + (left.reasons.has("latest_member_work") ? 2 : 0) + (left.reasons.has("latest_round_work") ? 1 : 0);
+    const rightWeight = (right.structural ? 4 : 0) + (right.reasons.has("latest_member_work") ? 2 : 0) + (right.reasons.has("latest_round_work") ? 1 : 0);
+    return rightWeight - leftWeight || right.index - left.index;
+  });
+  const included = new Map();
+  let estimatedTokens = 0;
+  for (const item of priority) {
+    const entry = activeWorkingMemoryEntry(item);
+    const entryTokens = estimateTokens(formatActiveWorkingMemoryEntry(entry), limits);
+    if (estimatedTokens + entryTokens > tokenBudget) continue;
+    included.set(item.source.id, entry);
+    estimatedTokens += entryTokens;
+  }
+  const entries = [...included.values()].sort((left, right) => left.index - right.index);
+  return {
+    entries,
+    sources: entries.map((entry) => entry.source),
+    decisions: candidates.map((item) => {
+      const entry = included.get(item.source.id);
+      return entry
+        ? {
+            section: "active_working_memory",
+            source: item.source,
+            status: "injected",
+            reason: `active_working_memory_${entry.reasons.join("_")}`
+          }
+        : workingMemoryOmissionDecision(item, nominations.has(item.source.id)
+          ? "active_working_memory_token_budget"
+          : "active_working_memory_not_selected");
+    }),
+    tokenBudget,
+    estimatedTokens,
+    candidateCount: candidates.length,
+    source: "derived_from_active_session"
+  };
+}
+
+function resolveActiveWorkingMemoryTokenBudget(limits = {}, configuredMaxTokens) {
+  const configured = Number(configuredMaxTokens);
+  if (Number.isFinite(configured)) return Math.max(0, Math.min(MAX_ACTIVE_WORKING_MEMORY_TOKENS, Math.floor(configured)));
+  const target = compressionTargetTokens(limits);
+  if (!target) return DEFAULT_ACTIVE_WORKING_MEMORY_TOKENS;
+  return Math.max(240, Math.min(DEFAULT_ACTIVE_WORKING_MEMORY_TOKENS, Math.floor(target * 0.12)));
+}
+
+function hasStructuredWorkingMemorySignal(message = {}) {
+  const response = message?.response || {};
+  return Boolean(
+    response.task_contract
+    || response.delegation_handoff
+    || response.task_delegations?.length
+    || response.objection_items?.length
+    || response.artifacts?.length
+  );
+}
+
+function hasSubstantiveWorkingMemoryContent(message = {}) {
+  if (hasStructuredWorkingMemorySignal(message)) return true;
+  if (message?.interim) return false;
+  const response = message?.response || {};
+  return Boolean(String(response.argument || response.reason || response.position || "").trim());
+}
+
+function activeWorkingMemoryEntry(item = {}) {
+  return {
+    index: item.index,
+    source: item.source,
+    agentName: String(item.message?.agentName || item.message?.agentId || "Member"),
+    round: Number(item.message?.round || 0),
+    phase: String(item.message?.phase || ""),
+    status: String(item.message?.response?.status || ""),
+    reasons: [...item.reasons],
+    excerpt: compactContextString(activeWorkingMemoryExcerpt(item.message), 560)
+  };
+}
+
+function activeWorkingMemoryExcerpt(message = {}) {
+  const response = message?.response || {};
+  const parts = [formatTranscriptMessage(message)];
+  if (response.task_contract && typeof response.task_contract === "object") {
+    const contract = response.task_contract;
+    parts.push(`Task contract: mode=${contract.mode || ""}; objective=${contract.objective || ""}; next_action=${contract.next_action || contract.nextAction || ""}`);
+  }
+  if (Array.isArray(response.task_delegations) && response.task_delegations.length) {
+    parts.push(`Delegations: ${response.task_delegations.map((item) => `${item.id || item.delegation_id || "?"}:${item.assignee || item.agentId || "?"}:${item.kind || ""}:${item.task || item.objective || ""}`).join(" | ")}`);
+  }
+  if (response.delegation_handoff && typeof response.delegation_handoff === "object") {
+    parts.push(`Delegation handoff: ${response.delegation_handoff.delegation_id || "?"}; ${response.delegation_handoff.summary || ""}`);
+  }
+  if (Array.isArray(response.objection_items) && response.objection_items.length) {
+    parts.push(`Objections: ${response.objection_items.map((item) => item.issue || item.id || item.reason || "").filter(Boolean).join(" | ")}`);
+  }
+  return parts.filter(Boolean).join("\n");
+}
+
+function formatActiveWorkingMemory(value = {}) {
+  const entries = Array.isArray(value?.entries) ? value.entries : [];
+  if (!entries.length) return [];
+  return [
+    `Replaceable active-session working set derived from ${value.candidateCount || entries.length} older visible records. It is not a second memory store; raw records remain in the session and can be loaded by exact source reference.`,
+    ...entries.map(formatActiveWorkingMemoryEntry)
+  ];
+}
+
+function formatActiveWorkingMemoryEntry(entry = {}) {
+  const source = entry.source || {};
+  const metadata = [
+    `source_ref=${JSON.stringify({ type: source.type, id: source.id, sessionId: source.sessionId, round: source.round })}`,
+    `round=${entry.round || "?"}`,
+    `member=${entry.agentName}`,
+    entry.phase ? `phase=${entry.phase}` : "",
+    entry.status ? `status=${entry.status}` : "",
+    entry.reasons?.length ? `selected=${entry.reasons.join(",")}` : ""
+  ].filter(Boolean).join(" ");
+  return `${metadata}\n${entry.excerpt}`;
+}
+
+function workingMemoryOmissionDecision(item = {}, reason) {
+  return {
+    section: "active_working_memory",
+    source: item.source,
+    status: "retrieved_but_omitted",
+    reason
+  };
+}
+
 function fitRecentTranscriptToLimit({ stableMessages, currentTurnMessages = [], coreMessages, summaryMessages, recentTranscript, limits }) {
   const targetTokens = compressionTargetTokens(limits);
   if (!targetTokens) return recentTranscript;
@@ -1596,6 +1806,7 @@ function contextMessagesFromSummaries(summaries) {
     { role: "user", content: summaries.groupSharedSummary },
     { role: "user", content: formatCompressedTranscriptChunks(summaries.compressedTranscriptChunks).join("\n") },
     { role: "user", content: summaries.publicMemorySummary },
+    { role: "user", content: formatActiveWorkingMemory(summaries.activeWorkingMemory).join("\n") },
     { role: "user", content: summaries.enabledSkills },
     { role: "user", content: formatRetrievedContext(summaries.retrievedContext).join("\n") },
     { role: "user", content: formatHistoryCatalogue(summaries.historyCatalogue).join("\n") },

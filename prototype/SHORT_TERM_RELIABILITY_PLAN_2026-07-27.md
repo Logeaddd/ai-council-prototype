@@ -331,6 +331,31 @@ Completed on 2026-07-27:
   0 failed, and 1 Windows platform skip out of 766 tests; the production
   renderer build passed. These are local implementation evidence, not a
   real-provider semantic-reasoning acceptance pass.
+* T113 was implemented only after the live-session measurement exposed a
+  concrete gap: before this change, a long active task automatically injected
+  only its last six raw member records, while deterministic summaries were not
+  written until the task ended. The new bounded active working set is rebuilt
+  from the current session on every context build, so it is a replaceable view
+  rather than an append-only second history. It prioritizes attributable task
+  contracts/delegation handoffs and the latest substantive record from each
+  participant and recent round; every entry carries its exact raw message
+  reference, remains subject to source-specific invalidation, and is charged
+  to the same prompt budget and receipt as every other section. The pressure
+  run at `eval/context-pressure/baseline-20260727-1785165879342/report.json`
+  covers a 24-record active session where both an early architecture decision
+  and early structured handoff remain visible outside the six-record raw
+  window. This is local context-pipeline evidence, not a claim that a real
+  Provider will reason correctly from the working set.
+* T114 was audited in the existing retrieval path rather than rebuilt. The
+  current public journal is a structured JSON index with lexical matching,
+  filters, pagination, and exact-event loading; it is not FTS5. The real-path
+  audit at `eval/retrieval-audit/audit-20260727-1785165463642/report.json`
+  recalled the exact target and applied combined filters, pagination, and
+  tombstones correctly at 2,400 indexed fixture messages; the measured query
+  was 14.921 ms against a deliberately generous 1,500 ms ceiling. No measured
+  latency or exact-lexical-recall gap currently justifies an FTS5 or vector
+  parallel retrieval system. The audit does not establish paraphrase/semantic
+  recall, which remains a conditional T116 question for real-provider tests.
 
 Still open before the real-provider release gate:
 
@@ -352,12 +377,13 @@ Still open before the real-provider release gate:
   with real Providers across several project families. The local orchestration
   test proves the path exists; it does not prove a provider will choose good
   delegation boundaries or integrate evidence correctly under pressure.
-* T113 remains deliberately unbuilt. Use the new source receipts and pressure
-  measurements to identify a repeatable short-term working-memory failure
-  before adding a replaceable cache; do not introduce an append-only parallel
-  history. T114 likewise remains an audit of existing structured retrieval and
-  performance, with FTS5 or semantic retrieval permitted only after measured
-  recall evidence shows a gap.
+* T113's local active-working-set proof now needs real-provider observation:
+  use the context receipts to distinguish a missing source from a model that
+  saw it but ignored it. Do not turn the derived working set into a persistent
+  second history or loosen source-specific invalidation. T114 remains an audit
+  discipline: add FTS5 or semantic retrieval only after a measured real query
+  latency, exact-recall, or paraphrase-recall gap, not because an index is
+  fashionable.
 * Add PTY only where a real task proves interactive stdin is the blocker;
   absence alone is not evidence for a parallel terminal system.
 * Run the paid real-provider campaign with its mechanical oracles, distinct

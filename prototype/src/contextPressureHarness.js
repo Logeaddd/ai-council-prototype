@@ -25,6 +25,7 @@ export function runContextPressureBaseline(options = {}) {
       runSupersededInstructionScenario(groupPath, fixture),
       runPersistedInvalidationScenario(groupPath, fixture),
       runRepeatedEvidenceScenario(groupPath, fixture),
+      runLongActiveSessionWorkingSetScenario(groupPath, fixture),
       runContinuationCacheScenario(groupPath, fixture),
       runMultiMemberResumeScenario(groupPath, fixture)
     ];
@@ -41,7 +42,8 @@ export function runContextPressureBaseline(options = {}) {
       limitations: [
         "This baseline calls the real retained-session, public-journal, index-rebuild, hot-cache, archive-search and buildMemberContext paths.",
         "It does not score model understanding or delivery quality. Those remain T117 real-provider acceptance concerns.",
-        "Superseded-instruction conflicts are measured here; T113 owns policy changes and explicit invalidation."
+        "The active working set is derived from the live session on every build; it is bounded context selection, not a second memory store.",
+        "It does not score model understanding or whether a Provider chooses to retrieve a source that remains omitted. Those remain real-provider acceptance concerns."
       ]
     };
     fs.writeFileSync(path.join(runDir, "report.json"), JSON.stringify(report, null, 2), "utf8");
@@ -188,6 +190,76 @@ function runRepeatedEvidenceScenario(groupPath, fixture) {
     compression: context.executionEvidenceCompression,
     receiptTokens: context.contextReceipt.budget.estimatedContextTokens
   }, deduplicated === repeated.length - 1 && injected <= 1);
+}
+
+function runLongActiveSessionWorkingSetScenario(groupPath, fixture) {
+  const architectureMarker = `T113_ACTIVE_ARCHITECTURE_${fixture.anchor}`;
+  const handoffMarker = `T113_ACTIVE_HANDOFF_${fixture.anchor}`;
+  const messages = [
+    message({
+      id: "active_architecture_decision",
+      round: 1,
+      modelCallIndex: 1,
+      agentId: "architect",
+      agentName: "Architect",
+      text: `Architecture decision: ${architectureMarker}.`
+    }),
+    {
+      ...message({
+        id: "active_delivery_handoff",
+        round: 2,
+        modelCallIndex: 2,
+        agentId: "delivery_owner",
+        agentName: "Delivery Owner",
+        text: `Delivery handoff: ${handoffMarker}.`
+      }),
+      response: {
+        status: "speak",
+        argument: `Delivery handoff: ${handoffMarker}.`,
+        task_contract: { mode: "delivery", objective: "Preserve cross-member continuity.", next_action: "Continue the verified task." },
+        delegation_handoff: { delegation_id: "active_handoff", summary: handoffMarker }
+      }
+    },
+    ...Array.from({ length: 22 }, (_, index) => ({
+      ...message({
+        id: `active_progress_${index}`,
+        round: index + 3,
+        modelCallIndex: index + 3,
+        agentId: index % 2 ? "reviewer" : "delivery_owner",
+        agentName: index % 2 ? "Reviewer" : "Delivery Owner",
+        text: `Transient tool progress ${index}.`
+      }),
+      interim: true
+    }))
+  ];
+  const session = activeSession("long_active_session", "Continue the active task with its recorded ownership.", messages);
+  const context = buildRealContext(session, fixture, {
+    recentMessageLimit: 6,
+    activeWorkingMemoryTokens: 1200
+  });
+  const prompt = contextPrompt(context);
+  const workingSection = context.contextReceipt.sections.find((section) => section.id === "active_working_memory");
+  const workingDecisions = context.contextReceipt.decisions.filter((item) => item.section === "active_working_memory");
+  const recentIds = new Set(context.recentTranscript.map((item) => item.id));
+  return measured("long_active_session_working_set", {
+    activeSessionMessages: messages.length,
+    rawRecentMessages: context.recentTranscript.length,
+    architectureWasOutsideRecentWindow: !recentIds.has("active_architecture_decision"),
+    handoffWasOutsideRecentWindow: !recentIds.has("active_delivery_handoff"),
+    architectureVisible: prompt.includes(architectureMarker),
+    handoffVisible: prompt.includes(handoffMarker),
+    activeWorkingSources: workingSection?.sources.map((source) => source.id) || [],
+    activeWorkingDecisions: {
+      injected: workingDecisions.filter((item) => item.status === "injected").length,
+      omitted: workingDecisions.filter((item) => item.status === "retrieved_but_omitted").length
+    },
+    receiptTokens: context.contextReceipt.budget.estimatedContextTokens
+  }, !recentIds.has("active_architecture_decision")
+    && !recentIds.has("active_delivery_handoff")
+    && prompt.includes(architectureMarker)
+    && prompt.includes(handoffMarker)
+    && workingSection?.sources.some((source) => source.id === "active_architecture_decision")
+    && workingSection?.sources.some((source) => source.id === "active_delivery_handoff"));
 }
 
 function runPersistedInvalidationScenario(groupPath, fixture) {
@@ -431,6 +503,7 @@ function aggregateScenarios(scenarios) {
     failed: scenarios.filter((scenario) => scenario.status !== "measured").map((scenario) => scenario.id),
     staleInstructionVisibility: scenarios.find((scenario) => scenario.id === "superseded_instruction_visibility")?.metrics || {},
     duplicateEvidence: scenarios.find((scenario) => scenario.id === "repeated_execution_evidence")?.metrics || {},
+    activeWorkingMemory: scenarios.find((scenario) => scenario.id === "long_active_session_working_set")?.metrics || {},
     multiMemberResume: scenarios.find((scenario) => scenario.id === "multi_member_visibility_and_resume")?.metrics || {}
   };
 }

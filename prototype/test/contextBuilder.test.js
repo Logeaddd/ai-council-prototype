@@ -1055,6 +1055,72 @@ test("explicit invalidation excludes attributed summaries and compressed caches 
   assert.equal(context.contextReceipt.decisions.some((item) => item.reason === "summary_provenance_missing_under_invalidation"), true);
 });
 
+test("active working memory keeps early cross-member handoffs visible without creating a second history store", () => {
+  const session = {
+    id: "session_active_working_memory",
+    question: "Continue the long-running delivery task.",
+    unresolvedObjections: {},
+    artifacts: [],
+    messages: [
+      {
+        id: "architect_early_decision",
+        round: 1,
+        agentId: "architect",
+        agentName: "Architect",
+        response: { status: "speak", argument: "ACTIVE_MEMORY_ARCHITECTURE_DECISION" }
+      },
+      {
+        id: "builder_early_handoff",
+        round: 2,
+        agentId: "builder",
+        agentName: "Builder",
+        response: {
+          status: "speak",
+          argument: "ACTIVE_MEMORY_STRUCTURED_HANDOFF",
+          task_contract: { mode: "delivery", objective: "Preserve active task ownership.", next_action: "Implement the artifact." },
+          delegation_handoff: { delegation_id: "handoff_1", summary: "ACTIVE_MEMORY_HANDOFF_SUMMARY" }
+        }
+      },
+      ...Array.from({ length: 15 }, (_, index) => ({
+        id: `later_${index}`,
+        round: index + 3,
+        agentId: index % 2 ? "reviewer" : "builder",
+        agentName: index % 2 ? "Reviewer" : "Builder",
+        interim: true,
+        response: { status: "speak", argument: `tool progress ${index}` }
+      }))
+    ]
+  };
+  const context = buildMemberContext(agent, session, {
+    groupSettings: { recentMessageLimit: 6, activeWorkingMemoryTokens: 1200 }
+  });
+  const prompt = buildContextPromptSections(context).map((section) => section.content).join("\n");
+  const workingSection = context.contextReceipt.sections.find((section) => section.id === "active_working_memory");
+
+  assert.equal(context.recentTranscript.some((message) => message.id === "architect_early_decision"), false);
+  assert.equal(context.recentTranscript.some((message) => message.id === "builder_early_handoff"), false);
+  assert.match(prompt, /ACTIVE_MEMORY_ARCHITECTURE_DECISION/);
+  assert.match(prompt, /ACTIVE_MEMORY_STRUCTURED_HANDOFF/);
+  assert.match(prompt, /ACTIVE_MEMORY_HANDOFF_SUMMARY/);
+  assert.equal(workingSection.sources.some((source) => source.id === "architect_early_decision"), true);
+  assert.equal(workingSection.sources.some((source) => source.id === "builder_early_handoff"), true);
+  assert.equal(context.contextReceipt.decisions.some((item) => item.section === "active_working_memory" && item.source.id === "builder_early_handoff" && item.status === "injected"), true);
+
+  const replaced = buildMemberContext(agent, session, {
+    latestBossInstruction: "The builder handoff is replaced by a new user decision.",
+    groupSettings: { recentMessageLimit: 6, activeWorkingMemoryTokens: 1200 },
+    contextInvalidations: [{
+      source: { type: "member_message", id: "builder_early_handoff" },
+      supersededBy: { type: "latest_boss_instruction", id: "session_active_working_memory:latest" },
+      reason: "user_replaced_early_handoff"
+    }]
+  });
+  const replacedPrompt = buildContextPromptSections(replaced).map((section) => section.content).join("\n");
+  assert.doesNotMatch(replacedPrompt, /ACTIVE_MEMORY_STRUCTURED_HANDOFF/);
+  assert.doesNotMatch(replacedPrompt, /ACTIVE_MEMORY_HANDOFF_SUMMARY/);
+  assert.equal(session.messages[1].response.argument, "ACTIVE_MEMORY_STRUCTURED_HANDOFF");
+});
+
 test("unknown provider capacity remains explicit and retains bounded immediate tool evidence", () => {
   const unknownAgent = {
     ...agent,

@@ -11,7 +11,7 @@ test("context pressure baseline uses retained sessions, a rebuilt public index, 
     const run = runContextPressureBaseline({ outputDir, seed: 20260714 });
     assert.equal(run.report.status, "passed", JSON.stringify(run.report, null, 2));
     assert.equal(run.report.scope, "deterministic_context_pipeline_only");
-    assert.equal(run.report.scenarios.length, 6);
+    assert.equal(run.report.scenarios.length, 7);
     assert.equal(run.report.scenarios.every((scenario) => scenario.status === "measured"), true);
 
     const buried = run.report.scenarios.find((scenario) => scenario.id === "buried_exact_source");
@@ -37,6 +37,15 @@ test("context pressure baseline uses retained sessions, a rebuilt public index, 
     assert.equal(repeated.metrics.deduplicated, 95);
     assert.equal(repeated.metrics.injected, 1);
     assert.equal(repeated.metrics.latestEvidenceVisible, true);
+
+    const activeWorking = run.report.scenarios.find((scenario) => scenario.id === "long_active_session_working_set");
+    assert.equal(activeWorking.metrics.activeSessionMessages, 24);
+    assert.equal(activeWorking.metrics.architectureWasOutsideRecentWindow, true);
+    assert.equal(activeWorking.metrics.handoffWasOutsideRecentWindow, true);
+    assert.equal(activeWorking.metrics.architectureVisible, true);
+    assert.equal(activeWorking.metrics.handoffVisible, true);
+    assert.equal(activeWorking.metrics.activeWorkingSources.includes("active_architecture_decision"), true);
+    assert.equal(activeWorking.metrics.activeWorkingSources.includes("active_delivery_handoff"), true);
 
     const multiMember = run.report.scenarios.find((scenario) => scenario.id === "multi_member_visibility_and_resume");
     assert.equal(multiMember.metrics.members.length, 3);
