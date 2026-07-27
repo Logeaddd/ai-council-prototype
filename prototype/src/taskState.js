@@ -212,6 +212,7 @@ function normalizeExecutionOwnership(value, execution = {}) {
         id: String(item.id || ""),
         type: String(item.type || ""),
         checkpointVersion: Math.max(0, Number(item.checkpointVersion || 0)),
+        createdAt: String(item.createdAt || ""),
         assignedBy: String(item.assignedBy || ""),
         assigneeId: String(item.assigneeId || ""),
         assigneeName: String(item.assigneeName || ""),

@@ -259,6 +259,7 @@ test("task run preserves a pending bounded delegation through interruption and r
         id: "delegation:0:3:researcher",
         type: "research",
         checkpointVersion: 0,
+        createdAt: "2026-07-27T10:00:00.000Z",
         assignedBy: "builder",
         assigneeId: "researcher",
         assigneeName: "Researcher",
@@ -292,6 +293,7 @@ test("task run preserves a pending bounded delegation through interruption and r
   assert.equal(resumed.execution.delegationSequence, 3);
   assert.equal(delegation.status, "pending");
   assert.equal(delegation.native, true);
+  assert.equal(delegation.createdAt, "2026-07-27T10:00:00.000Z");
   assert.equal(delegation.task, "Find the required format fact.");
   assert.deepEqual(delegation.expectedEvidence, ["Official source"]);
   assert.deepEqual(delegation.allowedTools, ["web_search", "fetch_url"]);

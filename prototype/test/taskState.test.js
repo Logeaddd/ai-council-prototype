@@ -150,6 +150,7 @@ test("fallback task-state recovery retains pending bounded work and schedules on
           id: "delegation:1:4:researcher",
           type: "research",
           checkpointVersion: 1,
+          createdAt: "2026-07-27T10:00:00.000Z",
           assignedBy: "builder",
           assigneeId: "researcher",
           assigneeName: "Researcher",
@@ -185,6 +186,7 @@ test("fallback task-state recovery retains pending bounded work and schedules on
 
   assert.equal(resumed.delegationSequence, 4);
   assert.equal(resumed.ownership.delegations[0].native, true);
+  assert.equal(resumed.ownership.delegations[0].createdAt, "2026-07-27T10:00:00.000Z");
   assert.equal(resumed.ownership.delegations[0].task, "Find the official format fact.");
   assert.deepEqual(selectExecutionAgents(resumed, agents).map((agent) => agent.id), ["researcher"]);
 });

@@ -597,6 +597,7 @@ function compactDelegation(value = {}) {
     id: String(value.id || ""),
     type: String(value.type || ""),
     checkpointVersion: Math.max(0, Number(value.checkpointVersion || 0)),
+    createdAt: String(value.createdAt || ""),
     assignedBy: String(value.assignedBy || ""),
     assigneeId: String(value.assigneeId || ""),
     assigneeName: String(value.assigneeName || ""),

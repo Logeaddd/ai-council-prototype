@@ -1007,6 +1007,7 @@ function registerOwnerDelegations(state, response = {}, agents = []) {
         id: `delegation:rejected:${state.checkpointVersion}:${++state.delegationSequence}`,
         type: WORK_DELEGATION_TYPES.has(type) ? type : "invalid",
         checkpointVersion: state.checkpointVersion,
+        createdAt: new Date().toISOString(),
         assignedBy: ownership.ownerId,
         assigneeId,
         assigneeName: assignee?.name || "",
@@ -1028,6 +1029,7 @@ function registerOwnerDelegations(state, response = {}, agents = []) {
       id: `delegation:${state.checkpointVersion}:${++state.delegationSequence}:${assigneeId}`,
       type,
       checkpointVersion: state.checkpointVersion,
+      createdAt: new Date().toISOString(),
       assignedBy: ownership.ownerId,
       assigneeId,
       assigneeName: assignee.name,
@@ -1066,7 +1068,7 @@ function delegationRequestKey(value = {}) {
 
 function completeWorkDelegation(state, delegation, agent, response = {}, session = {}) {
   const handoff = response?.delegation_handoff;
-  const actualEvidence = collectDelegationEvidence(session, agent);
+  const actualEvidence = collectDelegationEvidence(session, agent, delegation);
   const unavailable = ["unavailable", "error"].includes(String(response?.status || ""));
   if (unavailable) {
     delegation.status = "failed";
@@ -1074,6 +1076,12 @@ function completeWorkDelegation(state, delegation, agent, response = {}, session
   } else if (!handoff || handoff.delegation_id !== delegation.id) {
     delegation.status = "failed";
     delegation.result = "missing_or_mismatched_delegation_handoff";
+  } else if (!actualEvidence.length) {
+    delegation.status = "failed";
+    delegation.result = "missing_current_delegation_evidence";
+    delegation.handoffEvidence = uniqueDelegationEvidence(
+      (handoff.evidence || []).map((item) => ({ kind: "reported", detail: String(item).slice(0, 500) }))
+    );
   } else {
     delegation.status = "completed";
     delegation.result = String(handoff.summary || "delegated_work_completed").slice(0, 600);
@@ -1111,21 +1119,27 @@ export function acknowledgeOwnerDelegations(state, agent) {
   return handoffs.length > 0;
 }
 
-function collectDelegationEvidence(session = {}, agent = {}) {
+function collectDelegationEvidence(session = {}, agent = {}, delegation = {}) {
   const sourceId = String(agent.id || "");
   const toolEvidence = (session.toolExecutionResults || [])
-    .filter((item) => item?.source_agent_id === sourceId)
+    .filter((item) => item?.source_agent_id === sourceId && occurredAfterDelegation(item, delegation))
     .slice(-6)
     .map(checkpointEvidenceItem)
     .filter(Boolean)
     .map((item) => ({ kind: "tool", detail: `${item.tool}#${item.id} ${item.outcome || item.status}` }));
   const fileEvidence = (session.fileOperationExecutionResults || [])
-    .filter((item) => item?.source_agent_id === sourceId)
+    .filter((item) => item?.source_agent_id === sourceId && occurredAfterDelegation(item, delegation))
     .slice(-6)
     .map(checkpointEvidenceItem)
     .filter(Boolean)
     .map((item) => ({ kind: "file", detail: `${item.tool}#${item.id} ${item.outcome || item.status}` }));
   return [...toolEvidence, ...fileEvidence];
+}
+
+function occurredAfterDelegation(item = {}, delegation = {}) {
+  const startedAt = Date.parse(String(delegation.createdAt || ""));
+  const occurredAt = Date.parse(String(item.createdAt || ""));
+  return Number.isFinite(startedAt) && Number.isFinite(occurredAt) && occurredAt >= startedAt;
 }
 
 function uniqueDelegationEvidence(items = []) {

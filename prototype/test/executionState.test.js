@@ -117,13 +117,72 @@ test("a required collaboration contract blocks material work until a real handof
   });
   const delegation = state.ownership.delegations.find((item) => item.type === "research");
   assert.equal(delegation.native, true);
-  session.toolExecutionResults.push({ id: "research-read", tool: "read_file", source_agent_id: "researcher", status: "completed", result: { ok: true, content: "FACT" } });
+  session.toolExecutionResults.push(
+    { id: "old-research", tool: "read_file", source_agent_id: "researcher", status: "completed", createdAt: new Date(Date.parse(delegation.createdAt) - 1_000).toISOString(), result: { ok: true, content: "STALE" } },
+    { id: "research-read", tool: "read_file", source_agent_id: "researcher", status: "completed", createdAt: new Date(Date.parse(delegation.createdAt) + 1_000).toISOString(), result: { ok: true, content: "FACT" } }
+  );
   advanceExecutionState({ state, session, agent: researcher, response: { status: "speak", delegation_handoff: { delegation_id: delegation.id, summary: "Found FACT.", evidence: ["read_file#research-read"] } } });
   advanceExecutionState({ state, session, agent: owner, response: { status: "speak", argument: "I will integrate the handoff." } });
 
   assert.equal(collaborationRequirementStatus(state).pending, false);
   assert.equal(delegation.ownerAcknowledged, true);
+  assert.equal(delegation.handoffEvidence.some((item) => item.detail.includes("old-research")), false);
   assert.equal(gateDeliveryRecoveryToolRequests(state, owner, [{ tool: "workspace_edit", action: "write", path: "shared/result.txt", code: "FACT" }]).accepted.length, 1);
+});
+
+test("a delegation handoff cannot reuse evidence from before that delegation existed", () => {
+  const owner = { id: "owner", name: "Owner", enabled: true };
+  const researcher = { id: "researcher", name: "Researcher", enabled: true };
+  const state = createExecutionState({
+    question: "Create a document with one bounded research handoff.",
+    agents: [owner, researcher],
+    workspaceGroup: { permissions: { defaultTier: "text", seatTiers: { owner: "full", researcher: "tool" } } }
+  });
+  const session = {
+    groupSnapshot: { agents: [owner, researcher] },
+    toolExecutionResults: [{ id: "old-source", tool: "read_file", source_agent_id: "researcher", status: "completed", createdAt: "2020-01-01T00:00:00.000Z", result: { ok: true } }],
+    fileOperationExecutionResults: []
+  };
+  advanceExecutionState({
+    state,
+    session,
+    agent: owner,
+    response: {
+      status: "speak",
+      task_contract: {
+        mode: "delivery",
+        objective: "Create the document.",
+        requires_workspace: true,
+        requires_verification: true,
+        deliverables: ["shared/output.txt"],
+        completion_criteria: ["Use the delegated source.", "Verify the output."],
+        next_action: "Delegate one source lookup."
+      }
+    }
+  });
+  const delegationRequest = markNativeModelSource({
+    type: "research",
+    assignee_id: "researcher",
+    task: "Read the current source.",
+    expected_evidence: ["Source fact"],
+    allowed_tools: ["read_file"],
+    allow_workspace_mutation: false
+  });
+  advanceExecutionState({ state, session, agent: owner, response: { status: "speak", task_delegations: [delegationRequest] } });
+  const delegation = state.ownership.delegations.find((item) => item.assigneeId === "researcher");
+  advanceExecutionState({
+    state,
+    session,
+    agent: researcher,
+    response: {
+      status: "speak",
+      delegation_handoff: { delegation_id: delegation.id, summary: "The old result proves it.", evidence: ["read_file#old-source"] }
+    }
+  });
+
+  assert.equal(delegation.status, "failed");
+  assert.equal(delegation.result, "missing_current_delegation_evidence");
+  assert.equal(delegation.handoffEvidence.some((item) => item.detail.includes("old-source")), true);
 });
 
 test("a discussion contract releases the normal group without pretending it is delivery", () => {
@@ -606,6 +665,15 @@ test("delivery owner delegates bounded work, receives a durable handoff, and rem
   assert.deepEqual(selectExecutionAgents(state, [owner, researcher]).map((agent) => agent.id), ["researcher"]);
   assert.match(executionInstruction(state, researcher), /Find the one required source fact/);
   assert.match(executionInstruction(state, researcher), /no workspace-mutation delegation/);
+
+  session.toolExecutionResults.push({
+    id: "delegated-source-read",
+    tool: "web_search",
+    source_agent_id: "researcher",
+    status: "completed",
+    createdAt: new Date(Date.parse(delegation.createdAt) + 1_000).toISOString(),
+    result: { ok: true }
+  });
 
   advanceExecutionState({
     state,
