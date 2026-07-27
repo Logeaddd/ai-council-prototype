@@ -121,8 +121,8 @@ Completed on 2026-07-27:
   platform skip. `node ./src/cli.js harness-check` remains honestly
   `incomplete`: T106 is 7/7 complete, while T105 and T117 await the configured
   real-provider multi-task evidence window. The report is
-  `harness/reports/product-harness-2026-07-26T23-55-52-974Z.json`, bound to
-  commit `739f61e`.
+  `harness/reports/product-harness-2026-07-27T00-23-17-438Z.json`, bound to
+  commit `6e00001`.
 
 Still open before the real-provider release gate:
 
