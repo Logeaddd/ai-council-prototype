@@ -130,6 +130,11 @@ Completed on 2026-07-27:
   as an attachment. This is evidence for the build and drag/drop path only;
   it is not a substitute for the real-provider release gate or broader UI
   acceptance.
+* Native provider-tool schemas now have regression coverage in `3760bd5` for
+  retaining `discoverySourceUrl` and `discoveryQuery` through the closed
+  schema and request-normalization path. The follow-up full suite passed
+  721 tests with 0 failures and 1 platform skip. This is local protocol
+  evidence only; it does not increase the real-provider campaign pass rate.
 
 Still open before the real-provider release gate:
 
