@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { advanceExecutionState, createExecutionState, executionInstruction, gateDeliveryRecoveryToolRequests, isDeliveryTask, selectExecutionAgents } from "../src/executionState.js";
+import { advanceExecutionState, collaborationRequirementStatus, createExecutionState, executionInstruction, gateDeliveryRecoveryToolRequests, isDeliveryTask, selectExecutionAgents } from "../src/executionState.js";
 
 const agents = [
   { id: "designer", name: "Designer", enabled: true },
@@ -67,6 +67,59 @@ test("a semantic task contract, rather than task wording, activates delivery exe
   assert.match(instruction, /Produce the requested result/);
   assert.match(instruction, /requested output/);
   assert.match(instruction, /verify the output/);
+});
+
+test("a required collaboration contract blocks material work until a real handoff is integrated", () => {
+  const owner = { id: "owner", name: "Owner", enabled: true };
+  const researcher = { id: "researcher", name: "Researcher", enabled: true };
+  const state = createExecutionState({
+    question: "Create the requested file, but first have another member research one fact and hand it back.",
+    agents: [owner, researcher],
+    workspaceGroup: { permissions: { defaultTier: "text", seatTiers: { owner: "full", researcher: "tool" } } }
+  });
+  const session = { toolExecutionResults: [], fileOperationExecutionResults: [], groupSnapshot: { agents: [owner, researcher] } };
+  const contract = {
+    mode: "delivery",
+    objective: "Create the requested file using an independently researched fact.",
+    requires_workspace: true,
+    requires_verification: true,
+    deliverables: ["shared/result.txt"],
+    completion_criteria: ["Use the delegated fact.", "Run a real validation."],
+    next_action: "Delegate the required fact research.",
+    collaboration: { required: true, before_first_mutation: true, minimum_delegations: 1, types: ["research"], reason: "The user requires a researcher handoff." }
+  };
+
+  advanceExecutionState({ state, session, agent: owner, question: state.taskQuestion, response: { status: "speak", task_contract: contract } });
+  assert.equal(collaborationRequirementStatus(state).pending, true);
+  assert.match(executionInstruction(state, owner), /Collaboration required before completion/);
+  session.toolExecutionResults.push({ id: "premature-verification", tool: "run_tests", status: "completed", result: { ok: true, exitCode: 0 } });
+  advanceExecutionState({ state, session, agent: owner, question: state.taskQuestion, response: { status: "speak" } });
+  assert.equal(state.phase, "repair");
+  assert.equal(state.lastAction, "collaboration_prerequisite_pending");
+  const blocked = gateDeliveryRecoveryToolRequests(state, owner, [{ tool: "workspace_edit", action: "write", path: "shared/result.txt", code: "premature" }]);
+  assert.equal(blocked.accepted.length, 0);
+  assert.equal(blocked.rejected[0].code, "collaboration_prerequisite_pending");
+  assert.equal(gateDeliveryRecoveryToolRequests(state, owner, [{ tool: "delegate_task", delegationType: "research" }]).accepted.length, 1);
+
+  advanceExecutionState({
+    state,
+    session,
+    agent: owner,
+    response: {
+      status: "speak",
+      task_delegations: [{
+        type: "research", assignee_id: "researcher", task: "Find the required fact.", expected_evidence: ["Observed source fact"], allowed_tools: ["read_file"], allow_workspace_mutation: false
+      }]
+    }
+  });
+  const delegation = state.ownership.delegations.find((item) => item.type === "research");
+  session.toolExecutionResults.push({ id: "research-read", tool: "read_file", source_agent_id: "researcher", status: "completed", result: { ok: true, content: "FACT" } });
+  advanceExecutionState({ state, session, agent: researcher, response: { status: "speak", delegation_handoff: { delegation_id: delegation.id, summary: "Found FACT.", evidence: ["read_file#research-read"] } } });
+  advanceExecutionState({ state, session, agent: owner, response: { status: "speak", argument: "I will integrate the handoff." } });
+
+  assert.equal(collaborationRequirementStatus(state).pending, false);
+  assert.equal(delegation.ownerAcknowledged, true);
+  assert.equal(gateDeliveryRecoveryToolRequests(state, owner, [{ tool: "workspace_edit", action: "write", path: "shared/result.txt", code: "FACT" }]).accepted.length, 1);
 });
 
 test("a discussion contract releases the normal group without pretending it is delivery", () => {

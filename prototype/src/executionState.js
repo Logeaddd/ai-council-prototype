@@ -166,6 +166,23 @@ export function advanceExecutionState({ state, session, agent, groupPath, questi
   state.checkpointEvidence = mergeCheckpointEvidence(state.checkpointEvidence, [...fileResults, ...toolResults]);
   const recoveryUpdate = updateDeliveryRecoveryState(state, toolResults);
   const material = [...toolResults, ...fileResults].some(hasMaterialWorkspaceChange);
+  const collaborationBeforeAction = collaborationRequirementStatus(state);
+  if (collaborationBeforeAction.pending && collaborationBeforeAction.beforeFirstMutation && material) {
+    state.phase = "repair";
+    state.checkpointVersion += 1;
+    state.lastAction = "collaboration_prerequisite_bypassed";
+    state.lastError = collaborationBeforeAction.reason;
+    state.nextAction = collaborationBeforeAction.nextAction;
+    state.noActionCalls = 0;
+    return state;
+  }
+  if (collaborationBeforeAction.pending && !hasOpenWorkDelegations(state) && !toolResults.length && !fileResults.length) {
+    state.lastAction = "collaboration_prerequisite_pending";
+    state.lastError = collaborationBeforeAction.reason;
+    state.nextAction = collaborationBeforeAction.nextAction;
+    state.noActionCalls = 0;
+    return state;
+  }
   const verificationResults = toolResults.filter(isVerificationResult);
   const latestVerification = verificationResults.at(-1);
   const latestExecution = toolResults.filter((item) => ["execute_command", "run_code", "run_tests"].includes(item.tool)).at(-1);
@@ -211,6 +228,16 @@ export function advanceExecutionState({ state, session, agent, groupPath, questi
   }
 
   if (successfulVerification) {
+    const collaboration = collaborationRequirementStatus(state);
+    if (collaboration.pending) {
+      state.phase = "repair";
+      state.checkpointVersion += 1;
+      state.lastAction = "collaboration_prerequisite_pending";
+      state.lastError = collaboration.reason;
+      state.nextAction = collaboration.nextAction;
+      state.noActionCalls = 0;
+      return state;
+    }
     const artifact = verifyRequestedArtifactProgress({ groupPath, question: state.taskQuestion || question, session });
     state.artifactStatus = artifact.status;
     state.checkpointVersion += 1;
@@ -246,7 +273,8 @@ export function advanceExecutionState({ state, session, agent, groupPath, questi
     return state;
   }
 
-  if (canCompleteNonWorkspaceDelivery(state, response) && !hasOpenWorkDelegations(state)) {
+  const collaboration = collaborationRequirementStatus(state);
+  if (canCompleteNonWorkspaceDelivery(state, response) && !hasOpenWorkDelegations(state) && !collaboration.pending) {
     state.phase = "complete";
     state.lastAction = "non_workspace_delivery_complete";
     state.lastError = "";
@@ -505,11 +533,16 @@ function formatRecoveryState(value) {
 export function gateDeliveryRecoveryToolRequests(state, agent, requests = []) {
   if (!state?.active || agent?.id !== state.executorId) return { accepted: Array.isArray(requests) ? requests : [], rejected: [] };
   const recovery = normalizeRecoveryState(state.recovery);
+  const collaboration = collaborationRequirementStatus(state);
   const blockedFingerprints = new Set(recovery.failures.map((item) => item.fingerprint));
   const pending = recovery.pendingCapabilities;
   const accepted = [];
   const rejected = [];
   for (const request of Array.isArray(requests) ? requests : []) {
+    if (collaboration.pending && collaboration.beforeFirstMutation && requestIsMaterialExecution(request)) {
+      rejected.push(recoveryRequestRejection(request, "collaboration_prerequisite_pending", collaboration.nextAction));
+      continue;
+    }
     const fingerprint = recoveryStrategyForRequest(request);
     if (fingerprint && blockedFingerprints.has(fingerprint)) {
       rejected.push(recoveryRequestRejection(request, "recovery_strategy_repeated", "This exact acquisition or runtime strategy already failed. Choose a materially different manager, source, tool, or execution path and use its real result."));
@@ -522,6 +555,17 @@ export function gateDeliveryRecoveryToolRequests(state, agent, requests = []) {
     accepted.push(request);
   }
   return { accepted, rejected };
+}
+
+function requestIsMaterialExecution(request = {}) {
+  const tool = String(request.tool || "").trim().toLowerCase().replace(/-/g, "_");
+  if (["install_package", "provision_tool", "skill_install", "mcp_install_npm", "create_archive", "extract_archive", "run_tests"].includes(tool)) return true;
+  if (tool === "workspace_edit") return ["write", "append", "replace", "move", "delete", "mkdir"].includes(String(request.action || "").toLowerCase());
+  if (tool === "execute_command") return Boolean(String(request.command || "").trim());
+  if (tool === "run_code") return Boolean(String(request.code || request.inputText || "").trim());
+  if (tool === "git_operation") return !["status", "log", "show", "diff"].includes(String(request.action || "").toLowerCase());
+  if (tool === "database_query") return !/^\s*(?:select|pragma|explain)\b/i.test(String(request.sql || ""));
+  return false;
 }
 
 function recoveryStrategyForRequest(request = {}) {
@@ -666,7 +710,24 @@ export function normalizeTaskContract(value) {
     deliverables,
     completionCriteria,
     nextAction,
+    collaboration: normalizeCollaborationRequirement(value.collaboration, value),
     source: String(value.source || "model_task_contract")
+  };
+}
+
+function normalizeCollaborationRequirement(value, contract = {}) {
+  const source = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  const required = Boolean(source.required ?? contract.requires_collaboration ?? contract.requiresCollaboration);
+  const minimum = Number.parseInt(String(source.minimum_delegations ?? source.minimumDelegations ?? 1), 10);
+  const types = normalizeContractTextList(source.types ?? source.delegation_types ?? source.delegationTypes)
+    .map((item) => item.toLowerCase())
+    .filter((item) => WORK_DELEGATION_TYPES.has(item));
+  return {
+    required,
+    beforeFirstMutation: required && source.before_first_mutation !== false && source.beforeFirstMutation !== false,
+    minimumDelegations: required ? Math.max(1, Math.min(8, Number.isFinite(minimum) ? minimum : 1)) : 0,
+    types: [...new Set(types)],
+    reason: String(source.reason || contract.collaboration_reason || contract.collaborationReason || "").trim().slice(0, 600)
   };
 }
 
@@ -732,12 +793,16 @@ function formatTaskContract(contract) {
   if (!contract || contract.mode !== "delivery") return "";
   const outputs = contract.deliverables?.length ? contract.deliverables.join("; ") : "none recorded";
   const criteria = contract.completionCriteria?.length ? contract.completionCriteria.join("; ") : "none recorded";
+  const collaboration = collaborationRequirementStatus({ taskContract: contract, ownership: {} });
   return [
     "[Recorded task contract]",
     `Objective: ${contract.objective || "not recorded"}`,
     `Deliverables: ${outputs}`,
     `Completion criteria: ${criteria}`,
-    `Workspace required: ${contract.requiresWorkspace ? "yes" : "no"}; verification required: ${contract.requiresVerification ? "yes" : "no"}.`
+    `Workspace required: ${contract.requiresWorkspace ? "yes" : "no"}; verification required: ${contract.requiresVerification ? "yes" : "no"}.`,
+    collaboration.required
+      ? `Collaboration required before completion: ${collaboration.minimumDelegations} evidence-backed delegation(s)${collaboration.types.length ? ` of type ${collaboration.types.join(", ")}` : ""}${contract.collaboration?.beforeFirstMutation ? "; before the first owner mutation when still possible" : ""}.`
+      : ""
   ].join("\n");
 }
 
@@ -839,6 +904,37 @@ function normalizeOwnership(value, state = {}) {
 
 const WORK_DELEGATION_TYPES = new Set(["research", "implementation", "unblocker"]);
 const DEFAULT_RESEARCH_TOOLS = ["web_search", "fetch_url", "api_request", "list_directory", "read_file", "search_files", "grep_content", "search_context", "load_context"];
+
+export function collaborationRequirementStatus(state = {}) {
+  const requirement = state?.taskContract?.collaboration || {};
+  const required = requirement.required === true;
+  const minimumDelegations = required ? Math.max(1, Number(requirement.minimumDelegations || 1)) : 0;
+  const types = Array.isArray(requirement.types) ? requirement.types.filter((item) => WORK_DELEGATION_TYPES.has(item)) : [];
+  const ownership = normalizeOwnership(state.ownership, state);
+  const completed = ownership.delegations.filter((item) => (
+    WORK_DELEGATION_TYPES.has(item.type)
+    && item.status === "completed"
+    && item.ownerAcknowledged === true
+    && Array.isArray(item.handoffEvidence)
+    && item.handoffEvidence.length > 0
+    && (!types.length || types.includes(item.type))
+  ));
+  const pending = required && completed.length < minimumDelegations;
+  const typeText = types.length ? ` of type ${types.join(", ")}` : "";
+  const reason = requirement.reason || `The task contract requires ${minimumDelegations} evidence-backed delegated handoff(s)${typeText} before delivery can complete.`;
+  return {
+    required,
+    beforeFirstMutation: requirement.beforeFirstMutation === true,
+    minimumDelegations,
+    types,
+    completed: completed.length,
+    pending,
+    reason,
+    nextAction: pending
+      ? `${reason} The delivery owner must use native delegate_task for a narrow eligible subtask, wait for its concrete handoff evidence, acknowledge and integrate it, then rerun verification.`
+      : ""
+  };
+}
 
 export function activeDelegationForAgent(state, agent) {
   return workDelegationFor(state, agent);

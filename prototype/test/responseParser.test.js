@@ -74,7 +74,14 @@ test("round response parser normalizes a semantic task contract", () => {
       requires_verification: true,
       deliverables: ["shared/result.txt", "", 7],
       completionCriteria: ["file exists", "content is verified"],
-      nextAction: "Write the file and run the check."
+      nextAction: "Write the file and run the check.",
+      collaboration: {
+        required: true,
+        beforeFirstMutation: true,
+        minimumDelegations: 1,
+        types: ["research", "invalid"],
+        reason: "Use a researcher handoff before writing."
+      }
     }
   }));
 
@@ -85,7 +92,14 @@ test("round response parser normalizes a semantic task contract", () => {
     requires_verification: true,
     deliverables: ["shared/result.txt"],
     completion_criteria: ["file exists", "content is verified"],
-    next_action: "Write the file and run the check."
+    next_action: "Write the file and run the check.",
+    collaboration: {
+      required: true,
+      before_first_mutation: true,
+      minimum_delegations: 1,
+      types: ["research"],
+      reason: "Use a researcher handoff before writing."
+    }
   });
 });
 

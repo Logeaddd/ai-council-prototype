@@ -5257,6 +5257,77 @@ test("empty file proposal is rejected and repaired by the same executor before t
   }
 });
 
+test("a same-turn collaboration contract rejects the owner's premature legacy file write", async () => {
+  const groupPath = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-collaboration-file-guard-"));
+  fs.mkdirSync(path.join(groupPath, "sessions"), { recursive: true });
+  fs.writeFileSync(path.join(groupPath, "group.json"), JSON.stringify({
+    id: "collaboration-file-guard",
+    name: "Collaboration File Guard",
+    permissions: { defaultTier: "text", seatTiers: { owner: "full", researcher: "tool" } },
+    seats: [
+      { seatId: "owner", displayName: "Owner", enabled: true, privateFolder: "members/Owner" },
+      { seatId: "researcher", displayName: "Researcher", enabled: true, privateFolder: "members/Researcher" },
+      { seatId: "judge", displayName: "Judge", enabled: true, judge: true, privateFolder: "members/Judge" }
+    ]
+  }), "utf8");
+  let ownerStep = 0;
+  const prompts = [];
+  const server = http.createServer(async (req, res) => {
+    const body = JSON.parse(await readRequestBody(req));
+    prompts.push(JSON.stringify(body.messages || []));
+    if (JSON.stringify(body.messages || []).includes("FinalDecision JSON object")) {
+      writeOpenAiStream(res, JSON.stringify({
+        answer: "The collaboration prerequisite remains pending.", consensus_score: 0, supporting_agents: [], dissenting_agents: ["Owner"], minority_report: "No handoff exists.", risks: ["missing_handoff"], next_actions: ["Delegate the required research."], memory_candidates: []
+      }));
+      return;
+    }
+    if (ownerStep === 0) {
+      ownerStep += 1;
+      writeOpenAiStream(res, JSON.stringify({
+        status: "speak",
+        argument: "I will write the requested file immediately.",
+        task_contract: {
+          mode: "delivery",
+          objective: "Create the requested file from another member's research.",
+          requires_workspace: true,
+          requires_verification: true,
+          deliverables: ["shared/guarded.txt"],
+          completion_criteria: ["Use a research handoff.", "Validate the final file."],
+          next_action: "Delegate the source research.",
+          collaboration: { required: true, before_first_mutation: true, minimum_delegations: 1, types: ["research"], reason: "The requested work must use another member's research handoff." }
+        },
+        file_operations: [{ op: "write", path: "shared/guarded.txt", content: "PREMATURE", reason: "Write the final artifact.", expected_effect: "The requested file exists." }],
+        tool_requests: [], objections: [], memory_candidates: []
+      }));
+      return;
+    }
+    writeOpenAiStream(res, JSON.stringify({ status: "speak", argument: "I need the required handoff before writing.", objections: ["collaboration prerequisite pending"], file_operations: [], tool_requests: [], memory_candidates: [] }));
+  });
+  await listen(server);
+
+  try {
+    const apiBaseUrl = `http://127.0.0.1:${server.address().port}/v1`;
+    const group = validateGroupConfig({
+      id: "collaboration-file-guard",
+      name: "Collaboration File Guard",
+      settings: { maxRounds: 1, minConsensusWeight: 1, stopWhenAllSkip: true, agentTimeoutMs: 3000 },
+      agents: [
+        { id: "owner", name: "Owner", role: "Builder", provider: "openai-compatible", apiBaseUrl, allowUnsafePrivateNetwork: true, apiKey: "test-key", model: "test-model", weight: 1, enabled: true },
+        { id: "researcher", name: "Researcher", role: "Research", provider: "openai-compatible", apiBaseUrl, allowUnsafePrivateNetwork: true, apiKey: "test-key", model: "test-model", weight: 1, enabled: true },
+        { id: "judge", name: "Judge", role: "Judge", provider: "openai-compatible", apiBaseUrl, allowUnsafePrivateNetwork: true, apiKey: "test-key", model: "test-model", weight: 1, enabled: true, judge: true }
+      ]
+    });
+    const { session } = await runCouncil("Create shared/guarded.txt, but first have another member research a fact and hand it back.", group, groupPath, { groupPath });
+
+    assert.equal(fs.existsSync(path.join(groupPath, "shared", "guarded.txt")), false);
+    assert.equal(session.rejectedFileOperationProposals.some((item) => item.code === "collaboration_prerequisite_pending"), true);
+    assert.equal(session.executionState.lastAction, "collaboration_prerequisite_pending");
+    assert.match(prompts[1], /Do not write the artifact yet/);
+  } finally {
+    await close(server);
+  }
+});
+
 test("executor repairs a real failing test and reruns verification before completion", async () => {
   const groupPath = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-repair-benchmark-"));
   fs.mkdirSync(path.join(groupPath, "sessions"), { recursive: true });

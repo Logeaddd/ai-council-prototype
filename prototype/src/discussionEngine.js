@@ -28,7 +28,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { createObservationCache, hasMaterialWorkspaceChange } from "./observationCache.js";
-import { activeDelegationForAgent, advanceExecutionState, createExecutionState, executionInstruction, gateDeliveryRecoveryToolRequests, requiresWorkspaceExecution, selectExecutionAgents } from "./executionState.js";
+import { activeDelegationForAgent, advanceExecutionState, collaborationRequirementStatus, createExecutionState, executionInstruction, gateDeliveryRecoveryToolRequests, requiresWorkspaceExecution, selectExecutionAgents } from "./executionState.js";
 import { nativeToolDefinitions } from "./nativeToolProtocol.js";
 import { readPublicEventHotCache } from "./publicEventJournal.js";
 import { appendTaskRunEvent, createTaskRun, readTaskRun, recordTaskRunArtifactVerification, recordTaskRunFileEvidence, recordTaskRunToolAttempts, syncTaskRunFromSession } from "./taskRuntime.js";
@@ -337,9 +337,13 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
       const seenToolTargets = new Set();
       const processResponseFileOperations = (currentResponse) => {
         const fileOperationResult = applyFilePermissionTier(
-          applyDelegationFileScope(
-            collectFileOperationProposals(currentResponse, agent, round, options.groupPath),
-            activeDelegationForAgent(session.executionState, agent)
+          applyCollaborationFileScope(
+            applyDelegationFileScope(
+              collectFileOperationProposals(currentResponse, agent, round, options.groupPath),
+              activeDelegationForAgent(session.executionState, agent)
+            ),
+            session.executionState,
+            agent
           ),
           fileOperationPermissionTier,
           options.appSettings
@@ -390,6 +394,32 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
         }
       };
 
+      // Record a model-declared contract before executing any same-turn tool
+      // or legacy file-operation request. This lets an explicit collaboration
+      // prerequisite guard the owner's first material action as well as final
+      // completion; it does not infer collaboration from member names.
+      const establishTaskContractBeforeActions = (currentResponse) => {
+        if (
+          agent.id !== session.executionState?.executorId
+          || session.executionState?.phase !== "intake"
+          || !currentResponse?.task_contract
+        ) return;
+        advanceExecutionState({
+          state: session.executionState,
+          session,
+          agent,
+          groupPath: options.groupPath,
+          question: executionQuestion,
+          response: {
+            ...currentResponse,
+            tool_requests: [],
+            file_operations: []
+          }
+        });
+        refreshExecutionCheckpoint();
+        executionDirective = executionInstruction(session.executionState, agent);
+      };
+
       const registerNativeDelegation = async (request) => {
         if (agent.id !== session.executionState?.executorId) {
           return { ok: false, code: "delegation_owner_required", error: "Only the durable delivery owner can create a bounded delegation." };
@@ -434,6 +464,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
         };
       };
 
+      establishTaskContractBeforeActions(response);
       processResponseFileOperations(response);
 
       if (response.status === "speak" && !response.tool_requests?.length && accumulatedRejectedFileOperationProposals.length) {
@@ -459,6 +490,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
           .map((item) => `${item.code || item.status || "rejected"}: ${item.reason || item.autoExecutionReason || "file operation rejected"}`)
           .join("; ")
           .slice(0, 1600);
+        const collaborationRecovery = collaborationRequirementStatus(session.executionState);
         callOutcome = yield* callRoundModel({
           options,
           session,
@@ -468,7 +500,9 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
           memberContext,
           messages: [...messages, {
             role: "user",
-            content: `Your file operation did not execute: ${rejectionDetails}. Correct it now with a real non-empty workspace_edit native tool call (or tool_requests fallback), then continue to build or verify. Do not return another plan or placeholder.`
+            content: collaborationRecovery.pending && collaborationRecovery.beforeFirstMutation
+              ? `Your file operation did not execute: ${rejectionDetails}. Do not write the artifact yet. ${collaborationRecovery.nextAction}`
+              : `Your file operation did not execute: ${rejectionDetails}. Correct it now with a real non-empty workspace_edit native tool call (or tool_requests fallback), then continue to build or verify. Do not return another plan or placeholder.`
           }],
           timeoutMs: group.settings.agentTimeoutMs,
           toolIteration: 0,
@@ -2913,6 +2947,26 @@ function applyDelegationFileScope(fileOperationResult, delegation) {
     } else {
       accepted.push(proposal);
     }
+  }
+  return { accepted, rejected };
+}
+
+function applyCollaborationFileScope(fileOperationResult, state, agent) {
+  const collaboration = collaborationRequirementStatus(state);
+  if (!collaboration.pending || !collaboration.beforeFirstMutation || agent?.id !== state?.executorId) return fileOperationResult;
+  const accepted = [];
+  const rejected = [...(fileOperationResult.rejected || [])];
+  for (const proposal of fileOperationResult.accepted || []) {
+    const mutation = !["read", "list"].includes(String(proposal.op || "").toLowerCase());
+    if (!mutation) {
+      accepted.push(proposal);
+      continue;
+    }
+    rejected.push({
+      ...proposal,
+      code: "collaboration_prerequisite_pending",
+      reason: collaboration.nextAction
+    });
   }
   return { accepted, rejected };
 }

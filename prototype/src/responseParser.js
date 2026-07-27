@@ -189,7 +189,25 @@ function normalizeTaskContract(value) {
     requires_verification: Boolean(value.requires_verification ?? value.requiresVerification),
     deliverables: normalizeStringArray(value.deliverables).slice(0, 12),
     completion_criteria: normalizeStringArray(value.completion_criteria ?? value.completionCriteria).slice(0, 12),
-    next_action: optionalString(value.next_action ?? value.nextAction) || ""
+    next_action: optionalString(value.next_action ?? value.nextAction) || "",
+    collaboration: normalizeCollaborationRequirement(value.collaboration, value)
+  };
+}
+
+function normalizeCollaborationRequirement(value, contract = {}) {
+  const source = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  const allowedTypes = new Set(["research", "implementation", "unblocker"]);
+  const required = Boolean(source.required ?? contract.requires_collaboration ?? contract.requiresCollaboration);
+  const minimum = Number.parseInt(String(source.minimum_delegations ?? source.minimumDelegations ?? 1), 10);
+  const types = normalizeStringArray(source.types ?? source.delegation_types ?? source.delegationTypes)
+    .map((item) => item.toLowerCase())
+    .filter((item) => allowedTypes.has(item));
+  return {
+    required,
+    before_first_mutation: required && source.before_first_mutation !== false && source.beforeFirstMutation !== false,
+    minimum_delegations: required ? Math.max(1, Math.min(8, Number.isFinite(minimum) ? minimum : 1)) : 0,
+    types: [...new Set(types)],
+    reason: optionalString(source.reason ?? contract.collaboration_reason ?? contract.collaborationReason) || ""
   };
 }
 
