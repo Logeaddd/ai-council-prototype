@@ -217,6 +217,14 @@ Completed on 2026-07-27:
   two malformed intake turns produce one owner only and an honest
   `incomplete` result. This remains local protocol evidence, not a paid
   Provider campaign pass.
+* The public `task_state` recovery checkpoint now retains the same normalized
+  task contract, intake-attempt count, owner-transfer history, and bounded
+  checkpoint-review delegations as the durable TaskRun. This is the explicit
+  fallback used for a plain `continue` when no resumable TaskRun is available;
+  it no longer discards the owner or task interpretation and reverts to legacy
+  guessing. Focused persistence/resume tests validate the checkpoint survives
+  a write/read cycle and recreates the same delivery state. This is local
+  recovery evidence, not a real Provider campaign pass.
 
 Still open before the real-provider release gate:
 

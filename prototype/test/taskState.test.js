@@ -5,6 +5,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { buildContextPromptSections, buildMemberContext } from "../src/contextBuilder.js";
 import { formatTaskStateForPrompt, readTaskState, updateExecutionCheckpoint, updateTaskStateFromSession } from "../src/taskState.js";
+import { createExecutionState } from "../src/executionState.js";
 
 test("task state ledger records public final state without private chat", () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-task-state-"));
@@ -80,6 +81,23 @@ test("task state ledger persists a resumable execution checkpoint before finaliz
       taskQuestion: "Build the project",
       executorId: "builder",
       executorName: "Builder",
+      ownership: {
+        ownerId: "builder",
+        ownerName: "Builder",
+        version: 2,
+        transfers: [{ fromId: "old-builder", fromName: "Old Builder", toId: "builder", toName: "Builder", reason: "resume", version: 2 }],
+        delegations: [{ id: "review:4:reviewer", type: "checkpoint_review", checkpointVersion: 4, assignedBy: "builder", assigneeId: "reviewer", assigneeName: "Reviewer", status: "pending" }]
+      },
+      taskContract: {
+        mode: "delivery",
+        objective: "Build the requested project.",
+        requires_workspace: true,
+        requires_verification: true,
+        deliverables: ["dist/project.zip"],
+        completion_criteria: ["Run the project verification."],
+        next_action: "Fix the compile error and rerun tests."
+      },
+      intakeAttempts: 1,
       phase: "repair",
       nextAction: "Fix the compile error and rerun tests.",
       checkpointVersion: 4,
@@ -94,6 +112,20 @@ test("task state ledger persists a resumable execution checkpoint before finaliz
   assert.equal(saved.executionCheckpoint.sourceSessionId, "session_running_1");
   assert.equal(saved.executionCheckpoint.executorId, "builder");
   assert.equal(saved.executionCheckpoint.phase, "repair");
+  assert.equal(saved.executionCheckpoint.ownership.version, 2);
+  assert.equal(saved.executionCheckpoint.ownership.delegations[0].assigneeId, "reviewer");
+  assert.equal(saved.executionCheckpoint.taskContract.mode, "delivery");
+  assert.deepEqual(saved.executionCheckpoint.taskContract.deliverables, ["dist/project.zip"]);
+  assert.equal(saved.executionCheckpoint.intakeAttempts, 1);
   assert.match(saved.executionCheckpoint.lastError, /cannot find symbol/);
   assert.match(formatTaskStateForPrompt(saved), /executionCheckpoint/);
+
+  const resumed = createExecutionState({
+    question: "continue",
+    agents: [{ id: "builder", name: "Builder", enabled: true }],
+    previousState: saved.executionCheckpoint
+  });
+  assert.equal(resumed.taskContract.objective, "Build the requested project.");
+  assert.equal(resumed.ownership.transfers[0].fromId, "old-builder");
+  assert.equal(resumed.ownership.delegations[0].assigneeId, "reviewer");
 });

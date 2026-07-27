@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { nowIso } from "./types.js";
+import { normalizeTaskContract } from "./executionState.js";
 import { writeTextFileAtomically } from "./atomicFile.js";
 
 export function readTaskState(groupPath) {
@@ -173,6 +174,9 @@ function normalizeExecutionCheckpoint(value, session = {}) {
     taskQuestion: String(value.taskQuestion || session.question || ""),
     executorId: String(value.executorId || ""),
     executorName: String(value.executorName || ""),
+    ownership: normalizeExecutionOwnership(value.ownership, value),
+    taskContract: normalizeTaskContract(value.taskContract),
+    intakeAttempts: Math.max(0, Number(value.intakeAttempts || 0)),
     phase: String(value.phase || "inspect"),
     nextAction: String(value.nextAction || ""),
     checkpointVersion: Math.max(0, Number(value.checkpointVersion) || 0),
@@ -183,6 +187,37 @@ function normalizeExecutionCheckpoint(value, session = {}) {
     checkpointEvidence: normalizeCheckpointEvidence(value.checkpointEvidence),
     sourceSessionId: String(session.id || value.sourceSessionId || ""),
     updatedAt: String(session.id ? nowIso() : value.updatedAt || "")
+  };
+}
+
+function normalizeExecutionOwnership(value, execution = {}) {
+  const source = value && typeof value === "object" ? value : {};
+  return {
+    ownerId: String(source.ownerId || execution.executorId || ""),
+    ownerName: String(source.ownerName || execution.executorName || ""),
+    version: Math.max(1, Number(source.version || 1)),
+    transfers: Array.isArray(source.transfers)
+      ? source.transfers.filter((item) => item && typeof item === "object").map((item) => ({
+        fromId: String(item.fromId || ""),
+        fromName: String(item.fromName || ""),
+        toId: String(item.toId || ""),
+        toName: String(item.toName || ""),
+        reason: String(item.reason || "").slice(0, 300),
+        version: Math.max(1, Number(item.version || 1))
+      })).slice(-20)
+      : [],
+    delegations: Array.isArray(source.delegations)
+      ? source.delegations.filter((item) => item && typeof item === "object").map((item) => ({
+        id: String(item.id || ""),
+        type: String(item.type || ""),
+        checkpointVersion: Math.max(0, Number(item.checkpointVersion || 0)),
+        assignedBy: String(item.assignedBy || ""),
+        assigneeId: String(item.assigneeId || ""),
+        assigneeName: String(item.assigneeName || ""),
+        status: String(item.status || "pending"),
+        result: String(item.result || "").slice(0, 120)
+      })).slice(-40)
+      : []
   };
 }
 
