@@ -289,9 +289,11 @@ function errorMessage(error: unknown) {
 }
 
 function localApiHeaders(headers: Record<string, string> = {}) {
-  const token = typeof document === "undefined"
+  const token = typeof window === "undefined"
     ? ""
-    : document.querySelector('meta[name="ai-council-local-api-token"]')?.getAttribute("content") || ""
+    : String((window as typeof window & { __AI_COUNCIL_LOCAL_API_TOKEN__?: string }).__AI_COUNCIL_LOCAL_API_TOKEN__ || "")
+      || document.querySelector('meta[name="ai-council-local-api-token"]')?.getAttribute("content")
+      || ""
   return token ? { ...headers, "X-AI-Council-Token": token } : headers
 }
 

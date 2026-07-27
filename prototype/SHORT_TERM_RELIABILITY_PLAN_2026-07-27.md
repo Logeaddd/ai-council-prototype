@@ -130,6 +130,19 @@ Completed on 2026-07-27:
   as an attachment. This is evidence for the build and drag/drop path only;
   it is not a substitute for the real-provider release gate or broader UI
   acceptance.
+* The focused private-chat UI gap now has an isolated real-Electron probe:
+  `npm run probe:electron-private-draft` creates its own temporary group via
+  the same local API as the renderer, types into the visible focused group and
+  private textareas through Electron, verifies independent local-storage keys,
+  then closes and reopens the private sheet to confirm draft restoration. The
+  probe exposed and drove a repair for a real bootstrap flaw: a token kept only
+  in an injected `<meta>` tag could disappear during static-head hydration.
+  The server now also initializes the same local-only token in page memory,
+  while the renderer continues to send it only to the same-origin local API.
+  This validates group/private draft isolation and authenticated UI API access,
+  not provider reasoning, collaboration, or delivery completion.
+  After the production renderer build, the probe passed three consecutive
+  isolated Electron runs; the existing drag/drop Electron probe also passed.
 * Native provider-tool schemas now have regression coverage in `3760bd5` for
   retaining `discoverySourceUrl` and `discoveryQuery` through the closed
   schema and request-normalization path. The follow-up full suite passed

@@ -55,6 +55,16 @@ test("renderer defaults to a warm light theme and persists optional dark mode", 
   assert.match(live, /AppearanceTheme = "light" \| "dark"/);
 });
 
+test("renderer retains the injected local API token after static head hydration", () => {
+  const server = read("src/server.js");
+  const live = read("renderer/lib/council-live.ts");
+
+  assert.match(server, /__AI_COUNCIL_LOCAL_API_TOKEN__/);
+  assert.match(server, /JSON\.stringify\(localApiToken\)/);
+  assert.match(live, /__AI_COUNCIL_LOCAL_API_TOKEN__/);
+  assert.match(live, /X-AI-Council-Token/);
+});
+
 test("renderer uses the provided logo asset for visible branding and icons", () => {
   const sidebar = read("renderer/components/council/groups-sidebar.tsx");
   const layout = read("renderer/app/layout.tsx");
@@ -276,16 +286,39 @@ test("private chat is wired through the renderer and backend API", () => {
   const privateChat = read("renderer/components/council/private-chat-sheet.tsx");
   const server = read("src/server.js");
   assert.match(composer, /onOpenPrivateChat/);
+  assert.match(composer, /data-testid="open-private-chat"/);
+  assert.match(composer, /data-testid="group-chat-draft"/);
+  assert.match(composer, /data-draft-ready=\{draftLoaded \? "true" : "false"\}/);
   assert.match(app, /PrivateChatSheet/);
   assert.doesNotMatch(composer, /privateMode/);
   assert.doesNotMatch(app, /private-reply-/);
   assert.match(privateChat, /\/api\/private-chat/);
   assert.match(privateChat, /ai-council:private-draft:/);
+  assert.match(privateChat, /data-testid="private-chat-draft"/);
+  assert.match(privateChat, /data-draft-ready=\{loadedDraftKey === draftKey \? "true" : "false"\}/);
   assert.match(privateChat, /runtimeGroup/);
   assert.match(privateChat, /loadedDraftKey !== draftKey/);
   assert.match(privateChat, /persistPrivateDraft\(draftKey, value\)/);
   assert.match(server, /\/api\/private-chat/);
   assert.match(server, /status: "error"/);
+});
+
+test("desktop private-draft probe exercises the real API and browser interaction path", () => {
+  const desktop = read("desktop/main.mjs");
+  const probe = read("scripts/probe-electron-private-draft.mjs");
+  const packageJson = read("package.json");
+
+  assert.match(desktop, /AI_COUNCIL_E2E_PRIVATE_DRAFT_PROBE/);
+  assert.match(desktop, /\/api\/workspace\/init/);
+  assert.match(desktop, /ai-council-local-api-token/);
+  assert.match(desktop, /__AI_COUNCIL_LOCAL_API_TOKEN__/);
+  assert.match(desktop, /typeProbeText/);
+  assert.match(desktop, /\[data-testid='group-chat-draft'\]/);
+  assert.match(desktop, /\[data-testid='private-chat-draft'\]/);
+  assert.match(desktop, /private_draft_not_restored_after_reopen/);
+  assert.match(probe, /AI_COUNCIL_E2E_PRIVATE_DRAFT_PROBE: "1"/);
+  assert.match(probe, /electron_private_draft/);
+  assert.match(packageJson, /probe:electron-private-draft/);
 });
 
 test("renderer opens with blank current-session usage instead of stale demo totals", () => {

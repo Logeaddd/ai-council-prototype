@@ -228,6 +228,7 @@ export function Composer({
             type="button"
             onClick={onOpenPrivateChat}
             disabled={!members.length}
+            data-testid="open-private-chat"
             className="inline-flex h-7 items-center gap-1.5 rounded-md border border-border px-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:cursor-not-allowed disabled:opacity-45"
           >
             <Lock className="size-3" />
@@ -268,6 +269,8 @@ export function Composer({
           )}
         >
           <textarea
+            data-testid="group-chat-draft"
+            data-draft-ready={draftLoaded ? "true" : "false"}
             rows={2}
             value={value}
             onChange={(event) => setValue(event.target.value)}

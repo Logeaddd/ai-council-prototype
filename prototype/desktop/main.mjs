@@ -9,6 +9,7 @@ const DEFAULT_PORT = Number(process.env.AI_COUNCIL_UI_PORT || 4317);
 const HOST = "127.0.0.1";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const composerDropProbePath = String(process.env.AI_COUNCIL_E2E_COMPOSER_DROP_FILE || "").trim();
+const privateDraftProbeEnabled = process.env.AI_COUNCIL_E2E_PRIVATE_DRAFT_PROBE === "1";
 
 let mainWindow;
 
@@ -89,7 +90,7 @@ async function startDesktop() {
   });
 
   mainWindow.once("ready-to-show", () => {
-    if (!composerDropProbePath) mainWindow.show();
+    if (!composerDropProbePath && !privateDraftProbeEnabled) mainWindow.show();
   });
   mainWindow.on("closed", () => {
     mainWindow = null;
@@ -103,6 +104,19 @@ async function startDesktop() {
     } catch (error) {
       process.exitCode = 1;
       console.error("AI_COUNCIL_E2E_COMPOSER_DROP_FAILED", error);
+    } finally {
+      setTimeout(() => app.quit(), 50);
+    }
+  } else if (privateDraftProbeEnabled) {
+    try {
+      mainWindow.show();
+      mainWindow.focus();
+      const result = await runPrivateDraftProbe(mainWindow);
+      console.log(`AI_COUNCIL_E2E_PRIVATE_DRAFT=${JSON.stringify(result)}`);
+      if (!result.ok) process.exitCode = 1;
+    } catch (error) {
+      process.exitCode = 1;
+      console.error("AI_COUNCIL_E2E_PRIVATE_DRAFT_FAILED", error);
     } finally {
       setTimeout(() => app.quit(), 50);
     }
@@ -150,6 +164,180 @@ async function runComposerDropProbe(window, filePath) {
       };
     })()
   `, true);
+}
+
+async function runPrivateDraftProbe(window) {
+  const created = await window.webContents.executeJavaScript(`
+    (async () => {
+      async function request(path, body) {
+        const token = window.__AI_COUNCIL_LOCAL_API_TOKEN__
+          || document.querySelector('meta[name="ai-council-local-api-token"]')?.getAttribute("content")
+          || "";
+        const response = await fetch(path, {
+          method: body ? "POST" : "GET",
+          headers: {
+            ...(body ? { "Content-Type": "application/json" } : {}),
+            ...(token ? { "X-AI-Council-Token": token } : {}),
+          },
+          body: body ? JSON.stringify(body) : undefined,
+        });
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.error || response.statusText);
+        return payload;
+      }
+      const health = await request("/api/health");
+      return request("/api/workspace/init", {
+        root: health.allowedWorkspaceRoot,
+        groupFolderName: "private-draft-probe",
+        members: [{
+          seatId: "probe_member",
+          displayName: "Probe Member",
+          model: "probe-model",
+          role: "ordinary",
+        }],
+      });
+    })()
+  `, true);
+  if (!created?.groupPath || !created?.seats?.length) throw new Error("probe_group_not_created");
+
+  await window.loadURL(window.webContents.getURL());
+  const groupDraft = "group draft stays in the group composer";
+  const privateDraft = "private draft stays with the selected member";
+  await window.webContents.executeJavaScript(`
+    (async () => {
+      const deadline = Date.now() + 10000;
+      while (Date.now() < deadline) {
+        const composer = document.querySelector("[data-testid='group-chat-draft']");
+        const privateButton = document.querySelector("[data-testid='open-private-chat']");
+        if (composer?.dataset.draftReady === "true" && privateButton && !privateButton.disabled) {
+          composer.focus();
+          return true;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      throw new Error("group_composer_not_ready_after_group_creation");
+    })()
+  `, true);
+  await typeProbeText(window, "[data-testid='group-chat-draft']", groupDraft, "group_composer_text_input_failed");
+  await window.webContents.executeJavaScript(`
+    (async () => {
+      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      async function waitFor(getValue, reason, timeoutMs = 10000) {
+        const deadline = Date.now() + timeoutMs;
+        while (Date.now() < deadline) {
+          const value = getValue();
+          if (value) return value;
+          await sleep(50);
+        }
+        throw new Error(reason);
+      }
+      const privateButton = await waitFor(
+        () => {
+          const candidate = document.querySelector("[data-testid='open-private-chat']");
+          return candidate && !candidate.disabled ? candidate : null;
+        },
+        "private_chat_button_disabled"
+      );
+      await waitFor(
+        () => Object.keys(localStorage).some((key) => key.startsWith("ai-council:draft:") && localStorage.getItem(key) === ${JSON.stringify(groupDraft)}),
+        "group_draft_not_persisted"
+      );
+      privateButton.click();
+      return;
+    })()
+  `, true);
+
+  await focusProbeElement(window, "[data-testid='private-chat-draft']", "private_composer_missing");
+  await typeProbeText(window, "[data-testid='private-chat-draft']", privateDraft, "private_composer_text_input_failed");
+  return window.webContents.executeJavaScript(`
+    (async () => {
+      async function waitFor(getValue, reason, timeoutMs = 10000) {
+        const deadline = Date.now() + timeoutMs;
+        while (Date.now() < deadline) {
+          const value = getValue();
+          if (value) return value;
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        throw new Error(reason);
+      }
+      await waitFor(
+        () => Object.keys(localStorage).some((key) => key.startsWith("ai-council:private-draft:") && localStorage.getItem(key) === ${JSON.stringify(privateDraft)}),
+        "private_draft_not_persisted"
+      );
+      const groupComposer = document.querySelector("[data-testid='group-chat-draft']");
+      const privateComposer = document.querySelector("[data-testid='private-chat-draft']");
+      const beforeClose = {
+        groupValue: groupComposer.value,
+        privateValue: privateComposer.value,
+        groupKeys: Object.keys(localStorage).filter((key) => key.startsWith("ai-council:draft:")),
+        privateKeys: Object.keys(localStorage).filter((key) => key.startsWith("ai-council:private-draft:")),
+      };
+      if (beforeClose.groupValue !== ${JSON.stringify(groupDraft)} || beforeClose.privateValue !== ${JSON.stringify(privateDraft)}) {
+        throw new Error("draft_values_not_independent_before_close");
+      }
+      if (beforeClose.groupKeys.length !== 1 || beforeClose.privateKeys.length !== 1) {
+        throw new Error("draft_storage_keys_not_isolated");
+      }
+      const closeButton = await waitFor(
+        () => document.querySelector("[role='dialog'] button[aria-label]"),
+        "private_chat_close_button_missing"
+      );
+      closeButton.click();
+      await waitFor(
+        () => !document.querySelector("[data-testid='private-chat-draft']"),
+        "private_chat_did_not_close"
+      );
+      document.querySelector("[data-testid='open-private-chat']").click();
+      const reopenedPrivateComposer = await waitFor(
+        () => document.querySelector("[data-testid='private-chat-draft']"),
+        "private_composer_missing_after_reopen"
+      );
+      if (reopenedPrivateComposer.value !== ${JSON.stringify(privateDraft)}) throw new Error("private_draft_not_restored_after_reopen");
+      if (document.querySelector("[data-testid='group-chat-draft']").value !== ${JSON.stringify(groupDraft)}) {
+        throw new Error("group_draft_changed_after_private_chat");
+      }
+      return {
+        ok: true,
+        probe: "electron_private_draft",
+        groupDraft: ${JSON.stringify(groupDraft)},
+        privateDraft: ${JSON.stringify(privateDraft)},
+        groupKey: beforeClose.groupKeys[0],
+        privateKey: beforeClose.privateKeys[0],
+      };
+    })()
+  `, true);
+}
+
+async function focusProbeElement(window, selector, reason) {
+  return window.webContents.executeJavaScript(`
+    (async () => {
+      const deadline = Date.now() + 10000;
+      while (Date.now() < deadline) {
+        const element = document.querySelector(${JSON.stringify(selector)});
+        if (element?.dataset.draftReady === "true") {
+          element.focus();
+          return true;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      throw new Error(${JSON.stringify(reason)});
+    })()
+  `, true);
+}
+
+async function typeProbeText(window, selector, value, reason) {
+  await focusProbeElement(window, selector, reason);
+  window.show();
+  window.focus();
+  window.webContents.focus();
+  await new Promise((resolve) => setTimeout(resolve, 120));
+  await window.webContents.executeJavaScript(`document.querySelector(${JSON.stringify(selector)})?.select()`, true);
+  await window.webContents.insertText(value);
+  const accepted = await window.webContents.executeJavaScript(
+    `document.querySelector(${JSON.stringify(selector)})?.value === ${JSON.stringify(value)}`,
+    true
+  );
+  if (!accepted) throw new Error(reason);
 }
 
 function resolveAppIconPath() {

@@ -18,6 +18,7 @@
     "renderer:build": "npm --prefix ./renderer run build",
     "desktop": "electron ./desktop/main.mjs",
     "probe:electron-drop": "node ./scripts/probe-electron-composer-drop.mjs",
+    "probe:electron-private-draft": "node ./scripts/probe-electron-private-draft.mjs",
     "test": "node --test --test-concurrency=1 test/*.test.js",
     "show-memory": "node ./src/cli.js list-memory-pending",
     "desktop:shortcut": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/install-desktop-shortcut.ps1",

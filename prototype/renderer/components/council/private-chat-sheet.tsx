@@ -134,6 +134,8 @@ export function PrivateChatSheet({
           <div className="flex items-end gap-2 rounded-md border border-info/40 bg-info/5 p-2">
             <Lock className="mb-2 size-4 shrink-0 text-info" />
             <textarea
+              data-testid="private-chat-draft"
+              data-draft-ready={loadedDraftKey === draftKey ? "true" : "false"}
               rows={2}
               value={value}
               onChange={(event) => setValue(event.target.value)}

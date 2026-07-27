@@ -1276,7 +1276,11 @@ function constantTimeTokenMatch(value, expected) {
 
 function injectLocalApiToken(document) {
   const meta = `<meta name="ai-council-local-api-token" content="${localApiToken}">`;
-  return String(document || "").replace(/<head(?=>|\s[^>]*>)/i, (tag) => `${tag}${meta}`);
+  // The static renderer can reconcile its <head> during hydration. Keep the
+  // same local-only token in page memory so authenticated API calls survive it.
+  const tokenLiteral = JSON.stringify(localApiToken).replace(/</g, "\\u003c");
+  const bootstrap = `<script>window.__AI_COUNCIL_LOCAL_API_TOKEN__=${tokenLiteral};</script>`;
+  return String(document || "").replace(/<head(?=>|\s[^>]*>)/i, (tag) => `${tag}${meta}${bootstrap}`);
 }
 
 function readCurrentAppSettings() {
