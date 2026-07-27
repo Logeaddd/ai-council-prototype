@@ -709,15 +709,18 @@ export function verifyCampaignCollaboration(verifier = {}, sessions = []) {
   const ordered = [...(sessions || [])].sort((left, right) => Date.parse(left.createdAt || "") - Date.parse(right.createdAt || ""));
   const delegationSnapshots = new Map();
   for (const [sessionIndex, session] of ordered.entries()) {
-    for (const delegation of session.executionState?.ownership?.delegations || []) {
-      if (!delegation?.id) continue;
-      const current = delegationSnapshots.get(delegation.id);
-      const next = { delegation, sessionIndex };
-      if (!current || delegation.ownerAcknowledged || current.delegation.ownerAcknowledged !== true) delegationSnapshots.set(delegation.id, next);
+    for (const snapshot of campaignDelegationSnapshots(session, sessionIndex)) {
+      if (!snapshot.delegation?.id) continue;
+      const current = delegationSnapshots.get(snapshot.delegation.id);
+      if (!current || isNewerCampaignDelegationSnapshot(snapshot, current)) {
+        delegationSnapshots.set(snapshot.delegation.id, snapshot);
+      }
     }
   }
 
-  const completedResearch = [...delegationSnapshots.values()].filter(({ delegation }) => (
+  const completedResearch = [...delegationSnapshots.values()].filter((snapshot) => {
+    const { delegation } = snapshot;
+    return (
     delegation.type === "research"
     && delegation.status === "completed"
     && delegation.allowWorkspaceMutation !== true
@@ -727,18 +730,13 @@ export function verifyCampaignCollaboration(verifier = {}, sessions = []) {
     && delegation.ownerAcknowledged === true
     && Array.isArray(delegation.handoffEvidence)
     && delegation.handoffEvidence.length > 0
-  ));
-  const integrated = completedResearch.filter(({ delegation, sessionIndex }) => ordered.slice(sessionIndex).some((session) => (
-    (session.toolExecutionResults || []).some((item) => (
-      item?.tool === "workspace_edit"
-      && item?.status === "completed"
-      && item?.result?.ok !== false
-      && item?.source_agent_id === delegation.assignedBy
-      && normalizeCampaignPath(item?.path || item?.result?.path) === normalizeCampaignPath(verifier.file)
-    ))
-  )));
+    );
+  });
+  const evidencedResearch = completedResearch.filter((snapshot) => campaignResearchEvidence(snapshot));
+  const integrated = evidencedResearch.filter((snapshot) => campaignOwnerIntegratedHandoff(snapshot, ordered, verifier.file));
   const checks = [
     check("bounded_research_handoff_completed", completedResearch.length > 0, `${completedResearch.length} completed acknowledged read-only research handoffs`),
+    check("handoff_has_real_read_only_evidence", evidencedResearch.length > 0, `${evidencedResearch.length} handoffs were backed by the assignee's completed read-only tool evidence`),
     check("owner_integrated_handoff_into_target", integrated.length > 0, `${integrated.length} owner writes to ${verifier.file || "target"} after a handoff`)
   ];
   return {
@@ -754,6 +752,73 @@ export function verifyCampaignCollaboration(verifier = {}, sessions = []) {
       ownerAcknowledged: delegation.ownerAcknowledged === true
     }))
   };
+}
+
+function campaignDelegationSnapshots(session, sessionIndex) {
+  return [
+    { source: "session_execution", rank: 1, delegations: session?.executionState?.ownership?.delegations },
+    { source: "task_run_execution", rank: 2, delegations: session?.taskRun?.execution?.ownership?.delegations }
+  ].flatMap(({ source, rank, delegations }) => (
+    Array.isArray(delegations)
+      ? delegations.map((delegation) => ({ delegation, session, sessionIndex, source, rank }))
+      : []
+  ));
+}
+
+function isNewerCampaignDelegationSnapshot(next, current) {
+  const nextAcknowledged = next.delegation?.ownerAcknowledged === true;
+  const currentAcknowledged = current.delegation?.ownerAcknowledged === true;
+  if (nextAcknowledged !== currentAcknowledged) return nextAcknowledged;
+
+  const nextCheckpoint = Number(next.delegation?.checkpointVersion || 0);
+  const currentCheckpoint = Number(current.delegation?.checkpointVersion || 0);
+  if (nextCheckpoint !== currentCheckpoint) return nextCheckpoint > currentCheckpoint;
+  if (next.sessionIndex !== current.sessionIndex) return next.sessionIndex > current.sessionIndex;
+  return next.rank >= current.rank;
+}
+
+function campaignResearchEvidence(snapshot) {
+  const { delegation, session } = snapshot;
+  const toolIds = new Set((delegation.handoffEvidence || [])
+    .filter((item) => item?.kind === "tool")
+    .map((item) => String(item.detail || "").match(/#([^\s]+)/)?.[1])
+    .filter(Boolean));
+  if (!toolIds.size) return false;
+
+  const allowedTools = new Set(Array.isArray(delegation.allowedTools) ? delegation.allowedTools : []);
+  return (session?.toolExecutionResults || []).some((item) => (
+    toolIds.has(item?.id)
+    && item?.source_agent_id === delegation.assigneeId
+    && item?.status === "completed"
+    && item?.result?.ok !== false
+    && isReadOnlyResearchTool(item?.tool)
+    && (!allowedTools.size || allowedTools.has(item?.tool))
+  ));
+}
+
+function isReadOnlyResearchTool(tool) {
+  return new Set(["read_file", "list_directory", "search_files", "web_search", "fetch_url", "api_request", "search_context", "read_process_status"]).has(tool);
+}
+
+function campaignOwnerIntegratedHandoff(snapshot, ordered, targetFile) {
+  const evidenceIndexes = new Set((snapshot.delegation.handoffEvidence || [])
+    .filter((item) => item?.kind === "tool")
+    .map((item) => String(item.detail || "").match(/#([^\s]+)/)?.[1])
+    .filter(Boolean));
+  const sourceEvidenceIndex = (snapshot.session?.toolExecutionResults || []).reduce((latest, item, index) => (
+    evidenceIndexes.has(item?.id) ? index : latest
+  ), -1);
+
+  return ordered.slice(snapshot.sessionIndex).some((session, relativeIndex) => (
+    (session.toolExecutionResults || []).some((item, toolIndex) => (
+      item?.tool === "workspace_edit"
+      && item?.status === "completed"
+      && item?.result?.ok !== false
+      && item?.source_agent_id === snapshot.delegation.assignedBy
+      && normalizeCampaignPath(item?.path || item?.result?.path) === normalizeCampaignPath(targetFile)
+      && (relativeIndex > 0 || toolIndex > sourceEvidenceIndex)
+    ))
+  ));
 }
 
 function normalizeCampaignPath(value) {

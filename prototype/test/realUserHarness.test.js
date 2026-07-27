@@ -389,23 +389,57 @@ test("campaign collaboration verifier requires an acknowledged read-only handoff
     allowWorkspaceMutation: false,
     status: "completed",
     ownerAcknowledged: true,
-    handoffEvidence: [{ kind: "tool", detail: "read_file research-note" }]
+    handoffEvidence: [{ kind: "tool", detail: "read_file#critic-read completed" }]
   };
   const sessions = [
     {
       createdAt: "2026-07-27T00:00:00.000Z",
       executionState: { ownership: { delegations: [{ ...delegation, ownerAcknowledged: false }] } },
-      toolExecutionResults: [{ tool: "read_file", status: "completed", source_agent_id: "critic", path: "inputs/research-note.txt", result: { ok: true } }]
+      toolExecutionResults: []
     },
     {
       createdAt: "2026-07-27T00:01:00.000Z",
       executionState: { ownership: { delegations: [delegation] } },
-      toolExecutionResults: [{ tool: "workspace_edit", status: "completed", source_agent_id: "builder", path: verifier.file, result: { ok: true, path: verifier.file } }]
+      toolExecutionResults: [
+        { id: "critic-read", tool: "read_file", status: "completed", source_agent_id: "critic", path: "inputs/research-note.txt", result: { ok: true } },
+        { tool: "workspace_edit", status: "completed", source_agent_id: "builder", path: verifier.file, result: { ok: true, path: verifier.file } }
+      ]
     }
   ];
 
   assert.equal(verifyCampaignCollaboration(verifier, sessions).passed, true);
   assert.equal(verifyCampaignCollaboration(verifier, sessions.slice(0, 1)).passed, false);
+});
+
+test("campaign collaboration verifier accepts durable TaskRun-only delegation evidence and rejects a write that predates it", () => {
+  const verifier = { requiresDelegation: true, file: "deliverables/release-brief.json" };
+  const delegation = {
+    id: "delegation:1:2:critic",
+    type: "research",
+    checkpointVersion: 2,
+    assignedBy: "builder",
+    assigneeId: "critic",
+    allowWorkspaceMutation: false,
+    allowedTools: ["read_file"],
+    status: "completed",
+    ownerAcknowledged: true,
+    handoffEvidence: [{ kind: "tool", detail: "read_file#critic-read completed" }]
+  };
+  const taskRunOnly = {
+    createdAt: "2026-07-27T00:02:00.000Z",
+    taskRun: { execution: { ownership: { delegations: [delegation] } } },
+    toolExecutionResults: [
+      { id: "critic-read", tool: "read_file", status: "completed", source_agent_id: "critic", path: "inputs/research.txt", result: { ok: true } },
+      { id: "owner-write", tool: "workspace_edit", status: "completed", source_agent_id: "builder", path: verifier.file, result: { ok: true, path: verifier.file } }
+    ]
+  };
+  assert.equal(verifyCampaignCollaboration(verifier, [taskRunOnly]).passed, true);
+
+  const writeFirst = {
+    ...taskRunOnly,
+    toolExecutionResults: [...taskRunOnly.toolExecutionResults].reverse()
+  };
+  assert.equal(verifyCampaignCollaboration(verifier, [writeFirst]).passed, false);
 });
 
 test("capability-acquisition PNG verifier checks the real binary structure, dimensions and every RGBA pixel", async () => {
