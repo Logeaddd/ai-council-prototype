@@ -4,7 +4,7 @@ import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
-import { evaluateProductHarness, testSuiteConcurrency, testSuiteTimeoutMs } from "../src/productHarness.js";
+import { evaluateProductHarness, runProductHarnessCheckAsync, testSuiteConcurrency, testSuiteProgressIntervalMs, testSuiteTimeoutMs } from "../src/productHarness.js";
 
 test("product harness has no default full-suite timeout but accepts an explicit test guard", () => {
   assert.equal(testSuiteTimeoutMs(undefined), undefined);
@@ -12,6 +12,36 @@ test("product harness has no default full-suite timeout but accepts an explicit 
   assert.equal(testSuiteTimeoutMs(300000), 300000);
   assert.equal(testSuiteConcurrency(undefined), 1);
   assert.equal(testSuiteConcurrency(2), 2);
+  assert.equal(testSuiteProgressIntervalMs(undefined), 15000);
+  assert.equal(testSuiteProgressIntervalMs(25), 25);
+});
+
+test("asynchronous product harness streams actual test output and reports an alive-but-silent child", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-product-harness-stream-"));
+  fs.mkdirSync(path.join(root, "test"), { recursive: true });
+  fs.writeFileSync(path.join(root, "manifest.json"), JSON.stringify({ tasks: [] }), "utf8");
+  fs.writeFileSync(path.join(root, "test", "observable.test.js"), [
+    'import test from "node:test";',
+    'import assert from "node:assert/strict";',
+    'test("observable child test", async () => {',
+    '  await new Promise((resolve) => setTimeout(resolve, 180));',
+    '  assert.equal(true, true);',
+    '});'
+  ].join("\n"), "utf8");
+  const progress = [];
+  const result = await runProductHarnessCheckAsync({
+    root,
+    manifestPath: "manifest.json",
+    reportPath: "report.json",
+    progressIntervalMs: 20,
+    onProgress: (event) => progress.push(event)
+  });
+  assert.equal(result.report.testEvidence.status, "passed");
+  assert.equal(progress.some((event) => event.type === "test_suite_started"), true);
+  assert.equal(progress.some((event) => event.type === "test_suite_waiting" && event.processAlive), true);
+  assert.equal(progress.some((event) => event.type === "test_output" && event.output.includes("observable child test")), true);
+  assert.equal(progress.at(-1).type, "test_suite_finished");
+  assert.equal(progress.at(-1).status, "passed");
 });
 
 test("product harness cannot complete a real benchmark gate without a passed evidence report", () => {

@@ -153,6 +153,18 @@ Completed on 2026-07-27:
   No `AI_COUNCIL_API_BASE_URL`, `AI_COUNCIL_API_KEY`, or
   `AI_COUNCIL_MODEL` was configured for a new paid-window run, so this report
   is a local re-evaluation of retained evidence, not new Provider evidence.
+* `harness-check` now keeps its synchronous library API for existing callers,
+  while the CLI uses an asynchronous child-process path that streams the real
+  Node test output as it arrives. While the test child remains alive it emits a
+  factual heartbeat containing the elapsed silence time; this is observability,
+  not a timeout, progress estimate, or success claim. The completion line is
+  emitted only after the child exits and includes its real exit code and parsed
+  test totals. A temporary child test verifies both a real output chunk and an
+  alive-but-silent heartbeat. The full CLI check produced 726 tests, 725 pass,
+  0 fail, and 1 platform skip in 190,125 ms, with 12 observed heartbeats. Its
+  report at `tmp/harness-check-progress-20260727/report.json` remained
+  `incomplete` (T105 6/7, T106 7/7, T117 2/3), as the paid real-provider
+  evidence window remains unmet.
 * Native provider-tool schemas now have regression coverage in `3760bd5` for
   retaining `discoverySourceUrl` and `discoveryQuery` through the closed
   schema and request-normalization path. The follow-up full suite passed

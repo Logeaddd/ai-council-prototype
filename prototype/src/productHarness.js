@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -8,6 +8,20 @@ export function runProductHarnessCheck(options = {}) {
   const manifestPath = path.resolve(root, options.manifestPath || path.join("config", "product-harness.json"));
   const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
   const testEvidence = options.runTests === false ? { status: "not_run", reason: "tests_not_requested" } : runTestSuite(root, options);
+  return writeProductHarnessReport({ root, manifest, manifestPath, testEvidence, options });
+}
+
+export async function runProductHarnessCheckAsync(options = {}) {
+  const root = path.resolve(options.root || process.cwd());
+  const manifestPath = path.resolve(root, options.manifestPath || path.join("config", "product-harness.json"));
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  const testEvidence = options.runTests === false
+    ? { status: "not_run", reason: "tests_not_requested" }
+    : await runTestSuiteAsync(root, options);
+  return writeProductHarnessReport({ root, manifest, manifestPath, testEvidence, options });
+}
+
+function writeProductHarnessReport({ root, manifest, manifestPath, testEvidence, options }) {
   const report = evaluateProductHarness({ root, manifest, manifestPath, testEvidence });
   const reportPath = path.resolve(root, options.reportPath || defaultReportPath());
   fs.mkdirSync(path.dirname(reportPath), { recursive: true });
@@ -280,6 +294,103 @@ function runTestSuite(root, options) {
   };
 }
 
+async function runTestSuiteAsync(root, options) {
+  const started = Date.now();
+  const testDir = path.join(root, "test");
+  const testFiles = fs.readdirSync(testDir)
+    .filter((name) => name.endsWith(".test.js"))
+    .sort()
+    .map((name) => path.join("test", name));
+  const env = { ...process.env };
+  delete env.NODE_TEST_CONTEXT;
+  const timeout = testSuiteTimeoutMs(options.testTimeoutMs);
+  const concurrency = testSuiteConcurrency(options.testConcurrency);
+  const progressIntervalMs = testSuiteProgressIntervalMs(options.progressIntervalMs);
+  const emitProgress = (event) => {
+    if (typeof options.onProgress !== "function") return;
+    options.onProgress({ ...event, elapsedMs: Date.now() - started });
+  };
+  let stdout = "";
+  let stderr = "";
+  let lastOutputAt = started;
+  let timedOut = false;
+  let timer = null;
+  let heartbeat = null;
+  const child = spawn(process.execPath, ["--test", `--test-concurrency=${concurrency}`, ...testFiles], {
+    cwd: root,
+    windowsHide: true,
+    env,
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+
+  emitProgress({
+    type: "test_suite_started",
+    testFiles: testFiles.map((file) => file.replaceAll("\\", "/")),
+    concurrency,
+    timeoutMs: timeout ?? null
+  });
+  const capture = (source, chunk) => {
+    const output = String(chunk || "");
+    lastOutputAt = Date.now();
+    if (source === "stdout") stdout = appendOutputTail(stdout, output);
+    else stderr = appendOutputTail(stderr, output);
+    emitProgress({ type: "test_output", source, output });
+  };
+  child.stdout.on("data", (chunk) => capture("stdout", chunk));
+  child.stderr.on("data", (chunk) => capture("stderr", chunk));
+  if (timeout) {
+    timer = setTimeout(() => {
+      timedOut = true;
+      emitProgress({ type: "test_suite_timeout", timeoutMs: timeout });
+      child.kill();
+    }, timeout);
+  }
+  heartbeat = setInterval(() => {
+    const now = Date.now();
+    emitProgress({
+      type: "test_suite_waiting",
+      processAlive: child.exitCode === null && child.signalCode === null,
+      silenceMs: now - lastOutputAt
+    });
+  }, progressIntervalMs);
+  const completion = await new Promise((resolve) => {
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+    child.once("error", (error) => finish({ exitCode: null, signal: null, error }));
+    child.once("close", (exitCode, signal) => finish({ exitCode, signal, error: null }));
+  });
+  if (timer) clearTimeout(timer);
+  if (heartbeat) clearInterval(heartbeat);
+  const error = completion.error ? String(completion.error.message || completion.error) : "";
+  const status = !timedOut && !error && completion.exitCode === 0 ? "passed" : "failed";
+  const evidence = {
+    status,
+    exitCode: completion.exitCode,
+    signal: completion.signal || "",
+    durationMs: Date.now() - started,
+    tests: outputCount(stdout, "tests"),
+    passed: outputCount(stdout, "pass"),
+    failed: outputCount(stdout, "fail"),
+    stdout,
+    stderr,
+    error: timedOut ? `test_suite_timeout_after_${timeout}ms` : error
+  };
+  emitProgress({
+    type: "test_suite_finished",
+    status: evidence.status,
+    exitCode: evidence.exitCode,
+    signal: evidence.signal,
+    tests: evidence.tests,
+    passed: evidence.passed,
+    failed: evidence.failed
+  });
+  return evidence;
+}
+
 export function testSuiteTimeoutMs(value) {
   const timeout = Number(value);
   return Number.isFinite(timeout) && timeout > 0 ? timeout : undefined;
@@ -288,6 +399,11 @@ export function testSuiteTimeoutMs(value) {
 export function testSuiteConcurrency(value) {
   const concurrency = Number.parseInt(String(value ?? ""), 10);
   return Number.isFinite(concurrency) && concurrency > 0 ? concurrency : 1;
+}
+
+export function testSuiteProgressIntervalMs(value) {
+  const interval = Number(value);
+  return Number.isFinite(interval) && interval > 0 ? interval : 15000;
 }
 
 function summarizeTestEvidence(value = {}) {
@@ -305,6 +421,10 @@ function summarizeTestEvidence(value = {}) {
 function outputCount(output, label) {
   const match = String(output || "").match(new RegExp(`(?:^|\\n)[^\\S\\r\\n]*[ℹ#]?[^\\S\\r\\n]*${label}\\s+(\\d+)`, "i"));
   return match ? Number(match[1]) : 0;
+}
+
+function appendOutputTail(previous, next, maximumLength = 12000) {
+  return `${previous}${next}`.slice(-maximumLength);
 }
 
 function findReports(root) {

@@ -9,7 +9,7 @@ import { initGroupWorkspace, replaceMember } from "./workspaceManager.js";
 import { addReview, createRecorderDraft, finalizeDraft, listDrafts } from "./writeFlow.js";
 import { readAppSettings } from "./appSettings.js";
 import { runRealProviderBenchmark } from "./realProviderBenchmark.js";
-import { runProductHarnessCheck } from "./productHarness.js";
+import { runProductHarnessCheckAsync } from "./productHarness.js";
 import { runSeededRealUserBaseline, runSeededRealUserCampaign } from "./realUserHarness.js";
 import { runContextPressureBaseline } from "./contextPressureHarness.js";
 import { runRetrievalCoverageAudit } from "./retrievalAuditHarness.js";
@@ -91,11 +91,12 @@ async function main() {
   }
 
   if (command === "harness-check") {
-    const result = runProductHarnessCheck({
+    const result = await runProductHarnessCheckAsync({
       root: baseDir,
       manifestPath: getArg(args, "--manifest", path.join("config", "product-harness.json")),
       reportPath: getArg(args, "--report"),
-      runTests: !args.includes("--skip-tests")
+      runTests: !args.includes("--skip-tests"),
+      onProgress: printHarnessCheckProgress
     });
     console.log(JSON.stringify({
       status: result.report.status,
@@ -106,6 +107,28 @@ async function main() {
   }
 
   printHelp();
+}
+
+function printHarnessCheckProgress(event) {
+  if (event.type === "test_suite_started") {
+    console.error(`[harness-check] starting ${event.testFiles.length} test files (concurrency ${event.concurrency}).`);
+    return;
+  }
+  if (event.type === "test_output") {
+    process.stderr.write(event.output);
+    return;
+  }
+  if (event.type === "test_suite_waiting" && event.processAlive) {
+    console.error(`[harness-check] test process is still alive; no child output for ${Math.round(event.silenceMs / 1000)}s.`);
+    return;
+  }
+  if (event.type === "test_suite_timeout") {
+    console.error(`[harness-check] explicit test timeout reached after ${event.timeoutMs}ms; stopping the test process.`);
+    return;
+  }
+  if (event.type === "test_suite_finished") {
+    console.error(`[harness-check] test process exited ${event.status} (exit ${event.exitCode ?? "none"}; ${event.passed}/${event.tests} passed).`);
+  }
 }
 
 async function runRealBenchmarkCommand(args) {
