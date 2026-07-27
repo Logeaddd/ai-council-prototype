@@ -2398,6 +2398,7 @@ export function buildToolFollowupInstruction(results = [], rejected = []) {
   const completed = (Array.isArray(results) ? results : []).filter((item) => item?.status === "completed" && item.result?.ok !== false);
   const failedCommands = (Array.isArray(results) ? results : []).filter((item) => item?.tool === "execute_command" && item?.status === "failed");
   const failedManagedInstalls = (Array.isArray(results) ? results : []).filter((item) => item?.tool === "install_package" && item?.status === "failed");
+  const sourceRequiredProvisions = (Array.isArray(results) ? results : []).filter((item) => item?.tool === "provision_tool" && item?.status === "failed" && ["tool_source_required", "unsafe_discovery_source"].includes(item?.code));
   const failedSkillReads = (Array.isArray(results) ? results : []).filter((item) => item?.tool === "skill_read" && item?.status === "failed");
   const invalidSkillRequests = (Array.isArray(rejected) ? rejected : []).filter((item) => item?.code === "invalid_tool" && /^skill(?::|$)/i.test(String(item.tool || "")));
   if (failedCommands.length) {
@@ -2407,6 +2408,10 @@ export function buildToolFollowupInstruction(results = [], rejected = []) {
     const manager = item.manager || item.result?.manager || "the selected package manager";
     const packageName = item.packageName || item.package || item.result?.packageName || "the selected package";
     lines.push(`Managed package installation failed for ${manager} package ${JSON.stringify(packageName)}. Use the exact returned error. Do not retry the same manager unchanged; if another already-detected runtime ecosystem can satisfy the task, choose an equivalent package yourself and request install_package with that manager.`);
+  }
+  for (const item of sourceRequiredProvisions) {
+    const tool = item.toolName || item.commandName || "the missing tool";
+    lines.push(`Provisioning ${JSON.stringify(tool)} has no safe acquisition source yet. Request web_search now for the publisher's or platform package manager's installation page, then make a materially different provision_tool request with manager/packageId or HTTPS downloadUrl, discoverySourceUrl set to the page you used, discoveryQuery set to the search terms, and SHA-256 when the publisher provides one. A discovery URL is evidence only, not a substitute for download integrity verification; do not repeat an empty provision_tool request or run an arbitrary copied shell script.`);
   }
   for (const item of failedSkillReads) {
     const skillId = item.skillId || "the requested skill";

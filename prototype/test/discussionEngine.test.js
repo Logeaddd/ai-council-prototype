@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { runCouncil, runCouncilEvents } from "../src/discussionEngine.js";
+import { buildToolFollowupInstruction, runCouncil, runCouncilEvents } from "../src/discussionEngine.js";
 import { validateGroupConfig } from "../src/config.js";
 import { appendCompressedTranscriptChunk, readSummaryCache, writeGroupSharedSummary, writeMemberShortSummary } from "../src/summaryCache.js";
 import { appendSessionUsage, readGroupUsage } from "../src/usageStats.js";
@@ -100,6 +100,19 @@ test("aborted runs persist an explicit interrupted session instead of staying ru
   assert.equal(saved.status, "interrupted");
   assert.equal(saved.interruptionReason, "stopped_by_user");
   assert.ok(saved.completedAt);
+});
+
+test("unknown tool source failures require researched acquisition evidence instead of an empty retry", () => {
+  const instruction = buildToolFollowupInstruction([{
+    tool: "provision_tool",
+    toolName: "example-cli",
+    status: "failed",
+    code: "tool_source_required",
+    error: "No automatic source is known for example-cli."
+  }]);
+  assert.match(instruction, /Request web_search now/);
+  assert.match(instruction, /discoverySourceUrl/);
+  assert.match(instruction, /do not repeat an empty provision_tool request/i);
 });
 
 test("continuation restores the durable TaskRun checkpoint before older session caches", async () => {

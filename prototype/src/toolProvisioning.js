@@ -27,6 +27,7 @@ export async function provisionTool(request, options = {}) {
   const key = normalizeKey(name);
   const known = KNOWN_TOOLS[key] || {};
   const command = requiredText(request.commandName || request.executable || known.command || name, "command name");
+  const discovery = await resolveDiscoveryEvidence(request);
   const managedRoot = path.join(groupRoot, "shared", "tools");
   const installRoot = path.join(managedRoot, safeSegment(key || command));
   fs.mkdirSync(installRoot, { recursive: true });
@@ -51,7 +52,7 @@ export async function provisionTool(request, options = {}) {
       command,
       status: "already_available",
       probe: before,
-      provenance: prior?.provenance || systemPathProvenance(command)
+      provenance: attachDiscoveryEvidence(prior?.provenance || systemPathProvenance(command), discovery)
     });
   }
 
@@ -65,7 +66,7 @@ export async function provisionTool(request, options = {}) {
   if (strategy.type === "download") {
     installed = await downloadArtifact(strategy, commandOptions);
     if (!installed.ok) {
-      return provisionResult({ name, command, status: "install_failed", strategy, install: installed, provenance: installed.provenance, ok: false });
+      return provisionResult({ name, command, status: "install_failed", strategy, install: installed, provenance: attachDiscoveryEvidence(installed.provenance, discovery), ok: false });
     }
     if (strategy.isZip) {
       try {
@@ -86,7 +87,7 @@ export async function provisionTool(request, options = {}) {
             code: error.code || "archive_extract_failed",
             error: error.message
           },
-          provenance: installed.provenance,
+          provenance: attachDiscoveryEvidence(installed.provenance, discovery),
           ok: false
         });
       }
@@ -101,12 +102,12 @@ export async function provisionTool(request, options = {}) {
       maxOutputBytes: request.maxOutputBytes || options.maxToolProvisionOutputBytes
     }, commandOptions);
     if (!installed.ok) {
-      return provisionResult({ name, command, status: "install_failed", strategy, install: installed, provenance: strategy.provenance, ok: false });
+      return provisionResult({ name, command, status: "install_failed", strategy, install: installed, provenance: attachDiscoveryEvidence(strategy.provenance, discovery), ok: false });
     }
   }
 
   const after = await probeCommand(command, request.verifyCommand, commandOptions, request.executablePath, installRoot);
-  const provenance = installed.provenance || strategy.provenance;
+  const provenance = attachDiscoveryEvidence(installed.provenance || strategy.provenance, discovery);
   if (after.ok) {
     writeProvisionManifest(installRoot, {
       name,
@@ -406,6 +407,9 @@ function safeProvenance(value) {
     packageId: String(source.packageId || ""),
     requestedUrl: safeProvenanceUrl(source.requestedUrl),
     finalUrl: safeProvenanceUrl(source.finalUrl),
+    discoverySourceUrl: safeProvenanceUrl(source.discoverySourceUrl),
+    discoveryQuery: String(source.discoveryQuery || "").slice(0, 240),
+    discoveryMethod: String(source.discoveryMethod || "").slice(0, 80),
     redirects: Array.isArray(source.redirects) ? source.redirects.map(safeProvenanceUrl).filter(Boolean).slice(0, MAX_REDIRECTS) : [],
     transport: String(source.transport || ""),
     contentType: String(source.contentType || "").slice(0, 240),
@@ -418,6 +422,26 @@ function safeProvenance(value) {
       reason: String(integrity.reason || "").slice(0, 400)
     }
   };
+}
+
+async function resolveDiscoveryEvidence(request) {
+  const source = String(request.discoverySourceUrl || request.discovery_source_url || "").trim();
+  if (!source) return {};
+  try {
+    return {
+      discoverySourceUrl: safeProvenanceUrl(await assertSafeDownloadUrl(source)),
+      discoveryQuery: String(request.discoveryQuery || request.discovery_query || request.toolName || request.name || "").trim().slice(0, 240),
+      discoveryMethod: "agent_web_research"
+    };
+  } catch (error) {
+    error.code = "unsafe_discovery_source";
+    throw error;
+  }
+}
+
+function attachDiscoveryEvidence(provenance, discovery) {
+  if (!discovery?.discoverySourceUrl) return provenance;
+  return { ...(provenance || {}), ...discovery };
 }
 
 function systemPathProvenance(command) {

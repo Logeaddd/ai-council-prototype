@@ -1428,7 +1428,7 @@ test("provision_tool autonomously installs verifies and reuses a managed CLI for
     groupPath: tmp,
     agent: { id: "full", name: "Full" },
     round: 1,
-    requests: [{ tool: "provision_tool", toolName: "demo", commandName: "demo", installCommand, shell: process.platform === "win32" ? "powershell" : "sh", reason: "Install missing CLI." }]
+    requests: [{ tool: "provision_tool", toolName: "demo", commandName: "demo", installCommand, shell: process.platform === "win32" ? "powershell" : "sh", discoverySourceUrl: "http://127.0.0.1:1/publisher-install-guide?temporary-token=not-for-logs", discoveryQuery: "demo cli official install", reason: "Install missing CLI." }]
   });
   const reused = await executeToolRequests({
     permissionTier: "full",
@@ -1442,8 +1442,26 @@ test("provision_tool autonomously installs verifies and reuses a managed CLI for
   assert.equal(installed.results[0].status, "completed");
   assert.equal(installed.results[0].result.status, "installed");
   assert.match(installed.results[0].result.verification.stdout, /demo 1\.0/);
+  assert.equal(installed.results[0].result.provenance.discoverySourceUrl, "http://127.0.0.1:1/publisher-install-guide");
+  assert.equal(installed.results[0].result.provenance.discoveryQuery, "demo cli official install");
+  const manifest = JSON.parse(fs.readFileSync(path.join(tmp, "shared", "tools", "demo", ".provisioning.json"), "utf8"));
+  assert.equal(manifest.provenance.discoverySourceUrl, "http://127.0.0.1:1/publisher-install-guide");
   assert.equal(reused.results[0].status, "completed");
   assert.equal(reused.results[0].result.status, "already_available");
+});
+
+test("provision_tool rejects an unsafe researched source before executing an install command", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-provision-unsafe-discovery-"));
+  const result = await executeToolRequests({
+    permissionTier: "full",
+    groupPath: tmp,
+    agent: { id: "full", name: "Full" },
+    round: 1,
+    requests: [{ tool: "provision_tool", toolName: "unsafe-demo", commandName: "unsafe-demo", installCommand: "Write-Output should-not-run", discoverySourceUrl: "file:///unsafe/install-guide", reason: "Reject an unsafe source." }]
+  });
+  assert.equal(result.results[0].status, "failed");
+  assert.equal(result.results[0].code, "unsafe_discovery_source");
+  assert.equal(fs.existsSync(path.join(tmp, "shared", "tools", "unsafe-demo")), false);
 });
 
 test("provision_tool downloads and extracts a real tool archive before verification", async () => {

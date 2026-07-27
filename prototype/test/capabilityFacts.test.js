@@ -67,6 +67,8 @@ test("provisioning facts preserve verification provenance without persisting sig
           type: "download",
           requestedUrl: "https://downloads.example.test/demo.zip?signature=secret",
           finalUrl: "https://cdn.example.test/demo.zip?token=secret",
+          discoverySourceUrl: "https://publisher.example.test/install?token=secret",
+          discoveryQuery: "demo cli official install",
           integrity: { status: "verified", algorithm: "sha256", expected: "a".repeat(64), actual: "a".repeat(64) }
         }
       }
@@ -79,4 +81,6 @@ test("provisioning facts preserve verification provenance without persisting sig
   assert.equal(runtime.evidence.actualSha256, "a".repeat(64));
   assert.equal(runtime.evidence.requestedUrl, "https://downloads.example.test/demo.zip");
   assert.equal(runtime.evidence.finalUrl, "https://cdn.example.test/demo.zip");
+  assert.equal(runtime.evidence.discoverySourceUrl, "https://publisher.example.test/install");
+  assert.equal(runtime.evidence.discoveryQuery, "demo cli official install");
 });
