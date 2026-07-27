@@ -291,6 +291,17 @@ Completed on 2026-07-27:
   currently has no `AI_COUNCIL_API_BASE_URL`, `AI_COUNCIL_API_KEY`, or
   `AI_COUNCIL_MODEL` configured, so no new real-provider campaign was started
   and no local evidence is represented as a replacement.
+* Campaign capability evidence is now bound to its original execution files in
+  `51de9ed`. Every retained acquisition-use link includes the later work tool
+  result ID; the campaign records hashes for the session JSON files containing
+  those IDs. Product gating reads those files again, rejects absent/absolute
+  paths, hash drift, duplicate IDs, failed tool results, or a missing matching
+  `capabilityUsage` link. This makes the report summary auditable against the
+  durable execution record, although it is not a cryptographic attestation
+  against an actor able to alter both local files. Full regression remained
+  752/753 with 0 failures and 1 Windows platform skip. The resulting formal
+  report is `harness/reports/product-harness-2026-07-27T10-31-26-387Z.json`;
+  it remains incomplete for the same unconfigured real-provider campaign.
 
 Still open before the real-provider release gate:
 
