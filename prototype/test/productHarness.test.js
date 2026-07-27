@@ -193,6 +193,7 @@ test("product harness can require real-provider bounded-delegation evidence", ()
   assert.equal(evaluateProductHarness({ root, manifest, testEvidence: { status: "passed" } }).status, "incomplete", "a cached report field cannot substitute for persisted session evidence");
 
   const sessionPath = writeNativeResearchHandoffSession(reportDir, report.scenario.task.deliverable);
+  assert.equal(evaluateProductHarness({ root, manifest, testEvidence: { status: "passed" } }).status, "incomplete", "unhashed sessions cannot become collaboration proof");
   attachCollaborationExecutionReceipt(report, reportDir);
   fs.writeFileSync(path.join(reportDir, "report.json"), JSON.stringify(report), "utf8");
   assert.equal(evaluateProductHarness({ root, manifest, testEvidence: { status: "passed" } }).status, "complete");
