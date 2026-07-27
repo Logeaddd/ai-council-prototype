@@ -3,8 +3,10 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { makeId, nowIso } from "./types.js";
+import { captureWorkspaceSnapshot, diffWorkspaceSnapshots } from "./workspaceChanges.js";
 
 const SUPERVISOR_PATH = fileURLToPath(new URL("./backgroundSupervisor.mjs", import.meta.url));
+const PTY_SUPERVISOR_PATH = fileURLToPath(new URL("./ptySupervisor.mjs", import.meta.url));
 const DEFAULT_OUTPUT_BYTES = 32 * 1024;
 const MAX_OUTPUT_BYTES = 1024 * 1024;
 const DEFAULT_START_TIMEOUT_MS = 10000;
@@ -12,15 +14,37 @@ const DEFAULT_STOP_TIMEOUT_MS = 10000;
 const HEARTBEAT_STALE_MS = 15000;
 const PROCESS_ID_PATTERN = /^proc_[a-z0-9_]+$/i;
 const TERMINAL_STATUSES = new Set(["exited", "failed", "stopped", "unknown"]);
+const MAX_TERMINAL_INPUT_BYTES = 16 * 1024;
+const DEFAULT_TERMINAL_COLUMNS = 100;
+const DEFAULT_TERMINAL_ROWS = 30;
 
 export async function startManagedBackgroundProcess(options = {}) {
+  return startManagedProcess({ ...options, interactive: false });
+}
+
+export async function startManagedInteractiveProcess(options = {}) {
+  return startManagedProcess({ ...options, interactive: true });
+}
+
+async function startManagedProcess(options = {}) {
   const processId = makeId("proc");
   const paths = processPaths(options.groupRoot, processId);
   const createdAt = nowIso();
+  const interactive = Boolean(options.interactive);
+  const terminal = interactive ? {
+    columns: clampNumber(options.columns, DEFAULT_TERMINAL_COLUMNS, 20, 300),
+    rows: clampNumber(options.rows, DEFAULT_TERMINAL_ROWS, 5, 200),
+    lastControlId: "",
+    lastControlAt: ""
+  } : undefined;
   fs.mkdirSync(paths.processDir, { recursive: true });
+  const workspaceTracking = createWorkspaceTracking(options, paths);
   writeJson(paths.statePath, {
     processId,
-    source: "managed_background_process",
+    source: interactive ? "managed_interactive_pty" : "managed_background_process",
+    interactive,
+    terminal,
+    workspaceTracking,
     status: "starting",
     command: redactSecrets(options.command),
     shell: options.shell,
@@ -41,7 +65,7 @@ export async function startManagedBackgroundProcess(options = {}) {
 
   return new Promise((resolve) => {
     let settled = false;
-    const supervisor = spawn(process.execPath, [SUPERVISOR_PATH], {
+    const supervisor = spawn(process.execPath, [interactive ? PTY_SUPERVISOR_PATH : SUPERVISOR_PATH], {
       detached: true,
       windowsHide: true,
       stdio: ["pipe", "ignore", "ignore"]
@@ -104,6 +128,11 @@ export async function startManagedBackgroundProcess(options = {}) {
       invocation: options.invocation,
       cwd: options.cwd,
       env: options.env,
+      interactive,
+      terminal,
+      initialInput: String(options.initialInput || ""),
+      terminalControlPendingDir: paths.terminalControlPendingDir,
+      terminalControlAckDir: paths.terminalControlAckDir,
       maxOutputBytes: clampNumber(options.maxOutputBytes, DEFAULT_OUTPUT_BYTES, 1024, MAX_OUTPUT_BYTES)
     }));
   });
@@ -114,10 +143,14 @@ export async function processControlTool(request = {}, options = {}) {
   const action = String(request.action || "list").trim().toLowerCase();
   if (action === "list") return listProcesses(groupRoot, request.count);
   const processId = requireProcessId(request.processId);
-  if (action === "status") return processStatus(groupRoot, processId);
-  if (action === "output") return processOutput(groupRoot, processId, request);
-  if (action === "stop") return stopProcess(groupRoot, processId, request);
-  throw toolError("unsupported_process_action", `Unsupported process action: ${action || "(empty)"}.`);
+  let result;
+  if (action === "status") result = processStatus(groupRoot, processId);
+  else if (action === "output") result = processOutput(groupRoot, processId, request);
+  else if (action === "input") result = await queueTerminalControl(groupRoot, processId, request, "input");
+  else if (action === "resize") result = await queueTerminalControl(groupRoot, processId, request, "resize");
+  else if (action === "stop") result = await stopProcess(groupRoot, processId, request);
+  else throw toolError("unsupported_process_action", `Unsupported process action: ${action || "(empty)"}.`);
+  return attachWorkspaceObservation(groupRoot, processId, result);
 }
 
 function listProcesses(groupRoot, countValue) {
@@ -146,7 +179,7 @@ function processStatus(groupRoot, processId) {
 
 function processOutput(groupRoot, processId, request) {
   const state = requireProcessState(groupRoot, processId);
-  const stream = normalizeStream(request.stream);
+  const stream = normalizeStream(request.stream, state);
   const paths = processPaths(groupRoot, processId);
   const filePath = stream === "stderr" ? paths.stderrPath : paths.stdoutPath;
   const totalBytes = safeFileSize(filePath);
@@ -179,6 +212,58 @@ function processOutput(groupRoot, processId, request) {
     logTruncated: Boolean(stream === "stderr" ? state.stderrTruncated : state.stdoutTruncated),
     eof: TERMINAL_STATUSES.has(state.status) && nextOffset >= totalBytes,
     output: redactSecrets(buffer.subarray(0, bytesRead).toString("utf8"))
+  };
+}
+
+async function queueTerminalControl(groupRoot, processId, request, action) {
+  const state = requireProcessState(groupRoot, processId);
+  if (!state.interactive) {
+    throw toolError("process_not_interactive", "Terminal input and resize require an interactive PTY process.");
+  }
+  if (TERMINAL_STATUSES.has(state.status)) {
+    return { ok: false, source: "managed_interactive_pty", action, code: "terminal_not_running", error: "The interactive terminal is no longer running.", process: publicProcessState(state) };
+  }
+  const controlId = makeId("ptyctl");
+  let control;
+  if (action === "input") {
+    const input = String(request.inputText || request.input || "");
+    const bytes = Buffer.byteLength(input, "utf8");
+    if (!bytes) throw toolError("terminal_input_required", "Interactive terminal input cannot be empty.");
+    if (bytes > MAX_TERMINAL_INPUT_BYTES) throw toolError("terminal_input_too_large", `Interactive terminal input is limited to ${MAX_TERMINAL_INPUT_BYTES} bytes per request.`);
+    control = { id: controlId, type: "input", value: input, createdAt: nowIso() };
+  } else {
+    control = {
+      id: controlId,
+      type: "resize",
+      columns: clampNumber(request.columns ?? request.cols, state.terminal?.columns || DEFAULT_TERMINAL_COLUMNS, 20, 300),
+      rows: clampNumber(request.rows, state.terminal?.rows || DEFAULT_TERMINAL_ROWS, 5, 200),
+      createdAt: nowIso()
+    };
+  }
+  const paths = processPaths(groupRoot, processId);
+  fs.mkdirSync(paths.terminalControlPendingDir, { recursive: true });
+  writeJson(path.join(paths.terminalControlPendingDir, `${controlId}.json`), control);
+  const deadline = Date.now() + 2000;
+  let acknowledged = false;
+  while (Date.now() < deadline) {
+    if (fs.existsSync(path.join(paths.terminalControlAckDir, `${controlId}.json`))) {
+      acknowledged = true;
+      break;
+    }
+    await delay(25);
+  }
+  const latest = requireProcessState(groupRoot, processId);
+  return {
+    ok: true,
+    source: "managed_interactive_pty",
+    action,
+    processId,
+    controlId,
+    acknowledged,
+    pending: !acknowledged,
+    inputBytes: action === "input" ? Buffer.byteLength(String(request.inputText || request.input || ""), "utf8") : 0,
+    terminal: latest.terminal || undefined,
+    process: publicProcessState(latest)
   };
 }
 
@@ -248,6 +333,13 @@ function publicProcessState(state = {}) {
   return {
     processId: state.processId,
     source: state.source || "managed_background_process",
+    interactive: Boolean(state.interactive),
+    terminal: state.interactive ? {
+      columns: Number(state.terminal?.columns || 0),
+      rows: Number(state.terminal?.rows || 0),
+      lastControlId: state.terminal?.lastControlId || "",
+      lastControlAt: state.terminal?.lastControlAt || ""
+    } : undefined,
     status: state.status || "unknown",
     command: redactSecrets(state.command),
     shell: state.shell || "system",
@@ -278,8 +370,97 @@ function processPaths(groupRoot, processId) {
     statePath: path.join(processDir, "state.json"),
     stdoutPath: path.join(processDir, "stdout.log"),
     stderrPath: path.join(processDir, "stderr.log"),
-    stopPath: path.join(processDir, "stop-request.json")
+    workspaceSnapshotPath: path.join(processDir, "workspace-snapshot.json"),
+    stopPath: path.join(processDir, "stop-request.json"),
+    terminalControlPendingDir: path.join(processDir, "terminal-controls", "pending"),
+    terminalControlAckDir: path.join(processDir, "terminal-controls", "acknowledged")
   };
+}
+
+function createWorkspaceTracking(options, paths) {
+  if (!options.workspaceRoot || !fs.existsSync(options.workspaceRoot)) return undefined;
+  try {
+    const root = fs.realpathSync.native(options.workspaceRoot);
+    if (!fs.statSync(root).isDirectory()) return undefined;
+    const tracking = {
+      root,
+      label: String(options.workspaceLabel || ""),
+      maxEntries: positiveInteger(options.workspaceSnapshotOptions?.maxEntries),
+      maxChanges: positiveInteger(options.workspaceSnapshotOptions?.maxChanges),
+      snapshotPath: paths.workspaceSnapshotPath
+    };
+    writeWorkspaceSnapshot(tracking.snapshotPath, captureWorkspaceSnapshot(root, tracking));
+    return tracking;
+  } catch {
+    return undefined;
+  }
+}
+
+function attachWorkspaceObservation(groupRoot, processId, result) {
+  const state = readProcessState(groupRoot, processId);
+  if (!state?.workspaceTracking) return result;
+  return { ...result, workspaceChanges: observeWorkspaceChanges(state.workspaceTracking) };
+}
+
+function observeWorkspaceChanges(tracking) {
+  const unavailable = (reason) => ({
+    source: "bounded_workspace_snapshot_diff",
+    status: "unavailable",
+    complete: false,
+    created: [],
+    modified: [],
+    deleted: [],
+    observedArtifacts: [],
+    observedArtifactsComplete: false,
+    observedArtifactsOmitted: 0,
+    totalChanges: 0,
+    keptChanges: 0,
+    omittedChanges: 0,
+    reason
+  });
+  try {
+    const before = readWorkspaceSnapshot(tracking.snapshotPath);
+    const after = captureWorkspaceSnapshot(tracking.root, tracking);
+    writeWorkspaceSnapshot(tracking.snapshotPath, after);
+    if (!before) return unavailable("The initial workspace snapshot was unavailable, so this process observation cannot claim file changes.");
+    return labelWorkspaceChanges(diffWorkspaceSnapshots(before, after, tracking), tracking.label);
+  } catch (error) {
+    return unavailable(error.message || "Workspace change observation failed.");
+  }
+}
+
+function writeWorkspaceSnapshot(filePath, snapshot) {
+  const serializable = {
+    ...snapshot,
+    entries: [...(snapshot?.entries instanceof Map ? snapshot.entries : [])]
+  };
+  writeJson(filePath, serializable);
+}
+
+function readWorkspaceSnapshot(filePath) {
+  const stored = readJson(filePath);
+  if (!stored || !Array.isArray(stored.entries)) return undefined;
+  return { ...stored, entries: new Map(stored.entries) };
+}
+
+function labelWorkspaceChanges(changes = {}, label = "") {
+  if (!label) return changes;
+  const prefix = (items) => (Array.isArray(items) ? items : []).map((item) => (
+    typeof item === "string" ? `${label}:${item}` : { ...item, path: `${label}:${item.path}` }
+  ));
+  return {
+    ...changes,
+    root: label,
+    created: prefix(changes.created),
+    modified: prefix(changes.modified),
+    deleted: prefix(changes.deleted),
+    observedArtifacts: prefix(changes.observedArtifacts)
+  };
+}
+
+function positiveInteger(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? Math.floor(number) : undefined;
 }
 
 function processRoot(groupRoot) {
@@ -299,10 +480,11 @@ function requireProcessId(value) {
   return processId;
 }
 
-function normalizeStream(value) {
+function normalizeStream(value, state = {}) {
   const stream = String(value || "stdout").trim().toLowerCase();
+  if (state.interactive && ["stdout", "terminal"].includes(stream)) return "stdout";
   if (["stdout", "stderr"].includes(stream)) return stream;
-  throw toolError("invalid_process_stream", "Process output stream must be stdout or stderr.");
+  throw toolError("invalid_process_stream", "Process output stream must be stdout, stderr, or terminal for an interactive process.");
 }
 
 function relativeCwd(groupRoot, cwd) {

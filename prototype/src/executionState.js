@@ -209,6 +209,11 @@ export function advanceExecutionState({ state, session, agent, groupPath, questi
     return state;
   }
 
+  // Verification can finish while a deliberately managed terminal or server
+  // is still alive. Its status/output/stop controls are cleanup evidence, not
+  // a new unverified execution phase, so keep the completed checkpoint intact.
+  if (preservesVerifiedCheckpoint(state, toolResults, fileResults)) return state;
+
   if (material) {
     state.phase = "verify";
     state.checkpointVersion += 1;
@@ -234,6 +239,16 @@ export function advanceExecutionState({ state, session, agent, groupPath, questi
     ? "You have enough inspection budget. Perform a real write, patch, command, or project setup action next."
     : "Perform the concrete pending action now; another plan-only response is not progress.";
   return state;
+}
+
+function preservesVerifiedCheckpoint(state, toolResults, fileResults) {
+  if (!["review", "complete"].includes(String(state?.phase || ""))) return false;
+  if (fileResults.length || !toolResults.length) return false;
+  return toolResults.every((item) => {
+    if (item?.tool !== "process_control") return false;
+    const action = String(item?.result?.action || item?.action || "").toLowerCase();
+    return ["list", "status", "output", "resize", "stop"].includes(action);
+  });
 }
 
 export function isDeliveryExecution(state) {

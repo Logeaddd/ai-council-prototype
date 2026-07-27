@@ -575,7 +575,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
           yield event;
         }
 
-        if (hasReachedVerificationCheckpoint(session.executionState, agent)) {
+        if (hasReachedVerificationCheckpoint(session, agent)) {
           response = buildVerificationCheckpointHandoff(session.executionState);
           rawTextForMessage = "";
           errorForMessage = "";
@@ -1268,23 +1268,42 @@ async function* callRoundModel({ options, session, phase, round, agent, memberCo
   });
   throwIfAborted(options.signal);
   const streamingCall = startAgentCallWithDeltaQueue(agent, messages, timeoutMs, options.signal, nativeToolDefinitions(nativeToolPermissionTier), nativeToolChoice, nativeToolConversation);
+  const pendingDeltas = [];
   while (!streamingCall.done() || streamingCall.hasDeltas()) {
     const delta = await streamingCall.nextDelta();
     if (!delta) continue;
-    yield {
-      type: "agent_delta",
-      round,
-      agentId: agent.id,
-      agentName: agent.name,
-      delta,
-      createdAt: nowIso()
-    };
+    pendingDeltas.push(delta);
   }
   const raw = await streamingCall.result();
-  completeModelCall(modelCallRecord, raw);
   const parsedResponse = raw.error
     ? { status: "unavailable", reason: raw.error, retryable: true }
     : parseRoundModelResult(raw.text, raw.nativeToolCalls);
+  const safeRawText = raw.error ? "" : redactToolInputFromRawText(raw.text, parsedResponse);
+  const safeRaw = raw.error ? raw : { ...raw, text: safeRawText };
+  completeModelCall(modelCallRecord, safeRaw);
+  if (safeRawText !== raw.text) {
+    if (safeRawText) {
+      yield {
+        type: "agent_delta",
+        round,
+        agentId: agent.id,
+        agentName: agent.name,
+        delta: safeRawText,
+        createdAt: nowIso()
+      };
+    }
+  } else {
+    for (const delta of pendingDeltas) {
+      yield {
+        type: "agent_delta",
+        round,
+        agentId: agent.id,
+        agentName: agent.name,
+        delta,
+        createdAt: nowIso()
+      };
+    }
+  }
   if (!raw.error && shouldKeepInterimModelMessage(parsedResponse, formatRecovery)) {
     const interim = buildInterimModelMessage({
       session,
@@ -1292,7 +1311,7 @@ async function* callRoundModel({ options, session, phase, round, agent, memberCo
       round,
       agent,
       toolIteration,
-      rawText: raw.text,
+      rawText: safeRawText,
       response: parsedResponse
     });
     session.interimMessages.push(interim);
@@ -1328,7 +1347,7 @@ async function* callRoundModel({ options, session, phase, round, agent, memberCo
   }
   return {
     response: parsedResponse,
-    rawTextForMessage: raw.error ? "" : raw.text,
+    rawTextForMessage: safeRawText,
     errorForMessage: raw.error,
     nativeToolCalls: raw.nativeToolCalls || [],
     nativeAssistantText: raw.error ? "" : raw.text
@@ -1345,10 +1364,11 @@ function shouldKeepInterimModelMessage(response = {}, willRecoverFormat = false)
 }
 
 function buildInterimModelMessage({ session, phase, round, agent, toolIteration, rawText, response }) {
+  const safeResponse = redactTerminalInputFromResponse(response);
   const invalid = isInvalidStructuredResponse(response);
   const displayText = invalid
-    ? String(rawText || response.reason || "").trim()
-    : String(response.argument || response.reason || rawText || "").trim();
+    ? String(rawText || safeResponse.reason || "").trim()
+    : String(safeResponse.argument || safeResponse.reason || rawText || "").trim();
   return {
     id: makeId("attempt"),
     round,
@@ -1357,12 +1377,49 @@ function buildInterimModelMessage({ session, phase, round, agent, toolIteration,
     phase,
     toolIteration: Number(toolIteration || 0),
     modelCallIndex: Number(session.modelCallCount || 0),
-    response,
+    response: safeResponse,
     displayText,
     rawText: String(rawText || ""),
     interim: true,
     createdAt: nowIso()
   };
+}
+
+function redactToolInputFromRawText(rawText, response) {
+  if (!hasSensitiveToolInput(response)) return String(rawText || "");
+  try {
+    const parsed = JSON.parse(String(rawText || ""));
+    return JSON.stringify(redactTerminalInputFromResponse(parsed));
+  } catch {
+    // A truncated JSON response cannot be structurally rewritten. Do not let a
+    // possible tool-input value leak through an event or trace while recovery
+    // asks the model for a complete response.
+    return "[Structured tool response redacted because it included sensitive input.]";
+  }
+}
+
+function redactTerminalInputFromResponse(response = {}) {
+  if (!response || typeof response !== "object") return response;
+  const copy = JSON.parse(JSON.stringify(response));
+  for (const request of Array.isArray(copy.tool_requests) ? copy.tool_requests : []) {
+    if (!isTerminalInputRequest(request)) continue;
+    const input = String(request.inputText ?? request.input_text ?? request.text ?? request.value ?? "");
+    const redacted = { bytes: Buffer.byteLength(input, "utf8"), redacted: true };
+    if ("inputText" in request || !Object.keys(request).some((key) => ["input_text", "text", "value"].includes(key))) request.inputText = redacted;
+    else if ("input_text" in request) request.input_text = redacted;
+    else if ("text" in request) request.text = redacted;
+    else request.value = redacted;
+  }
+  return copy;
+}
+
+function hasSensitiveToolInput(response = {}) {
+  return (Array.isArray(response?.tool_requests) ? response.tool_requests : []).some(isTerminalInputRequest);
+}
+
+function isTerminalInputRequest(request = {}) {
+  return String(request?.tool || "").toLowerCase() === "process_control"
+    && String(request?.action || "").toLowerCase() === "input";
 }
 
 function applyRoundResponseRules(response, agent, round) {
@@ -1560,13 +1617,28 @@ function hasVerificationRequest(response = {}) {
   ));
 }
 
-function hasReachedVerificationCheckpoint(state, agent) {
+function hasReachedVerificationCheckpoint(session, agent) {
+  const state = session?.executionState || {};
   return Boolean(
     state?.active
     && agent?.id === state.executorId
     && /^verification_passed:/.test(String(state.lastAction || ""))
     && ["review", "complete"].includes(String(state.phase || ""))
+    && !hasActiveManagedProcess(session)
   );
+}
+
+function hasActiveManagedProcess(session = {}) {
+  const latestByProcessId = new Map();
+  for (const item of Array.isArray(session.toolExecutionResults) ? session.toolExecutionResults : []) {
+    const result = item?.result || {};
+    const process = result.process || {};
+    const processId = String(result.processId || process.processId || "").trim();
+    if (!processId) continue;
+    const status = String(process.status || result.status || (result.background ? "running" : "")).trim().toLowerCase();
+    if (status) latestByProcessId.set(processId, status);
+  }
+  return [...latestByProcessId.values()].some((status) => ["starting", "running", "stopping"].includes(status));
 }
 
 function buildVerificationCheckpointHandoff(state = {}) {

@@ -741,6 +741,59 @@ test("background process output status list and stop remain available across too
   assert.equal(fs.existsSync(path.join(tmp, "shared", "logs", "processes", processId, "state.json")), true);
 });
 
+test("interactive PTY accepts input, preserves output offsets, resizes, and redacts terminal input", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-interactive-pty-"));
+  const marker = "PTY_INPUT_SECRET";
+  const started = await executeToolRequests({
+    permissionTier: "full",
+    groupPath: tmp,
+    agent: { id: "full", name: "Full" },
+    round: 1,
+    requests: [{
+      tool: "execute_command",
+      command: "echo PTY_BOOT_READY",
+      shell: shellForNodeCommand(),
+      interactive: true,
+      columns: 96,
+      rows: 28,
+      reason: "Start a real interactive terminal."
+    }]
+  });
+  const processId = started.results[0].result.processId;
+  assert.equal(started.results[0].result.interactive, true);
+  assert.match(processId, /^proc_/);
+
+  try {
+    const initial = await waitForResult(async () => {
+      const result = await processTool(tmp, { action: "output", processId, stream: "terminal", maxBytes: 4096 });
+      return result.results[0]?.result?.output?.includes("[terminal-input-redacted]") ? result : undefined;
+    }, 10000);
+    const initialOffset = initial.results[0].result.nextOffset;
+
+    const input = await processTool(tmp, { action: "input", processId, inputText: `echo ${marker}\r` });
+    assert.equal(input.results[0].status, "completed");
+    assert.equal(input.results[0].inputText?.redacted, true);
+    const resumed = await waitForResult(async () => {
+      const result = await processTool(tmp, { action: "output", processId, stream: "terminal", offset: initialOffset, maxBytes: 4096 });
+      return result.results[0]?.result?.output?.includes("[terminal-input-redacted]") ? result : undefined;
+    }, 10000);
+    assert.equal(resumed.results[0].result.output.includes("[terminal-input-redacted]"), true);
+    assert.equal(resumed.results[0].result.output.includes(marker), false);
+    assert.equal(resumed.results[0].result.output.includes(`echo ${marker}`), false);
+
+    const resized = await processTool(tmp, { action: "resize", processId, columns: 120, rows: 42 });
+    assert.equal(resized.results[0].status, "completed");
+    assert.equal(resized.results[0].result.process.terminal.columns, 120);
+    assert.equal(resized.results[0].result.process.terminal.rows, 42);
+
+    const audit = fs.readFileSync(path.join(tmp, "shared", "logs", "tools.jsonl"), "utf8");
+    assert.equal(audit.includes(marker), false);
+  } finally {
+    const stopped = await processTool(tmp, { action: "stop", processId, timeoutMs: 10000 });
+    assert.equal(stopped.results[0].result.process.status, "stopped");
+  }
+});
+
 test("process control requires full permission and rejects unknown ids", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-process-permission-"));
   const denied = await executeToolRequests({

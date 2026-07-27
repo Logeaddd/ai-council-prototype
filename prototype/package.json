@@ -67,5 +67,8 @@
       "shortcutName": "AI Council",
       "include": "build/installer.nsh"
     }
+  },
+  "dependencies": {
+    "@homebridge/node-pty-prebuilt-multiarch": "0.14.1"
   }
 }

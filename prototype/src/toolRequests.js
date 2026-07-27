@@ -935,7 +935,7 @@ function delegationScopeViolation(request, delegation) {
 function delegatedMutationRequest(request) {
   if (["workspace_edit", "execute_command", "run_code", "install_package", "provision_tool", "run_tests", "git_operation", "create_archive", "extract_archive", "mcp_install_npm", "mcp_uninstall"].includes(request.tool)) return true;
   if (request.tool === "database_query") return String(request.mode || "query").toLowerCase() !== "query" || Boolean(request.create);
-  if (request.tool === "process_control") return ["stop", "restart"].includes(String(request.action || "").toLowerCase());
+  if (request.tool === "process_control") return ["input", "resize", "stop", "restart"].includes(String(request.action || "").toLowerCase());
   return false;
 }
 
@@ -998,12 +998,14 @@ function normalizeToolRequest(item, index) {
     processId: stringField(item.processId || item.process_id || item.backgroundProcessId || item.background_process_id),
     stream: stringField(item.stream),
     offset: normalizeOptionalNumber(item.offset),
+    columns: normalizeOptionalNumber(item.columns ?? item.cols),
+    rows: normalizeOptionalNumber(item.rows),
     branch: stringField(item.branch),
     remote: stringField(item.remote),
     message: stringField(item.message || item.commitMessage || item.commit_message),
     paths: arrayOfStrings(item.paths || item.files),
     selector: stringField(item.selector),
-    inputText: stringField(item.inputText || item.input_text || item.text || item.value),
+    inputText: inputField(item.inputText ?? item.input_text ?? item.text ?? item.value),
     expression: stringField(item.expression || item.script || item.js),
     steps: arrayOfObjects(item.steps),
     viewport: objectField(item.viewport),
@@ -1039,6 +1041,7 @@ function normalizeToolRequest(item, index) {
     archiveRound: item.round === undefined ? undefined : Number(item.round),
     overwrite: Boolean(item.overwrite),
     background: Boolean(item.background),
+    interactive: Boolean(item.interactive),
     force: Boolean(item.force),
     screenshot: Boolean(item.screenshot),
     create: Boolean(item.create),
@@ -1106,7 +1109,7 @@ function reject(request, code, reason) {
     message: request.message,
     paths: request.paths,
     selector: request.selector,
-    inputText: request.inputText,
+    inputText: responseInputText(request),
     expression: request.expression,
     steps: request.steps,
     viewport: request.viewport,
@@ -1134,6 +1137,9 @@ function reject(request, code, reason) {
     archiveRound: request.archiveRound,
     overwrite: request.overwrite,
     background: request.background,
+    interactive: request.interactive,
+    columns: request.columns,
+    rows: request.rows,
     force: request.force,
     screenshot: request.screenshot,
     create: request.create,
@@ -1202,7 +1208,7 @@ function resultRecord(request, extra) {
     message: request.message,
     paths: request.paths,
     selector: request.selector,
-    inputText: request.inputText,
+    inputText: responseInputText(request),
     expression: request.expression,
     steps: request.steps,
     viewport: request.viewport,
@@ -1230,6 +1236,9 @@ function resultRecord(request, extra) {
     archiveRound: request.archiveRound,
     overwrite: request.overwrite,
     background: request.background,
+    interactive: request.interactive,
+    columns: request.columns,
+    rows: request.rows,
     force: request.force,
     screenshot: request.screenshot,
     create: request.create,
@@ -1246,6 +1255,12 @@ function resultRecord(request, extra) {
 function stringField(value) {
   if (typeof value !== "string") return "";
   return value.trim();
+}
+
+function inputField(value) {
+  // Terminal input is a byte stream, so trimming would silently remove Enter,
+  // spaces, or control sequences that are material to an interactive command.
+  return typeof value === "string" ? value : "";
 }
 
 function contentField(value) {
@@ -1317,7 +1332,7 @@ function toolEvent(type, request, extra = {}) {
     message: request.message,
     paths: request.paths,
     selector: request.selector,
-    inputText: request.inputText,
+    inputText: responseInputText(request),
     expression: request.expression,
     steps: request.steps,
     viewport: request.viewport,
@@ -1345,6 +1360,9 @@ function toolEvent(type, request, extra = {}) {
     archiveRound: request.archiveRound,
     overwrite: request.overwrite,
     background: request.background,
+    interactive: request.interactive,
+    columns: request.columns,
+    rows: request.rows,
     force: request.force,
     screenshot: request.screenshot,
     create: request.create,
@@ -2079,10 +2097,7 @@ function safeRequestForStorage(request) {
     message: request.message,
     paths: request.paths,
     selector: request.selector,
-    inputText: request.inputText ? {
-      bytes: Buffer.byteLength(request.inputText, "utf8"),
-      preview: request.inputText.slice(0, 80)
-    } : "",
+    inputText: safeInputTextForStorage(request),
     expression: request.expression ? {
       bytes: Buffer.byteLength(request.expression, "utf8"),
       preview: request.expression.slice(0, 80)
@@ -2122,6 +2137,22 @@ function safeRequestForStorage(request) {
     screenshot: request.screenshot,
     create: request.create
   };
+}
+
+function responseInputText(request = {}) {
+  if (!isTerminalInput(request)) return request.inputText;
+  return safeInputTextForStorage(request);
+}
+
+function safeInputTextForStorage(request = {}) {
+  if (!request.inputText) return "";
+  const bytes = Buffer.byteLength(request.inputText, "utf8");
+  if (isTerminalInput(request)) return { bytes, redacted: true };
+  return { bytes, preview: request.inputText.slice(0, 80) };
+}
+
+function isTerminalInput(request = {}) {
+  return request.tool === "process_control" && String(request.action || "").toLowerCase() === "input";
 }
 
 function safeUrlForEvent(value) {

@@ -201,6 +201,7 @@ export function recordTaskRunToolAttempts(options = {}) {
     const result = byId.get(String(request?.id || ""));
     if (result) {
       recordTaskRunToolResult(groupPath, id, attemptId, request, result, options);
+      recordTaskRunWorkspaceChanges({ groupPath, id, request, result, options });
       recordTaskRunProcessEvidence({ groupPath, id, attemptId, request, result, options });
     }
   }
@@ -209,6 +210,7 @@ export function recordTaskRunToolAttempts(options = {}) {
     if (accepted.some((request) => String(request?.id || "") === String(result?.id || ""))) continue;
     const attemptId = attemptIdFor(result, options);
     recordTaskRunToolResult(groupPath, id, attemptId, result, result, options);
+    recordTaskRunWorkspaceChanges({ groupPath, id, request: result, result, options });
     recordTaskRunProcessEvidence({ groupPath, id, attemptId, request: result, result, options });
   }
 
@@ -334,6 +336,29 @@ function recordTaskRunToolResult(groupPath, id, attemptId, request, result, opti
     verification: isVerificationTool(result?.tool || request?.tool)
   };
   appendTaskRunEvent(groupPath, id, "tool_attempt_finished", payload);
+}
+
+function recordTaskRunWorkspaceChanges({ groupPath, id, request, result, options }) {
+  const changes = result?.result?.workspaceChanges;
+  if (!changes || Number(changes.totalChanges || 0) <= 0) return;
+  const operation = String(result?.tool || request?.tool || "");
+  const common = {
+    id: String(result?.id || request?.id || ""),
+    agentId: String(options.agent?.id || result?.source_agent_id || request?.source_agent_id || ""),
+    agentName: String(options.agent?.name || result?.source_agent_name || request?.source_agent_name || ""),
+    round: Number(options.round || result?.round || request?.round || 0),
+    operation,
+    status: String(result?.status || ""),
+    changed: true,
+    error: String(result?.error || result?.result?.error || "")
+  };
+  for (const change of [...(changes.created || []), ...(changes.modified || []), ...(changes.deleted || [])]) {
+    appendTaskRunEvent(groupPath, id, "workspace_evidence", {
+      ...common,
+      path: String(change?.path || ""),
+      change: String(change?.change || "")
+    });
+  }
 }
 
 function recordTaskRunProcessEvidence({ groupPath, id, attemptId, request, result, options }) {
@@ -758,7 +783,7 @@ function isVerificationTool(tool) {
 function materialWorkspaceChange(item = {}) {
   const result = item?.result || item;
   return Boolean(
-    result?.workspaceChanges?.length
+    Number(result?.workspaceChanges?.totalChanges || 0) > 0
     || result?.changes?.length
     || result?.changed
     || result?.created

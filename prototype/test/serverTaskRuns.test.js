@@ -276,6 +276,94 @@ test("an observer disconnect does not abort the background run and cursor replay
   }
 });
 
+test("direct HTTP/SSE observers can disconnect while an agent controls a real PTY and the durable run records the terminal lifecycle", async () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-server-pty-sse-"));
+  const groupPath = path.join(sandbox, "group");
+  const terminalInput = "PTY_HTTP_SSE_INPUT_SECRET";
+  const terminalFileFact = "PTY_HTTP_SSE_FILE_FACT";
+  fs.mkdirSync(groupPath, { recursive: true });
+  fs.writeFileSync(path.join(groupPath, "group.json"), JSON.stringify({
+    id: "server-pty-sse",
+    name: "Server PTY SSE",
+    permissions: { defaultTier: "text", seatTiers: { builder: "full" } },
+    seats: [
+      { seatId: "builder", displayName: "Builder", enabled: true, privateFolder: "members/Builder" },
+      { seatId: "finalizer", displayName: "Finalizer", enabled: true, judge: true, privateFolder: "members/Finalizer" }
+    ]
+  }), "utf8");
+  const provider = await startInteractivePtyProvider({ terminalInput, terminalFileFact });
+  const port = await availablePort();
+  const child = spawn(process.execPath, [path.join(root, "src", "server.js")], {
+    cwd: root,
+    env: {
+      ...process.env,
+      AI_COUNCIL_DATA_DIR: path.join(sandbox, "data"),
+      AI_COUNCIL_WORKSPACE_ROOT: sandbox,
+      AI_COUNCIL_UI_PORT: String(port),
+      AI_COUNCIL_UI_HOST: "127.0.0.1",
+      AI_COUNCIL_LOCAL_API_TOKEN: localApiToken
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+    windowsHide: true
+  });
+  let output = "";
+  child.stdout.on("data", (chunk) => { output += chunk; });
+  child.stderr.on("data", (chunk) => { output += chunk; });
+
+  try {
+    await waitForServer(port, child, () => output);
+    const response = await fetch(`http://127.0.0.1:${port}/api/council/events`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-AI-Council-Token": localApiToken },
+      body: JSON.stringify({
+        question: "Create a terminal-driven local file, verify it, and close the terminal.",
+        workspaceGroupPath: groupPath,
+        runtimeGroup: runtimeGroupWithInteractivePty(provider.apiBaseUrl)
+      })
+    });
+    assert.equal(response.status, 200);
+    const reader = response.body.getReader();
+    const first = await reader.read();
+    const initialEvents = parseSseEvents(new TextDecoder().decode(first.value || new Uint8Array()));
+    const started = initialEvents.find((event) => event.type === "run_started");
+    assert.ok(started?.run?.id, JSON.stringify(initialEvents));
+    await reader.cancel();
+
+    const events = await requestRunEvents(port, groupPath, started.run.id, 0);
+    assert.equal(events.some((event) => event.type === "run_interrupted"), false, JSON.stringify(events));
+    assert.equal(events.some((event) => event.type === "tool_success" && event.tool === "execute_command"), true);
+    assert.equal(events.some((event) => event.type === "tool_success" && event.tool === "process_control" && event.action === "input" && event.inputText?.redacted === true), true);
+    assert.equal(events.some((event) => event.type === "tool_success" && event.tool === "process_control" && event.action === "output" && event.offset === 1), true);
+    const terminalOutputPath = path.join(groupPath, "shared", "pty-http-sse.txt");
+    const processId = events.find((event) => event.type === "tool_success" && event.tool === "execute_command")?.resultSummary?.processId;
+    const terminalLog = processId ? fs.readFileSync(path.join(groupPath, "shared", "logs", "processes", processId, "stdout.log"), "utf8") : "missing process id";
+    assert.equal(fs.existsSync(terminalOutputPath), true, terminalLog);
+    assert.equal(fs.readFileSync(terminalOutputPath, "utf8").trim(), terminalFileFact);
+    assert.equal(provider.terminalInputCount, 1, "The provider must issue real terminal input exactly once.");
+
+    const taskEvent = events.find((event) => event.type === "task_run" && event.taskRun?.id);
+    assert.ok(taskEvent, "The replayed SSE stream must expose the durable TaskRun.");
+    const detail = await requestJson(port, `/api/task-runs/${encodeURIComponent(taskEvent.taskRun.id)}?groupPath=${encodeURIComponent(groupPath)}`, undefined, "GET");
+    assert.equal(detail.status, 200);
+    assert.equal(detail.body.taskRun.state, "completed", JSON.stringify(detail.body.taskRun));
+    assert.equal(detail.body.events.some((event) => event.type === "background_process_observed" && event.payload?.action === "start"), true);
+    assert.equal(detail.body.events.some((event) => event.type === "background_process_observed" && event.payload?.action === "stop" && event.payload?.status === "stopped"), true);
+    assert.equal(detail.body.events.some((event) => event.type === "workspace_evidence" && event.payload?.path === "shared/pty-http-sse.txt"), true, JSON.stringify(detail.body.events));
+    const persisted = { events, taskRun: detail.body };
+    assert.deepEqual(findValuePaths(persisted, terminalInput), [], "Terminal input must not be persisted in SSE or TaskRun evidence.");
+    for (const relativePath of ["shared/logs/tools.jsonl", "shared/logs/processes.jsonl", "shared/logs/model-calls.jsonl"]) {
+      const content = fs.readFileSync(path.join(groupPath, relativePath), "utf8");
+      assert.equal(content.includes(terminalInput), false, `${relativePath} must not retain terminal input.`);
+    }
+    assert.equal(terminalLog.includes(terminalInput), false, terminalLog);
+  } finally {
+    child.kill();
+    await waitForExit(child);
+    await provider.close();
+    await removeDirectoryWithRetry(sandbox);
+  }
+});
+
 function runtimeGroup(apiBaseUrl) {
   const base = {
     provider: "openai-compatible",
@@ -290,6 +378,27 @@ function runtimeGroup(apiBaseUrl) {
     id: "server-task-run",
     name: "Server TaskRun",
     settings: { maxRounds: 1, minConsensusWeight: 1, stopWhenAllSkip: false, agentTimeoutMs: 5000, maxToolIterations: 6, allowSoloCouncil: true },
+    agents: [
+      { ...base, id: "builder", name: "Builder", role: "Builder" },
+      { ...base, id: "finalizer", name: "Finalizer", role: "Finalizer", judge: true }
+    ]
+  };
+}
+
+function runtimeGroupWithInteractivePty(apiBaseUrl) {
+  const base = {
+    provider: "openai-compatible",
+    apiBaseUrl,
+    allowUnsafePrivateNetwork: true,
+    apiKey: "test-key",
+    model: "local-test-model",
+    weight: 1,
+    enabled: true
+  };
+  return {
+    id: "server-pty-sse",
+    name: "Server PTY SSE",
+    settings: { maxRounds: 1, minConsensusWeight: 1, stopWhenAllSkip: false, agentTimeoutMs: 5000, maxToolIterations: 20, allowSoloCouncil: true },
     agents: [
       { ...base, id: "builder", name: "Builder", role: "Builder" },
       { ...base, id: "finalizer", name: "Finalizer", role: "Finalizer", judge: true }
@@ -368,6 +477,101 @@ async function startProvider(responseDelayMs = 0) {
   return {
     apiBaseUrl: `http://127.0.0.1:${address.port}/v1`,
     close: () => new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))
+  };
+}
+
+async function startInteractivePtyProvider({ terminalInput, terminalFileFact }) {
+  let outputRequested = false;
+  let inputRequested = false;
+  let verificationRequested = false;
+  let stopRequested = false;
+  let terminalInputCount = 0;
+  const server = http.createServer(async (req, res) => {
+    const body = JSON.parse(await readBody(req));
+    const prompt = JSON.stringify(body.messages || []);
+    const processId = prompt.match(/\bproc_[a-z0-9_]+\b/i)?.[0] || "";
+    let payload;
+    if (prompt.includes("FinalDecision JSON object")) {
+      payload = finalDecision();
+    } else if (!processId) {
+      payload = {
+        status: "speak",
+        argument: "Start the requested durable terminal.",
+        task_contract: {
+          mode: "delivery",
+          objective: "Create and verify the terminal-driven workspace file.",
+          requires_workspace: true,
+          requires_verification: true,
+          deliverables: ["shared/pty-http-sse.txt"],
+          completion_criteria: ["The terminal writes the requested file.", "A local command verifies its exact content.", "The terminal is stopped."],
+          next_action: "Start an interactive terminal, provide its requested input, write the file, verify it, and stop it."
+        },
+        tool_requests: [{
+          tool: "execute_command",
+          command: "if not exist shared mkdir shared & echo PTY_HTTP_SSE_BOOT",
+          shell: "cmd",
+          interactive: true,
+          columns: 100,
+          rows: 30,
+          reason: "Start a real terminal that will receive the file-writing command."
+        }],
+        objections: [],
+        memory_candidates: []
+      };
+    } else if (!outputRequested) {
+      outputRequested = true;
+      payload = terminalRequest(processId, { action: "output", stream: "terminal", offset: 1, maxBytes: 2048 }, "Read the live terminal output from a nonzero offset.");
+    } else if (!inputRequested) {
+      inputRequested = true;
+      terminalInputCount += 1;
+      payload = terminalRequest(processId, { action: "input", inputText: `echo ${terminalFileFact}>shared\\pty-http-sse.txt & rem ${terminalInput}\r` }, "Use one exact terminal input to write the requested file.");
+    } else if (!verificationRequested) {
+      verificationRequested = true;
+      payload = {
+        status: "speak",
+        argument: "Verify the file produced by the terminal.",
+        tool_requests: [{
+          tool: "run_code",
+          language: "javascript",
+          code: `const fs = require('fs'); if (fs.readFileSync('shared/pty-http-sse.txt', 'utf8').trim() !== '${terminalFileFact}') throw new Error('terminal output mismatch'); console.log('PTY_HTTP_SSE_VERIFIED');`,
+          reason: "Mechanically verify the terminal-created file."
+        }],
+        objections: [],
+        memory_candidates: []
+      };
+    } else if (!stopRequested) {
+      stopRequested = true;
+      payload = terminalRequest(processId, { action: "stop", timeoutMs: 10000 }, "Close the durable terminal after verification.");
+    } else {
+      payload = { status: "speak", argument: "The terminal-created file was verified and the terminal was stopped.", objections: [], memory_candidates: [] };
+    }
+    const chunk = JSON.stringify({ choices: [{ delta: { content: JSON.stringify(payload) } }] });
+    res.writeHead(200, { "Content-Type": "text/event-stream" });
+    res.write(`data: ${chunk}\n\n`);
+    res.end("data: [DONE]\n\n");
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  return {
+    apiBaseUrl: `http://127.0.0.1:${address.port}/v1`,
+    get terminalInputCount() { return terminalInputCount; },
+    close: () => new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))
+  };
+}
+
+function terminalRequest(processId, request, reason) {
+  if (!processId) {
+    return { status: "unavailable", reason: "interactive_process_id_missing_from_tool_context", retryable: false, objections: [], memory_candidates: [] };
+  }
+  return {
+    status: "speak",
+    argument: reason,
+    tool_requests: [{ tool: "process_control", processId, reason, ...request }],
+    objections: [],
+    memory_candidates: []
   };
 }
 
@@ -541,6 +745,21 @@ async function requestSse(port, pathname, body) {
   });
 }
 
+function parseSseEvents(text) {
+  return String(text || "").split(/\r?\n\r?\n/).flatMap((block) => {
+    const data = block.split(/\r?\n/).find((line) => line.startsWith("data: "))?.slice(6);
+    if (!data || data === "[DONE]") return [];
+    try { return [JSON.parse(data)]; } catch { return []; }
+  });
+}
+
+function findValuePaths(value, needle, pathPrefix = "$") {
+  if (typeof value === "string") return value.includes(needle) ? [pathPrefix] : [];
+  if (!value || typeof value !== "object") return [];
+  if (Array.isArray(value)) return value.flatMap((item, index) => findValuePaths(item, needle, `${pathPrefix}[${index}]`));
+  return Object.entries(value).flatMap(([key, item]) => findValuePaths(item, needle, `${pathPrefix}.${key}`));
+}
+
 async function requestRunEvents(port, groupPath, runId, after) {
   const response = await fetch(`http://127.0.0.1:${port}/api/council/runs/${encodeURIComponent(runId)}/events?groupPath=${encodeURIComponent(groupPath)}&after=${after}`, {
     headers: { "X-AI-Council-Token": localApiToken }
@@ -599,4 +818,19 @@ async function waitForExit(child) {
     new Promise((resolve) => child.once("exit", resolve)),
     new Promise((resolve) => setTimeout(resolve, 3000))
   ]);
+}
+
+async function removeDirectoryWithRetry(directory) {
+  let lastError;
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    try {
+      fs.rmSync(directory, { recursive: true, force: true, maxRetries: 0 });
+      return;
+    } catch (error) {
+      lastError = error;
+      if (!["EPERM", "EBUSY", "ENOTEMPTY"].includes(error?.code) || attempt === 29) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  }
+  throw lastError;
 }

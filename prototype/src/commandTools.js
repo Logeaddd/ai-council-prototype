@@ -4,7 +4,7 @@ import path from "node:path";
 import { isInsidePath, normalizeWorkspacePathAlias } from "./pathGuards.js";
 import { buildCommandEnvironment, displayPath } from "./runtimeEnvironment.js";
 import { backgroundWorkspaceChanges, captureWorkspaceSnapshot, diffWorkspaceSnapshots } from "./workspaceChanges.js";
-import { startManagedBackgroundProcess } from "./processTools.js";
+import { startManagedBackgroundProcess, startManagedInteractiveProcess } from "./processTools.js";
 
 // General shell commands include builds and generators. A short timeout turns
 // normal project work into a false failure; callers may still choose a shorter
@@ -24,7 +24,8 @@ export async function executeCommandTool(request, options = {}) {
   const command = normalizedCommand.command;
   const timeoutMs = clampNumber(request.timeoutMs || options.commandTimeoutMs || options.timeoutMs, DEFAULT_TIMEOUT_MS, MIN_TIMEOUT_MS, MAX_TIMEOUT_MS);
   const maxOutputBytes = clampNumber(request.maxOutputBytes || options.maxCommandOutputBytes, DEFAULT_MAX_OUTPUT_BYTES, 1024, MAX_OUTPUT_BYTES);
-  const invocation = buildShellInvocation(command, shell);
+  const interactive = Boolean(request.interactive);
+  const invocation = interactive ? buildInteractiveShellInvocation(shell) : buildShellInvocation(command, shell);
   const runtime = buildCommandEnvironment(groupRoot, { managedToolRoots: options.managedToolRoots });
   const changeRoot = commandChangeRoot(groupRoot, cwd, options.importedProjectRoots);
   const workspaceSnapshotOptions = {
@@ -33,7 +34,7 @@ export async function executeCommandTool(request, options = {}) {
   };
   const startedAtMs = Date.now();
 
-  if (request.background) {
+  if (request.background || interactive) {
     return startBackgroundCommand({
       invocation,
       cwd,
@@ -44,6 +45,12 @@ export async function executeCommandTool(request, options = {}) {
       shell,
       timeoutMs,
       maxOutputBytes,
+      interactive,
+      columns: request.columns ?? request.cols,
+      rows: request.rows,
+      initialInput: interactive ? `${command}${process.platform === "win32" ? "\r" : "\n"}` : "",
+      changeRoot,
+      workspaceSnapshotOptions,
       runtime,
       workspaceChanges: backgroundWorkspaceChanges(),
       startedAtMs
@@ -182,19 +189,27 @@ function runForegroundCommand(options) {
 }
 
 async function startBackgroundCommand(options) {
-  const managed = await startManagedBackgroundProcess({
+  const starter = options.interactive ? startManagedInteractiveProcess : startManagedBackgroundProcess;
+  const managed = await starter({
     groupRoot: options.groupRoot,
     cwd: options.cwd,
     command: options.command,
     shell: options.shell,
     invocation: options.invocation,
     env: options.runtime.env,
-    maxOutputBytes: options.maxOutputBytes
+    maxOutputBytes: options.maxOutputBytes,
+    columns: options.columns,
+    rows: options.rows,
+    initialInput: options.initialInput,
+    workspaceRoot: options.changeRoot?.path,
+    workspaceLabel: options.changeRoot?.label,
+    workspaceSnapshotOptions: options.workspaceSnapshotOptions
   });
   if (!managed.ok) {
     return commandResult(options, {
       ok: false,
       background: true,
+      interactive: options.interactive,
       code: managed.code || "command_spawn_failed",
       error: managed.error || "Background command failed to start.",
       processId: managed.processId,
@@ -211,6 +226,7 @@ async function startBackgroundCommand(options) {
   return commandResult(options, {
     ok: true,
     background: true,
+    interactive: options.interactive,
     processId: managed.processId,
     process: managed.process,
     pid: managed.pid,
@@ -235,6 +251,7 @@ function commandResult(options, state) {
     shell: options.shell,
     cwd: relativeCwd(options.groupRoot, options.cwd),
     background: Boolean(state.background),
+    interactive: Boolean(state.interactive),
     processId: state.processId,
     process: state.process,
     pid: state.pid,
@@ -290,6 +307,16 @@ function buildShellInvocation(command, shell) {
   if (shell === "bash") return { file: "bash", args: ["-lc", command] };
   if (shell === "sh") return { file: "sh", args: ["-lc", command] };
   return buildShellInvocation(command, defaultSystemShell());
+}
+
+function buildInteractiveShellInvocation(shell) {
+  if (shell === "powershell") {
+    return { file: process.platform === "win32" ? "powershell.exe" : "pwsh", args: ["-NoLogo", "-NoProfile"] };
+  }
+  if (shell === "cmd" || (shell === "system" && process.platform === "win32")) return { file: "cmd.exe", args: ["/d"] };
+  if (shell === "bash") return { file: "bash", args: ["--noprofile", "--norc"] };
+  if (shell === "sh") return { file: "sh", args: [] };
+  return buildInteractiveShellInvocation(defaultSystemShell());
 }
 
 function wrapCmdCommand(command) {

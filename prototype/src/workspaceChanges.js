@@ -22,7 +22,7 @@ const SKIP_DIRS = new Set([
   "venv"
 ]);
 const INTERNAL_ROOT_DIRS = new Set(["members", "sessions", "approvals", "_supervisor"]);
-const INTERNAL_SHARED_DIRS = new Set(["logs", "cache", "usage", "memory", "memory_pending", "inbox", "environments", "file-ops", "harness"]);
+const INTERNAL_SHARED_DIRS = new Set(["logs", "cache", "usage", "memory", "memory_pending", "inbox", "environments", "file-ops", "harness", "task-runs"]);
 const INTERNAL_ROOT_FILES = new Set(["group.json"]);
 const INTERNAL_SHARED_FILES = new Set(["task_state.json"]);
 const ARTIFACT_EXTENSIONS = new Set([".exe", ".msi", ".jar", ".zip", ".tar", ".gz", ".tgz", ".7z", ".rar", ".whl", ".deb", ".rpm", ".dmg", ".appimage", ".apk", ".aab", ".ipa", ".dll", ".so", ".dylib", ".wasm", ".pdf", ".docx", ".pptx", ".xlsx"]);
