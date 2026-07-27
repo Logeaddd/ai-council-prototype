@@ -107,8 +107,17 @@ Completed on 2026-07-27:
   actually running, explicitly stop the durable run, restart the server, and
   continue from its checkpoint. The later generator pass skips the already
   published start event, so reconnecting clients receive it exactly once.
+* Unknown runtime acquisition now retains a sanitized discovery trail in
+  `c9c065f`. When a provision request has no source, the execution follow-up
+  requires a real web search for a publisher or platform package listing and
+  a materially different request carrying the source URL and query. The URL
+  is safe-validated and persisted without credentials or query data; it is
+  explicitly discovery evidence, not a trust claim. Package-manager handling,
+  publisher hashes, and executable verification remain the separate evidence
+  needed to use a tool. Unsafe discovery URLs are rejected before any install
+  command runs.
 * Regression evidence after `e3b68f6`: the focused real-user HTTP/SSE suite
-  passed 17/17; the full suite passed 718 tests with 0 failures and 1
+  passed 17/17; after `c9c065f` the full suite passed 720 tests with 0 failures and 1
   platform skip. `node ./src/cli.js harness-check` remains honestly
   `incomplete`: T106 is 7/7 complete, while T105 and T117 await the configured
   real-provider multi-task evidence window. The report is
