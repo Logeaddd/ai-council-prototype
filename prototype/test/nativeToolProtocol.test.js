@@ -25,6 +25,31 @@ test("native tool definitions are per-tool closed schemas and can be narrowed at
   assert.deepEqual(command.inputSchema.required, ["reason", "command"]);
 });
 
+test("native provisioning schema preserves researched source fields", () => {
+  const provision = nativeToolDefinitions("full", { tools: ["provision_tool"] })[0];
+  assert.equal(provision.name, "provision_tool");
+  assert.equal("discoverySourceUrl" in provision.inputSchema.properties, true);
+  assert.equal("discoveryQuery" in provision.inputSchema.properties, true);
+
+  const requests = normalizeNativeToolCalls([{
+    id: "call_discovery",
+    name: "provision_tool",
+    input: {
+      toolName: "example-cli",
+      commandName: "example-cli",
+      manager: "winget",
+      packageId: "Publisher.ExampleCli",
+      discoverySourceUrl: "https://publisher.example.test/install?temporary=secret",
+      discoveryQuery: "example cli official install",
+      reason: "Acquire the missing CLI from its publisher listing."
+    }
+  }]);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].tool, "provision_tool");
+  assert.equal(requests[0].discoverySourceUrl, "https://publisher.example.test/install?temporary=secret");
+  assert.equal(requests[0].discoveryQuery, "example cli official install");
+});
+
 test("native provider calls normalize into the existing tool request protocol", () => {
   const requests = normalizeNativeToolCalls([{
     id: "call_1",
