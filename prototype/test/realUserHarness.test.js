@@ -268,6 +268,7 @@ test("seeded campaign drives HTTP/SSE stages, member disturbances and interrupti
     assert.equal(run.report.autonomousExecution.resumedAfterInterruption, true);
     assert.equal(run.report.sessions.interrupted.length, 2);
     assert.equal(run.report.minimumUsableDelivery.passed, true);
+    assert.equal(run.report.capabilityAcquisition.executionReceipt.schema, "ai-council.capability-execution-receipt.v1");
     assert.equal(run.report.persistence.passed, true);
     assert.equal(run.report.persistence.checks.every((check) => check.passed), true);
     assert.equal(run.report.recovery.passed, true);
@@ -342,6 +343,7 @@ test("capability acquisition evidence must come from a successful current-campai
       result: { ok: true, packageName: "chosen-image-package", environmentPath: "shared/environments/npm" }
     },
     {
+      id: "run-image-package",
       tool: "execute_command",
       status: "completed",
       command: "node shared/environments/npm/render-image.js --engine chosen-image-package",
@@ -364,6 +366,7 @@ test("capability acquisition evidence must come from a successful current-campai
   const linkedShellInstall = verifyCampaignToolEvidence(verifier, [{ toolExecutionResults: [
     { id: "shell-install", tool: "execute_command", status: "completed", command: "npm install chosen-image-package", result: { ok: true, exitCode: 0, stdout: "added 1 package" } },
     {
+      id: "run-shell-package",
       tool: "run_code",
       status: "completed",
       capabilityUsage: [{ acquisitionId: "shell-install", acquisitionTool: "execute_command", kind: "shell_installed_package", references: ["chosen-image-package"] }],

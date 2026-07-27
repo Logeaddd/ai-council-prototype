@@ -232,8 +232,13 @@ export async function runSeededRealUserCampaign(options = {}) {
 
   try {
     const artifactDelivery = await verifyCampaignDeliverable(campaign.hiddenVerifier, groupPath);
-    const sessions = listPersistedSessions(groupPath);
+    const sessionEntries = listPersistedSessionEntries(groupPath);
+    const sessions = sessionEntries.map(({ session }) => session);
     const toolEvidence = verifyCampaignToolEvidence(campaign.hiddenVerifier, sessions);
+    const capabilityAcquisition = {
+      ...toolEvidence.acquisition,
+      executionReceipt: createCapabilityExecutionReceipt(groupPath, sessionEntries, toolEvidence.acquisition.evidence)
+    };
     const collaboration = verifyCampaignCollaboration(campaign.hiddenVerifier, sessions);
     const deliveryLayers = classifyCampaignDelivery(artifactDelivery);
     const attemptedModelCalls = sessions.reduce((total, session) => total + Number(session.modelCallCount || 0), 0);
@@ -288,7 +293,7 @@ export async function runSeededRealUserCampaign(options = {}) {
           limitation: "This verifies the real API tool path against a bounded harness service. It does not prove public-network reachability or real-provider autonomy."
         }
         : { mode: "not_required" },
-      capabilityAcquisition: toolEvidence.acquisition,
+      capabilityAcquisition,
       collaboration,
       autonomousExecution: {
         campaignStagesExecuted: timeline.filter((item) => item.result === "completed").length,
@@ -569,12 +574,17 @@ function compactCampaignEvent(stage, event) {
   return { stageId: stage.id, ...compactEvent(stage.kind, event) };
 }
 
-function listPersistedSessions(groupPath) {
+function listPersistedSessionEntries(groupPath) {
   const root = path.join(groupPath, "sessions");
   if (!fs.existsSync(root)) return [];
-  return fs.readdirSync(root).filter((name) => name.endsWith(".json")).map((name) => {
-    try { return JSON.parse(fs.readFileSync(path.join(root, name), "utf8")); } catch { return null; }
+  return fs.readdirSync(root).filter((name) => name.endsWith(".json")).sort().map((name) => {
+    const filePath = path.join(root, name);
+    try { return { session: JSON.parse(fs.readFileSync(filePath, "utf8")), filePath }; } catch { return null; }
   }).filter(Boolean);
+}
+
+function listPersistedSessions(groupPath) {
+  return listPersistedSessionEntries(groupPath).map(({ session }) => session);
 }
 
 function latestSessionGuardStopReason(groupPath, question) {
@@ -690,10 +700,11 @@ export function verifyCampaignToolEvidence(verifier = {}, sessions = []) {
     .flatMap((later) => capabilityUsageLinks(item, later).map((usage) => ({
       acquisitionId: String(item.id || ""),
       acquisitionTool: String(item.tool || kind),
+      workResultId: String(later.id || ""),
       workTool: String(later.tool || ""),
       kind: String(usage.kind || ""),
       references: Array.isArray(usage.references) ? usage.references.map(String).slice(0, 4) : []
-    }))));
+    })))).filter((item) => item.acquisitionId && item.workResultId && item.workTool && item.kind && item.references.length > 0);
   const usedAcquisitionIds = new Set(acquisitionUses.map((item) => item.acquisitionId).filter(Boolean));
   const usedAcquisitions = acquisitionResults.filter(({ item }) => usedAcquisitionIds.has(String(item.id || "")));
   const acquisition = {
@@ -712,6 +723,24 @@ export function verifyCampaignToolEvidence(verifier = {}, sessions = []) {
   }
   if (!checks.length) checks.push(check("required_tool_evidence", true, "not_required"));
   return { passed: checks.every((item) => item.passed), checks, acquisition };
+}
+
+function createCapabilityExecutionReceipt(groupPath, sessionEntries = [], evidence = {}) {
+  const uses = Array.isArray(evidence?.uses) ? evidence.uses : [];
+  const resultIds = new Set(uses.flatMap((item) => [item?.acquisitionId, item?.workResultId])
+    .map((value) => String(value || "")).filter(Boolean));
+  const runDir = path.resolve(groupPath, "..", "..", "..");
+  const sessionFiles = (sessionEntries || []).filter(({ session }) => (
+    (session?.toolExecutionResults || []).some((item) => resultIds.has(String(item?.id || "")))
+  )).map(({ session, filePath }) => ({
+    path: path.relative(runDir, filePath).replaceAll("\\", "/"),
+    sessionId: String(session?.id || ""),
+    sha256: createHash("sha256").update(fs.readFileSync(filePath)).digest("hex")
+  }));
+  return {
+    schema: "ai-council.capability-execution-receipt.v1",
+    sessionFiles
+  };
 }
 
 export function verifyCampaignCollaboration(verifier = {}, sessions = []) {

@@ -91,7 +91,7 @@ function evaluateRealUserCampaignGate(root, gate, base) {
   const requiredFamilies = Array.isArray(gate.requiredFamilies) ? gate.requiredFamilies : [];
   const scopedReports = scopeCampaignReportsToRequiredFamilies(reports, requiredFamilies);
   const evidenceReports = selectCampaignEvidenceReports(scopedReports, gate);
-  const passedReports = evidenceReports.filter(({ report }) => (
+  const passedReports = evidenceReports.filter(({ report, filePath }) => (
     report.status === "passed"
     && report.providerAcceptance?.realProvider === true
     && Number(report.providerAcceptance?.blockedBeforeSendModelCalls || 0) === 0
@@ -103,7 +103,7 @@ function evaluateRealUserCampaignGate(root, gate, base) {
     && hasCompleteContinuationEvidence(report)
     && Number(report.providerAcceptance?.observedModelCalls || report.sessions?.modelCalls || 0) > 0
     && (gate.requireDelegationEvidence !== true || report.collaboration?.passed === true)
-    && campaignReportPassesGate(report, gate)
+    && campaignReportPassesGate(report, gate, { reportPath: filePath })
   ));
   const defaultMinimumFamilyAttempts = positiveInteger(gate.minimumAttemptsPerFamily, 1);
   const defaultMinimumFamilyPasses = positiveInteger(gate.minimumPassedReportsPerFamily, 1);
@@ -113,10 +113,10 @@ function evaluateRealUserCampaignGate(root, gate, base) {
       const taskId = campaignTaskId(report);
       return taskIds.size === 0 || taskIds.has(taskId);
     });
-    const matches = passedReports.filter(({ report }) => {
+    const matches = passedReports.filter(({ report, filePath }) => {
       const taskId = campaignTaskId(report);
       if (taskIds.size > 0 && !taskIds.has(taskId)) return false;
-      if (family.requireAcquisitionEvidence && !hasCurrentCapabilityUseEvidence(report)) return false;
+      if (family.requireAcquisitionEvidence && !hasCurrentCapabilityUseEvidence(report, { reportPath: filePath })) return false;
       return true;
     });
     const minimumAttempts = positiveInteger(family.minimumAttempts, defaultMinimumFamilyAttempts);
@@ -158,7 +158,7 @@ function evaluateRealUserCampaignGate(root, gate, base) {
       matchingReports: reports.length,
       scopedReports: scopedReports.length,
       evaluatedReports: evidenceReports.length,
-      failedReports: evidenceReports.filter(({ report }) => !campaignReportPassesGate(report, gate)).map(({ filePath }) => path.relative(root, filePath).replaceAll("\\", "/")),
+      failedReports: evidenceReports.filter(({ report, filePath }) => !campaignReportPassesGate(report, gate, { reportPath: filePath })).map(({ filePath }) => path.relative(root, filePath).replaceAll("\\", "/")),
       passedReports: passedReports.map(({ filePath }) => path.relative(root, filePath).replaceAll("\\", "/")),
       minimumPassedReports,
       minimumDistinctTaskIds,
@@ -210,17 +210,17 @@ function latestCampaignTaskEvidence(reports, root, gate = {}) {
     if (!taskId || latest.has(taskId)) continue;
     latest.set(taskId, {
       taskId,
-      status: campaignReportPassesGate(item.report, gate) ? "passed" : "failed",
+      status: campaignReportPassesGate(item.report, gate, { reportPath: item.filePath }) ? "passed" : "failed",
       report: path.relative(root, item.filePath).replaceAll("\\", "/")
     });
   }
   return [...latest.values()];
 }
 
-function campaignReportPassesGate(report = {}, gate = {}) {
+function campaignReportPassesGate(report = {}, gate = {}, options = {}) {
   return report.status === "passed"
     && (gate.requireDelegationEvidence !== true || report.collaboration?.passed === true)
-    && (!campaignTaskRequiresAcquisitionEvidence(report, gate) || hasCurrentCapabilityUseEvidence(report));
+    && (!campaignTaskRequiresAcquisitionEvidence(report, gate) || hasCurrentCapabilityUseEvidence(report, options));
 }
 
 function campaignTaskRequiresAcquisitionEvidence(report = {}, gate = {}) {
@@ -231,18 +231,73 @@ function campaignTaskRequiresAcquisitionEvidence(report = {}, gate = {}) {
   ));
 }
 
-function hasCurrentCapabilityUseEvidence(report = {}) {
+function hasCurrentCapabilityUseEvidence(report = {}, options = {}) {
   const evidence = report.capabilityAcquisition?.evidence;
   if (report.capabilityAcquisition?.passed !== true) return false;
   if (evidence?.schema !== "ai-council.capability-use-evidence.v1" || !Array.isArray(evidence.uses)) return false;
-  return evidence.uses.some((use) => (
+  if (!evidence.uses.some((use) => (
     String(use?.acquisitionId || "")
     && String(use?.acquisitionTool || "")
+    && String(use?.workResultId || "")
     && String(use?.workTool || "")
     && String(use?.kind || "")
     && Array.isArray(use?.references)
     && use.references.length > 0
+  ))) return false;
+  return receiptMatchesCapabilityEvidence(report.capabilityAcquisition?.executionReceipt, evidence, options.reportPath);
+}
+
+function receiptMatchesCapabilityEvidence(receipt, evidence, reportPath) {
+  if (receipt?.schema !== "ai-council.capability-execution-receipt.v1" || !Array.isArray(receipt.sessionFiles) || !reportPath) return false;
+  const reportDir = path.dirname(reportPath);
+  const sessionRoot = path.resolve(reportDir, "data", "workspace-ui", "campaign-group", "sessions");
+  const resultsById = new Map();
+  for (const source of receipt.sessionFiles) {
+    const relativePath = String(source?.path || "").replaceAll("/", path.sep);
+    if (!relativePath || path.isAbsolute(relativePath)) return false;
+    const filePath = path.resolve(reportDir, relativePath);
+    if (!isPathWithin(filePath, sessionRoot) || !fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) return false;
+    const bytes = fs.readFileSync(filePath);
+    if (!constantTimeEqualHex(sha256(bytes), source?.sha256)) return false;
+    let session;
+    try { session = JSON.parse(bytes.toString("utf8")); } catch { return false; }
+    if (String(session?.id || "") !== String(source?.sessionId || "")) return false;
+    for (const result of session.toolExecutionResults || []) {
+      const id = String(result?.id || "");
+      if (!id || resultsById.has(id)) return false;
+      resultsById.set(id, result);
+    }
+  }
+  return evidence.uses.every((use) => receiptUseMatches(use, resultsById));
+}
+
+function receiptUseMatches(use, resultsById) {
+  const acquisition = resultsById.get(String(use?.acquisitionId || ""));
+  const work = resultsById.get(String(use?.workResultId || ""));
+  if (!acquisition || !work || acquisition.status !== "completed" || work.status !== "completed") return false;
+  if (acquisition.result?.ok === false || work.result?.ok === false) return false;
+  if (String(acquisition.tool || "") !== String(use.acquisitionTool || "")) return false;
+  if (String(work.tool || "") !== String(use.workTool || "")) return false;
+  return (Array.isArray(work.capabilityUsage) ? work.capabilityUsage : []).some((link) => (
+    String(link?.acquisitionId || "") === String(use.acquisitionId || "")
+    && String(link?.acquisitionTool || "") === String(use.acquisitionTool || "")
+    && String(link?.kind || "") === String(use.kind || "")
+    && Array.isArray(link?.references)
+    && use.references.every((reference) => link.references.map(String).includes(String(reference)))
   ));
+}
+
+function isPathWithin(targetPath, rootPath) {
+  const relative = path.relative(rootPath, targetPath);
+  return relative && !relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative);
+}
+
+function constantTimeEqualHex(left, right) {
+  const leftValue = String(left || "").toLowerCase();
+  const rightValue = String(right || "").toLowerCase();
+  return /^[a-f0-9]{64}$/.test(leftValue)
+    && /^[a-f0-9]{64}$/.test(rightValue)
+    && crypto.timingSafeEqual(Buffer.from(leftValue, "hex"), Buffer.from(rightValue, "hex"));
 }
 
 function campaignTaskId(report) {

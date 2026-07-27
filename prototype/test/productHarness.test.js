@@ -1,10 +1,47 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import { evaluateProductHarness, runProductHarnessCheckAsync, testSuiteConcurrency, testSuiteProgressIntervalMs, testSuiteTimeoutMs } from "../src/productHarness.js";
+
+function attachCapabilityExecutionReceipt(report, reportDir, seed) {
+  const relativePath = "data/workspace-ui/campaign-group/sessions/session-capability.json";
+  const sessionPath = path.join(reportDir, ...relativePath.split("/"));
+  const acquisitionId = `install-${seed}`;
+  const workResultId = `work-${seed}`;
+  const session = {
+    id: "session-capability",
+    toolExecutionResults: [
+      { id: acquisitionId, tool: "install_package", status: "completed", result: { ok: true } },
+      {
+        id: workResultId,
+        tool: "run_code",
+        status: "completed",
+        result: { ok: true },
+        capabilityUsage: [{ acquisitionId, acquisitionTool: "install_package", kind: "installed_package", references: ["image-library"] }]
+      }
+    ]
+  };
+  fs.mkdirSync(path.dirname(sessionPath), { recursive: true });
+  const bytes = Buffer.from(JSON.stringify(session), "utf8");
+  fs.writeFileSync(sessionPath, bytes);
+  report.capabilityAcquisition.evidence = {
+    schema: "ai-council.capability-use-evidence.v1",
+    uses: [{ acquisitionId, acquisitionTool: "install_package", workResultId, workTool: "run_code", kind: "installed_package", references: ["image-library"] }]
+  };
+  report.capabilityAcquisition.executionReceipt = {
+    schema: "ai-council.capability-execution-receipt.v1",
+    sessionFiles: [{
+      path: relativePath,
+      sessionId: session.id,
+      sha256: createHash("sha256").update(bytes).digest("hex")
+    }]
+  };
+  return sessionPath;
+}
 
 test("product harness has no default full-suite timeout but accepts an explicit test guard", () => {
   assert.equal(testSuiteTimeoutMs(undefined), undefined);
@@ -218,7 +255,7 @@ test("product harness requires a real multi-family matrix and cannot count repea
   const writeReport = (name, { taskId, seed, acquisition = false, currentAcquisitionEvidence = acquisition }) => {
     const dir = path.join(reportsRoot, name);
     fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(path.join(dir, "report.json"), JSON.stringify({
+    const report = {
       schema: "ai-council.real-user-campaign-run.v1",
       status: "passed",
       seed,
@@ -227,18 +264,14 @@ test("product harness requires a real multi-family matrix and cannot count repea
       autonomousExecution: { passed: true, resumedAfterInterruption: true },
       minimumUsableDelivery: { passed: true },
       capabilityAcquisition: acquisition ? {
-        passed: true,
-        ...(currentAcquisitionEvidence ? {
-          evidence: {
-            schema: "ai-council.capability-use-evidence.v1",
-            uses: [{ acquisitionId: `install-${seed}`, acquisitionTool: "install_package", workTool: "run_code", kind: "installed_package", references: ["image-library"] }]
-          }
-        } : {})
+        passed: true
       } : { passed: false },
       persistence: { passed: true },
       recovery: { passed: true, checks: [{ id: "continuation_completed_visible_work", passed: true }] },
       sessions: { interrupted: [{ id: `interrupted-${seed}` }] }
-    }), "utf8");
+    };
+    if (acquisition && currentAcquisitionEvidence) attachCapabilityExecutionReceipt(report, dir, seed);
+    fs.writeFileSync(path.join(dir, "report.json"), JSON.stringify(report), "utf8");
   };
 
   writeReport("node-1", { taskId: "node-cli", seed: 1 });
@@ -283,12 +316,11 @@ test("product harness refuses legacy cached acquisition booleans without a curre
   };
   fs.writeFileSync(path.join(reportDir, "report.json"), JSON.stringify(report), "utf8");
   assert.equal(evaluateProductHarness({ root, manifest, testEvidence: { status: "passed" } }).status, "incomplete");
-  report.capabilityAcquisition.evidence = {
-    schema: "ai-council.capability-use-evidence.v1",
-    uses: [{ acquisitionId: "install-1", acquisitionTool: "install_package", workTool: "run_code", kind: "installed_package", references: ["image-library"] }]
-  };
+  const sessionPath = attachCapabilityExecutionReceipt(report, reportDir, 1);
   fs.writeFileSync(path.join(reportDir, "report.json"), JSON.stringify(report), "utf8");
   assert.equal(evaluateProductHarness({ root, manifest, testEvidence: { status: "passed" } }).status, "complete");
+  fs.appendFileSync(sessionPath, "\n");
+  assert.equal(evaluateProductHarness({ root, manifest, testEvidence: { status: "passed" } }).status, "incomplete");
 });
 
 test("product harness cannot hide recent campaign failures behind one success per family", () => {
