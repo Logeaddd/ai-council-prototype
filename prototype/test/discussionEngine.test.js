@@ -178,7 +178,7 @@ test("file delivery work stops after the configured real model-call budget witho
       maxModelCalls: 20
     },
     agents: [
-      { id: "one", name: "One", role: "Builder", provider: "mock", apiBaseUrl: "mock://local", model: "mock-one", weight: 1, enabled: true },
+      { id: "one", name: "One", role: "Builder", provider: "mock", apiBaseUrl: "mock://local", model: "mock-one", weight: 1, enabled: true, mockTaskContract: { mode: "delivery", objective: "Build the requested package.", requires_workspace: true, requires_verification: true, deliverables: ["requested JAR"], completion_criteria: ["verify the JAR"], next_action: "Create the project output." } },
       { id: "two", name: "Two", role: "Builder", provider: "mock", apiBaseUrl: "mock://local", model: "mock-two", weight: 1, enabled: true }
     ]
   });
@@ -1924,7 +1924,7 @@ test("an explicit user tool-iteration limit pauses with continuation instead of 
   }
 });
 
-test("repeated non-progress inspection recovers without imposing a limit on distinct useful tool work", async () => {
+test("a workspace repair task recovers from repeated inspection without imposing a limit on distinct useful tool work", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-tool-stagnation-"));
   fs.writeFileSync(path.join(tmp, "group.json"), JSON.stringify({
     permissions: { defaultTier: "full", seatTiers: { worker: "full" } }
@@ -1963,6 +1963,15 @@ test("repeated non-progress inspection recovers without imposing a limit on dist
     writeOpenAiStream(res, JSON.stringify({
       status: "speak",
       argument: "Inspecting the same file again.",
+      task_contract: {
+        mode: "delivery",
+        objective: "Repair the supplied workspace file.",
+        requires_workspace: true,
+        requires_verification: true,
+        deliverables: ["brief.md"],
+        completion_criteria: ["the repaired file is verified"],
+        next_action: "Inspect the current file before repairing it."
+      },
       tool_requests: [{ tool: "read_file", path: "brief.md", reason: "Repeated inspection." }],
       objections: [],
       confidence: 0.5,
@@ -1975,9 +1984,9 @@ test("repeated non-progress inspection recovers without imposing a limit on dist
       id: "tool-stagnation",
       name: "Tool Stagnation",
       settings: { maxRounds: 1, minConsensusWeight: 1, stopWhenAllSkip: true, agentTimeoutMs: 3000, allowSoloCouncil: true },
-      agents: [{ id: "worker", name: "Worker", role: "Builder", provider: "openai-compatible", apiBaseUrl: `http://127.0.0.1:${server.address().port}/v1`, allowUnsafePrivateNetwork: true, apiKey: "secret-runtime-key", model: "tool-stagnation-model", weight: 1, enabled: true, judge: true }]
+      agents: [{ id: "worker", name: "Worker", role: "Builder", provider: "openai-compatible", apiBaseUrl: `http://127.0.0.1:${server.address().port}/v1`, allowUnsafePrivateNetwork: true, apiKey: "secret-runtime-key", model: "tool-stagnation-model", weight: 1, enabled: true }]
     });
-    const result = await runCouncil("Inspect the supplied file and report the result.", group, tmp, { groupPath: tmp });
+    const result = await runCouncil("Repair the supplied workspace file and verify the corrected result.", group, tmp, { groupPath: tmp });
 
     assert.equal(recoveryPromptSeen, true);
     assert.equal(forcedWriteSent, true);
@@ -4600,9 +4609,10 @@ test("workspace round prompts gate file_operations by seat permission tier", asy
 
     await runCouncil("Discuss the workspace permission policy.", group, tmp, { groupPath });
 
-    assert.match(requests[0].messages[0].content, /text-only file permission/);
-    assert.doesNotMatch(requests[0].messages[0].content, /use native workspace_edit tool calls/);
-    assert.match(requests[1].messages[0].content, /use native workspace_edit tool calls/);
+    const promptTexts = requests.map((request) => request.messages?.[0]?.content || "");
+    assert.equal(promptTexts.some((text) => /text-only file permission/.test(text)), true);
+    assert.equal(promptTexts.some((text) => /text-only file permission/.test(text) && /use native workspace_edit tool calls/.test(text)), false);
+    assert.equal(promptTexts.some((text) => /use native workspace_edit tool calls/.test(text)), true);
   } finally {
     await close(server);
   }
@@ -4628,7 +4638,7 @@ test("delivery work calls one full-permission executor instead of every ordinary
     settings: { maxRounds: 1, minConsensusWeight: 1, stopWhenAllSkip: true, agentTimeoutMs: 1000 },
     agents: [
       { id: "architect", name: "Architect", role: "Architect", provider: "mock", apiBaseUrl: "mock://local", model: "mock-architect", weight: 1, enabled: true },
-      { id: "executor", name: "Executor", role: "Executor", provider: "mock", apiBaseUrl: "mock://local", model: "mock-executor", weight: 1, enabled: true },
+      { id: "executor", name: "Executor", role: "Executor", provider: "mock", apiBaseUrl: "mock://local", model: "mock-executor", weight: 1, enabled: true, mockTaskContract: { mode: "delivery", objective: "Create the requested project file.", requires_workspace: true, requires_verification: true, deliverables: ["project file"], completion_criteria: ["verify the file"], next_action: "Create the requested file." } },
       { id: "reviewer", name: "Reviewer", role: "Reviewer", provider: "mock", apiBaseUrl: "mock://local", model: "mock-reviewer", weight: 1, enabled: true, mandatoryRedTeam: true },
       { id: "judge", name: "Judge", role: "Judge", provider: "mock", apiBaseUrl: "mock://local", model: "mock-judge", weight: 1, enabled: true, judge: true }
     ]

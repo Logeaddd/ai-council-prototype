@@ -59,6 +59,7 @@ export function parseRoundResponse(rawText) {
     artifacts: normalizeArtifacts(parsed.artifacts),
     file_operations: normalizeFileOperations(parsed.file_operations),
     tool_requests: normalizeToolRequests(parsed.tool_requests),
+    task_contract: normalizeTaskContract(parsed.task_contract),
     confidence: normalizeConfidence(parsed.confidence),
     memory_candidates: normalizeStringArray(parsed.memory_candidates)
   };
@@ -170,6 +171,21 @@ function normalizeFileOperations(value) {
     .filter((item) => item && typeof item === "object" && !Array.isArray(item))
     .map((item) => ({ ...item }))
     .slice(0, 20);
+}
+
+function normalizeTaskContract(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const mode = String(value.mode || "").trim().toLowerCase();
+  if (mode !== "delivery" && mode !== "discussion") return undefined;
+  return {
+    mode,
+    objective: optionalString(value.objective) || "",
+    requires_workspace: Boolean(value.requires_workspace ?? value.requiresWorkspace),
+    requires_verification: Boolean(value.requires_verification ?? value.requiresVerification),
+    deliverables: normalizeStringArray(value.deliverables).slice(0, 12),
+    completion_criteria: normalizeStringArray(value.completion_criteria ?? value.completionCriteria).slice(0, 12),
+    next_action: optionalString(value.next_action ?? value.nextAction) || ""
+  };
 }
 
 function normalizeStringArray(value) {

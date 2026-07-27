@@ -28,7 +28,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { createObservationCache, hasMaterialWorkspaceChange } from "./observationCache.js";
-import { advanceExecutionState, createExecutionState, executionInstruction, isDeliveryTask, selectExecutionAgents } from "./executionState.js";
+import { advanceExecutionState, createExecutionState, executionInstruction, requiresWorkspaceExecution, selectExecutionAgents } from "./executionState.js";
 import { nativeToolDefinitions } from "./nativeToolProtocol.js";
 import { readPublicEventHotCache } from "./publicEventJournal.js";
 import { appendTaskRunEvent, createTaskRun, readTaskRun, recordTaskRunArtifactVerification, recordTaskRunFileEvidence, recordTaskRunToolAttempts, syncTaskRunFromSession } from "./taskRuntime.js";
@@ -796,6 +796,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
       refreshExecutionCheckpoint();
       recordObjections(session, agent, message.response, round, group.settings);
       persistRunningSession();
+      appendDiscussionFallbackAgents({ agentsToCall, enabledAgents, session, round, firstRoundAgents });
       yield {
         type: "agent_message",
         message,
@@ -1059,6 +1060,18 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
     result,
     createdAt: nowIso()
   };
+}
+
+function appendDiscussionFallbackAgents({ agentsToCall, enabledAgents, session, round, firstRoundAgents }) {
+  const execution = session.executionState;
+  if (execution?.active || execution?.phase !== "discussion") return;
+  if (round === 1 && firstRoundAgents.length < enabledAgents.length) return;
+  const scheduled = new Set(agentsToCall.map((agent) => agent.id));
+  for (const agent of selectAgents(enabledAgents, session, round, firstRoundAgents)) {
+    if (scheduled.has(agent.id)) continue;
+    scheduled.add(agent.id);
+    agentsToCall.push(agent);
+  }
 }
 
 function positiveDuration(value) {
@@ -1339,16 +1352,11 @@ function reserveModelCall(session) {
 }
 
 function noProgressGuardReason(session, question, settings = {}) {
-  if (!isDeliveryTask(question) || hasMaterialWorkspaceProgress(session)) return "";
+  if (!requiresWorkspaceExecution(session.executionState) || hasMaterialWorkspaceProgress(session)) return "";
   const threshold = Number(settings.noProgressModelCalls || 0);
   if (!Number.isFinite(threshold) || threshold <= 0) return "";
   if (Number(session.modelCallCount || 0) < threshold) return "";
   return `no_workspace_progress_after_${session.modelCallCount}_model_calls`;
-}
-
-function isFileDeliveryTask(question) {
-  if (/(?:produce|export|pdf|report|document|presentation|spreadsheet|\u5e2e\u6211\u505a|\u505a(?:\u4e00|\u4e2a|\u4efd)|\u62a5\u544a|\u5bfc\u51fa|\u684c\u9762)/i.test(String(question || ""))) return true;
-  return /(build|create|implement|write|modify|fix|generate|package|compile|jar|mod\b|source|code|file|构建|生成|制作|开发|实现|编写|写入|修改|修复|打包|源码|代码|文件|模组)/i.test(String(question || ""));
 }
 
 function hasMaterialWorkspaceProgress(session = {}) {
@@ -1460,7 +1468,7 @@ function buildStagnantToolLoopRecoveryInstruction(agent, question, toolFollowupI
 function requiresStagnationWorkspaceEdit(agent, question, permissionTier, executionState) {
   return permissionTier === "full"
     && !isReviewerLike(agent)
-    && isFileDeliveryTask(question)
+    && requiresWorkspaceExecution(executionState)
     && executionState?.phase !== "verify"
     && executionState?.phase !== "review"
     && executionState?.phase !== "complete";
@@ -1665,6 +1673,11 @@ function effectiveWorkspacePermissionTier(workspaceGroup, agent) {
 }
 
 function selectAgents(enabledAgents, session, round, firstRoundAgents = enabledAgents) {
+  if (
+    session.executionState?.phase === "intake"
+    && round === 1
+    && !firstRoundAgents.some((agent) => agent.id === session.executionState.executorId)
+  ) return firstRoundAgents.filter((agent) => participatesInRound(agent, enabledAgents));
   const executionAgents = selectExecutionAgents(session.executionState, enabledAgents);
   if (executionAgents) return executionAgents;
   const roundEligibleAgents = enabledAgents.filter((agent) => participatesInRound(agent, enabledAgents));

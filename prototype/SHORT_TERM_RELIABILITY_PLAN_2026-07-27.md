@@ -187,6 +187,23 @@ Completed on 2026-07-27:
   until it has an explicit source invalidation; this is deliberate because
   keyword or single-model guesses must not silently delete retained history.
   Semantic supersession remains a real-provider acceptance concern.
+* Semantic task intake is now implemented in the current worktree. Every
+  non-empty request in a group with an execution-capable member begins with one
+  durable intake owner, which must declare a structured `task_contract` before
+  normal delegation: `mode`, objective,
+  workspace and verification requirements, deliverables, completion criteria,
+  and next action. The execution state, no-progress guard, and stagnation
+  recovery consume that durable contract rather than request-language keyword
+  matching. A read-only action no longer implies that the task must mutate the
+  workspace. The old `isDeliveryTask` helper remains deprecated only for
+  external compatibility; production orchestration no longer imports it.
+* A local HTTP/SSE regression now exercises the real `server.js` API path with
+  a non-English request, a model-declared delivery contract, one `builder`
+  owner, a real `workspace_edit`, and a real local verification command. It
+  asserts that no second member writes the artifact and that TaskRun records
+  the evidence. The provider used by this test is a deterministic local
+  protocol fixture, so this is local protocol evidence, not real-provider or
+  real-user acceptance.
 
 Still open before the real-provider release gate:
 

@@ -18,12 +18,13 @@ const workspaceGroup = {
   }
 };
 
-test("delivery tasks choose one highest-permission executor", () => {
+test("every non-empty task starts with one highest-permission intake owner", () => {
   const state = createExecutionState({ question: "Build a real project.", agents, workspaceGroup });
   assert.equal(state.active, true);
   assert.equal(state.executorId, "builder");
   assert.deepEqual(selectExecutionAgents(state, agents).map((agent) => agent.id), ["builder"]);
-  assert.match(executionInstruction(state, agents[1]), /primary executor/);
+  assert.equal(state.phase, "intake");
+  assert.match(executionInstruction(state, agents[1]), /Task intake owner/);
 });
 
 test("explicit rerun and verification requests remain delivery work after recovery", () => {
@@ -34,7 +35,57 @@ test("explicit rerun and verification requests remain delivery work after recove
   const state = createExecutionState({ question: english, agents, workspaceGroup });
   assert.equal(state.active, true);
   assert.equal(state.executorId, "builder");
-  assert.match(state.nextAction, /real workspace mutation/);
+  assert.match(state.nextAction, /task contract/);
+});
+
+test("a semantic task contract, rather than task wording, activates delivery execution", () => {
+  const state = createExecutionState({ question: "Сделай это и положи результат туда, где я попросил.", agents, workspaceGroup });
+  advanceExecutionState({
+    state,
+    session: { toolExecutionResults: [], fileOperationExecutionResults: [] },
+    agent: agents[1],
+    response: {
+      status: "speak",
+      task_contract: {
+        mode: "delivery",
+        objective: "Produce the requested result.",
+        requires_workspace: true,
+        requires_verification: true,
+        deliverables: ["requested output"],
+        completion_criteria: ["verify the output"],
+        next_action: "Create the required workspace output."
+      }
+    }
+  });
+  assert.equal(state.active, true);
+  assert.equal(state.phase, "inspect");
+  assert.equal(state.taskContract.mode, "delivery");
+  assert.equal(state.taskContract.requiresWorkspace, true);
+  assert.equal(state.taskContract.source, "model_task_contract");
+});
+
+test("a discussion contract releases the normal group without pretending it is delivery", () => {
+  const state = createExecutionState({ question: "この設計の長所と短所を説明してください。", agents, workspaceGroup });
+  advanceExecutionState({
+    state,
+    session: { toolExecutionResults: [], fileOperationExecutionResults: [] },
+    agent: agents[1],
+    response: {
+      status: "speak",
+      task_contract: {
+        mode: "discussion",
+        objective: "Explain the design tradeoffs.",
+        requires_workspace: false,
+        requires_verification: false,
+        deliverables: [],
+        completion_criteria: ["answer the question"],
+        next_action: "Discuss the tradeoffs."
+      }
+    }
+  });
+  assert.equal(state.active, false);
+  assert.equal(state.phase, "discussion");
+  assert.equal(state.taskContract.mode, "discussion");
 });
 
 test("Chinese report requests are delivery work owned by one full-permission executor", () => {

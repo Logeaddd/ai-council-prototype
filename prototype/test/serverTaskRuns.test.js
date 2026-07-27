@@ -44,14 +44,18 @@ test("real server HTTP/SSE flow exposes durable TaskRun evidence from real local
   try {
     await waitForServer(port, child, () => output);
     const events = await requestSse(port, "/api/council/events", {
-      question: "Create a small workspace document and verify it with a real command.",
+      question: "指定された作業領域の成果物を作成し、実際のコマンドで検証してください。",
       workspaceGroupPath: groupPath,
       runtimeGroup: runtimeGroup(provider.apiBaseUrl)
     });
     const taskEvent = events.find((event) => event.type === "task_run" && event.taskRun?.id);
     assert.ok(taskEvent, "SSE must publish a TaskRun update");
-    assert.equal(events.some((event) => event.type === "tool_success" && event.tool === "workspace_edit"), true);
-    assert.equal(events.some((event) => event.type === "tool_success" && event.tool === "run_code"), true);
+    const workspaceWrites = events.filter((event) => event.type === "tool_success" && event.tool === "workspace_edit");
+    const verifications = events.filter((event) => event.type === "tool_success" && event.tool === "run_code");
+    assert.equal(workspaceWrites.length, 1);
+    assert.equal(workspaceWrites[0].agentId, "builder");
+    assert.equal(verifications.length, 1);
+    assert.equal(verifications[0].agentId, "builder");
     assert.equal(fs.readFileSync(path.join(groupPath, "shared", "sse.txt"), "utf8"), "SSE_RUNTIME_VERIFIED\n");
 
     const encodedGroupPath = encodeURIComponent(groupPath);
@@ -196,6 +200,15 @@ function writeDocument() {
   return {
     status: "speak",
     argument: "Write the workspace document.",
+    task_contract: {
+      mode: "delivery",
+      objective: "Create and verify the requested local workspace document.",
+      requires_workspace: true,
+      requires_verification: true,
+      deliverables: ["shared/sse.txt"],
+      completion_criteria: ["The document exists with the requested content.", "A local command verifies that content."],
+      next_action: "Write the document, then verify it with a local command."
+    },
     tool_requests: [{ tool: "workspace_edit", action: "write", path: "shared/sse.txt", code: "SSE_RUNTIME_VERIFIED\n", reason: "Create the requested workspace document." }],
     objections: [],
     memory_candidates: []

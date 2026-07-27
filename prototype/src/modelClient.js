@@ -685,6 +685,7 @@ async function callMockAgent(agent, messages, options) {
     argument: "A CLI-first prototype is the fastest way to validate configuration, discussion, consensus, and memory queues.",
     objections: [],
     suggested_revision: "Keep the first version local and inspectable.",
+    ...(round === 1 && agent.mockTaskContract ? { task_contract: agent.mockTaskContract } : {}),
     confidence: 0.84,
     memory_candidates: ["P0 should stay CLI-first until the core loop works."]
   }), options);

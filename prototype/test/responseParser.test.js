@@ -63,6 +63,32 @@ test("round response parser preserves file operation proposals without executing
   assert.equal(parsed.file_operations[0].path, "src/output.js");
 });
 
+test("round response parser normalizes a semantic task contract", () => {
+  const parsed = parseRoundResponse(JSON.stringify({
+    status: "speak",
+    argument: "I will carry out the requested work.",
+    task_contract: {
+      mode: "delivery",
+      objective: "Create the requested local output.",
+      requiresWorkspace: true,
+      requires_verification: true,
+      deliverables: ["shared/result.txt", "", 7],
+      completionCriteria: ["file exists", "content is verified"],
+      nextAction: "Write the file and run the check."
+    }
+  }));
+
+  assert.deepEqual(parsed.task_contract, {
+    mode: "delivery",
+    objective: "Create the requested local output.",
+    requires_workspace: true,
+    requires_verification: true,
+    deliverables: ["shared/result.txt"],
+    completion_criteria: ["file exists", "content is verified"],
+    next_action: "Write the file and run the check."
+  });
+});
+
 test("round response parser preserves unavailable status", () => {
   const parsed = parseRoundResponse(JSON.stringify({
     status: "unavailable",

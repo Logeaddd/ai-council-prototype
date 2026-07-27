@@ -14,6 +14,8 @@ export function createExecutionState({ question, agents = [], workspaceGroup, pr
         executorId: executor.id,
         executorName: executor.name,
         ownership,
+        taskContract: normalizeTaskContract(previousState.taskContract)
+          || (previousState.phase && previousState.phase !== "intake" ? inferredLegacyDeliveryContract(previousState) : undefined),
         taskQuestion: String(previousState.taskQuestion || question || ""),
         processedToolResults: 0,
         processedFileResults: 0,
@@ -22,7 +24,7 @@ export function createExecutionState({ question, agents = [], workspaceGroup, pr
       };
     }
   }
-  if (!isDeliveryTask(question)) return { active: false };
+  if (!String(question || "").trim()) return { active: false };
   const executor = chooseExecutor(agents, workspaceGroup);
   if (!executor) return { active: false };
   return {
@@ -31,8 +33,10 @@ export function createExecutionState({ question, agents = [], workspaceGroup, pr
     executorName: executor.name,
     ownership: initialOwnership(executor),
     taskQuestion: String(question || ""),
-    phase: "inspect",
-    nextAction: "Inspect only the minimum files required, then perform a real workspace mutation.",
+    phase: "intake",
+    taskContract: undefined,
+    intakeAttempts: 0,
+    nextAction: "Interpret the user request and record a task contract before delegating or repeating work. If it is delivery work, start the next material action; if it is discussion, release the group to discuss it.",
     checkpointVersion: 0,
     reviewedCheckpointVersion: 0,
     processedToolResults: 0,
@@ -67,11 +71,21 @@ export function selectExecutionAgents(state, agents = []) {
 export function executionInstruction(state, agent) {
   if (!state?.active) return "";
   if (agent.id === state.executorId) {
+    if (state.phase === "intake") {
+      return [
+        "[Task intake owner] You alone own the initial interpretation of this task. Read the user's actual meaning in any language and return a valid task_contract in this response.",
+        "Do not use keywords, file extensions, or role names as the classifier. Set mode=delivery only when work must be carried out; set mode=discussion only when the user wants analysis, advice, or an answer without carrying out work.",
+        "For delivery, state the requested outputs and mechanical completion criteria, then begin a real material action when one is available. For discussion, give a substantive answer; the group will be released after this contract is recorded."
+      ].join("\n");
+    }
+    const requiresWorkspace = state.taskContract?.requiresWorkspace === true;
     return [
       `[Execution owner] You are the primary executor for this delivery task. Current phase: ${state.phase}.`,
       `Required next action: ${state.nextAction}`,
       formatCheckpointEvidence(state.checkpointEvidence),
-      "Do not restart broad planning. Continue from the recorded checkpoint and use a real file, command, build, or test action now.",
+      requiresWorkspace
+        ? "Do not restart broad planning. Continue from the recorded checkpoint and use a real file, command, build, or test action now."
+        : "Do not restart broad planning. Continue from the recorded checkpoint and take the recorded material action now.",
       state.lastError ? `Last verification error: ${state.lastError}` : ""
     ].filter(Boolean).join("\n");
   }
@@ -107,6 +121,11 @@ export function advanceExecutionState({ state, session, agent, groupPath, questi
       }
     }
     return state;
+  }
+
+  if (state.phase === "intake") {
+    const intake = applyTaskIntake(state, response, session);
+    if (!intake.delivery) return state;
   }
 
   const toolResults = (session.toolExecutionResults || []).slice(state.processedToolResults);
@@ -172,6 +191,14 @@ export function advanceExecutionState({ state, session, agent, groupPath, questi
     return state;
   }
 
+  if (canCompleteNonWorkspaceDelivery(state, response)) {
+    state.phase = "complete";
+    state.lastAction = "non_workspace_delivery_complete";
+    state.lastError = "";
+    state.nextAction = "The declared non-workspace delivery has completed its recorded tool work; proceed to final synthesis.";
+    return state;
+  }
+
   const observations = toolResults.filter((item) => ["read_file", "list_directory", "search_files", "grep_content"].includes(item.tool));
   state.noActionCalls += 1;
   state.lastAction = observations.length ? "workspace_observed" : "no_real_action";
@@ -181,6 +208,142 @@ export function advanceExecutionState({ state, session, agent, groupPath, questi
   return state;
 }
 
+export function isDeliveryExecution(state) {
+  return Boolean(
+    state?.active
+    && (state.taskContract?.mode === "delivery" || (state.phase && !["intake", "discussion"].includes(state.phase)))
+  );
+}
+
+export function requiresWorkspaceExecution(state) {
+  return isDeliveryExecution(state) && state.taskContract?.requiresWorkspace === true;
+}
+
+function applyTaskIntake(state, response = {}, session = {}) {
+  const observedContract = inferContractFromObservedAction(response, session);
+  if (response.status == null && !observedContract) return { delivery: false };
+  const contract = normalizeTaskContract(response.task_contract) || observedContract;
+  if (!contract) {
+    fallbackTaskIntakeToDiscussion(state);
+    return { delivery: false };
+  }
+  state.taskContract = contract;
+  if (contract.mode === "discussion") {
+    state.active = false;
+    state.phase = "discussion";
+    state.lastAction = "task_contract:discussion";
+    state.lastError = "";
+    state.nextAction = "Task intake recorded a discussion contract; normal group discussion may proceed.";
+    return { delivery: false };
+  }
+  state.phase = "inspect";
+  state.lastAction = "task_contract:delivery";
+  state.lastError = "";
+  state.nextAction = contract.nextAction
+    || (contract.requiresWorkspace
+      ? "Inspect only the minimum facts required, then perform the first real workspace mutation or command."
+      : "Perform the first material action required by the recorded task contract.");
+  return { delivery: true };
+}
+
+function fallbackTaskIntakeToDiscussion(state) {
+  state.intakeAttempts = Number(state.intakeAttempts || 0) + 1;
+  state.taskContract = {
+    mode: "discussion",
+    objective: "",
+    requiresWorkspace: false,
+    requiresVerification: false,
+    deliverables: [],
+    completionCriteria: [],
+    nextAction: "",
+    source: "missing_task_contract_fallback"
+  };
+  state.active = false;
+  state.phase = "discussion";
+  state.lastAction = "task_contract_missing_fallback";
+  state.nextAction = "The intake response did not declare a task contract or perform an action, so normal group discussion may proceed. A later real action will still be recorded as execution evidence.";
+}
+
+function normalizeTaskContract(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const mode = String(value.mode || "").trim().toLowerCase();
+  if (mode !== "delivery" && mode !== "discussion") return undefined;
+  return {
+    mode,
+    objective: String(value.objective || "").trim().slice(0, 1200),
+    requiresWorkspace: Boolean(value.requires_workspace ?? value.requiresWorkspace),
+    requiresVerification: Boolean(value.requires_verification ?? value.requiresVerification),
+    deliverables: normalizeContractTextList(value.deliverables),
+    completionCriteria: normalizeContractTextList(value.completion_criteria ?? value.completionCriteria),
+    nextAction: String(value.next_action ?? value.nextAction ?? "").trim().slice(0, 1200),
+    source: String(value.source || "model_task_contract")
+  };
+}
+
+function inferContractFromObservedAction(response = {}, session = {}) {
+  const requests = Array.isArray(response.tool_requests) ? response.tool_requests : [];
+  const fileOperations = Array.isArray(response.file_operations) ? response.file_operations : [];
+  const toolResults = Array.isArray(session.toolExecutionResults) ? session.toolExecutionResults : [];
+  const fileResults = Array.isArray(session.fileOperationExecutionResults) ? session.fileOperationExecutionResults : [];
+  if (!requests.length && !fileOperations.length && !toolResults.length && !fileResults.length) return undefined;
+  const workspaceMutationTools = new Set([
+    "execute_command", "run_code", "install_package", "provision_tool",
+    "create_archive", "extract_archive", "git_operation", "database_query"
+  ]);
+  return {
+    mode: "delivery",
+    objective: "",
+    requiresWorkspace: fileOperations.some(isWorkspaceMutation)
+      || fileResults.some(isWorkspaceMutation)
+      || requests.some((request) => isWorkspaceMutation(request) || workspaceMutationTools.has(String(request?.tool || "")))
+      || toolResults.some((result) => isWorkspaceMutation(result) || workspaceMutationTools.has(String(result?.tool || ""))),
+    requiresVerification: requests.some((request) => ["run_tests", "run_code"].includes(String(request?.tool || "")))
+      || toolResults.some((result) => ["run_tests", "run_code"].includes(String(result?.tool || ""))),
+    deliverables: [],
+    completionCriteria: [],
+    nextAction: "",
+    source: "observed_first_action"
+  };
+}
+
+function canCompleteNonWorkspaceDelivery(state, response = {}) {
+  return state.taskContract?.mode === "delivery"
+    && state.taskContract.requiresWorkspace !== true
+    && state.taskContract.requiresVerification !== true
+    && response.status === "speak"
+    && !(response.tool_requests || []).length
+    && !(response.file_operations || []).length
+    && state.checkpointEvidence.length > 0;
+}
+
+function isWorkspaceMutation(value = {}) {
+  const action = String(value.action || value.op || "").toLowerCase();
+  return String(value.tool || "") === "workspace_edit"
+    && ["write", "append", "replace", "move", "delete", "mkdir"].includes(action);
+}
+
+function inferredLegacyDeliveryContract(state = {}) {
+  return {
+    mode: "delivery",
+    objective: "",
+    requiresWorkspace: true,
+    requiresVerification: false,
+    deliverables: [],
+    completionCriteria: [],
+    nextAction: String(state.nextAction || ""),
+    source: "legacy_execution_state"
+  };
+}
+
+function normalizeContractTextList(value) {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item) => typeof item === "string" && item.trim()).map((item) => item.trim().slice(0, 600)).slice(0, 12);
+}
+
+/**
+ * @deprecated Compatibility-only helper. Runtime orchestration must use the
+ * intake owner's semantic task_contract and real execution evidence instead.
+ */
 export function isDeliveryTask(question) {
   const text = String(question || "");
   const directive = taskDirectiveText(text);
