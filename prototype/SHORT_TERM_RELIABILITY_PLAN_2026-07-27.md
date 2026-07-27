@@ -225,6 +225,11 @@ Completed on 2026-07-27:
   guessing. Focused persistence/resume tests validate the checkpoint survives
   a write/read cycle and recreates the same delivery state. This is local
   recovery evidence, not a real Provider campaign pass.
+* Delivery-owner follow-up instructions now repeat the persisted objective,
+  requested deliverables, mechanical completion criteria, and workspace/
+  verification requirements alongside the current phase and next action. This
+  makes the durable contract operational during long tool loops instead of
+  leaving the owner with an isolated next-action reminder.
 
 Still open before the real-provider release gate:
 

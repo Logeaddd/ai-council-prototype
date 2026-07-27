@@ -81,6 +81,7 @@ export function executionInstruction(state, agent) {
     const requiresWorkspace = state.taskContract?.requiresWorkspace === true;
     return [
       `[Execution owner] You are the primary executor for this delivery task. Current phase: ${state.phase}.`,
+      formatTaskContract(state.taskContract),
       `Required next action: ${state.nextAction}`,
       formatCheckpointEvidence(state.checkpointEvidence),
       requiresWorkspace
@@ -340,6 +341,19 @@ function inferredLegacyDeliveryContract(state = {}) {
 function normalizeContractTextList(value) {
   if (!Array.isArray(value)) return [];
   return value.filter((item) => typeof item === "string" && item.trim()).map((item) => item.trim().slice(0, 600)).slice(0, 12);
+}
+
+function formatTaskContract(contract) {
+  if (!contract || contract.mode !== "delivery") return "";
+  const outputs = contract.deliverables?.length ? contract.deliverables.join("; ") : "none recorded";
+  const criteria = contract.completionCriteria?.length ? contract.completionCriteria.join("; ") : "none recorded";
+  return [
+    "[Recorded task contract]",
+    `Objective: ${contract.objective || "not recorded"}`,
+    `Deliverables: ${outputs}`,
+    `Completion criteria: ${criteria}`,
+    `Workspace required: ${contract.requiresWorkspace ? "yes" : "no"}; verification required: ${contract.requiresVerification ? "yes" : "no"}.`
+  ].join("\n");
 }
 
 /**

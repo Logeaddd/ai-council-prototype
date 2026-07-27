@@ -62,6 +62,11 @@ test("a semantic task contract, rather than task wording, activates delivery exe
   assert.equal(state.taskContract.mode, "delivery");
   assert.equal(state.taskContract.requiresWorkspace, true);
   assert.equal(state.taskContract.source, "model_task_contract");
+  const instruction = executionInstruction(state, agents[1]);
+  assert.match(instruction, /Recorded task contract/);
+  assert.match(instruction, /Produce the requested result/);
+  assert.match(instruction, /requested output/);
+  assert.match(instruction, /verify the output/);
 });
 
 test("a discussion contract releases the normal group without pretending it is delivery", () => {
