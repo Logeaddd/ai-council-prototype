@@ -217,7 +217,7 @@ export async function runSeededRealUserCampaign(options = {}) {
           throw harnessFailure("campaign_interrupt_did_not_reach_action", "Campaign interruption did not reach the requested activity boundary.");
         }
         const stop = await stopCouncilRun(server.port, groupPath, server.localApiToken);
-        assertCampaignInterruptionStopped(stop, latestSessionGuardStopReason(groupPath, stage.prompt || "continue"));
+        assertCampaignInterruptionStopped(stop, latestSessionGuardStopReason(groupPath, stage.prompt || "continue"), readCampaignBudgetLedger(groupPath));
         const interruptedSession = await waitForSession(server.port, groupPath, (session) => (
           session.status === "interrupted" && !interruptedSessions.some((item) => item.id === session.id)
         ), server.localApiToken);
@@ -591,12 +591,21 @@ async function stopCouncilRun(port, groupPath, localApiToken) {
   return postJson(port, "/api/council/stop", { workspaceGroupPath: groupPath }, localApiToken);
 }
 
-export function assertCampaignInterruptionStopped(result = {}, guardStopReason = "") {
+export function assertCampaignInterruptionStopped(result = {}, guardStopReason = "", budgetLedger = undefined) {
   if (result?.stopped) return;
-  if (guardStopReason === "model_call_budget_exhausted") {
+  if (guardStopReason === "model_call_budget_exhausted" || campaignBudgetExhausted(budgetLedger)) {
     throw harnessFailure("campaign_budget_exhausted_before_interrupt", "The campaign payment guard was exhausted before the requested interruption boundary could be stopped.");
   }
   throw harnessFailure("campaign_stop_failed", "The active run could not be stopped after its observer disconnected.", true);
+}
+
+function campaignBudgetExhausted(ledger = {}) {
+  const calls = Number(ledger?.modelCalls);
+  const limit = Number(ledger?.maxModelCalls);
+  const reserved = Number(ledger?.reservedCostUsd);
+  const costLimit = Number(ledger?.maxCostUsd);
+  return (Number.isFinite(calls) && Number.isFinite(limit) && limit > 0 && calls >= limit)
+    || (Number.isFinite(reserved) && Number.isFinite(costLimit) && costLimit > 0 && reserved >= costLimit);
 }
 
 function compactCampaignEvent(stage, event) {

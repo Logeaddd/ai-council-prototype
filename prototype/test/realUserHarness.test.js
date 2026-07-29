@@ -13,6 +13,10 @@ test("campaign interruption reports an exhausted payment guard rather than a fal
     (error) => error?.code === "campaign_budget_exhausted_before_interrupt"
   );
   assert.throws(
+    () => assertCampaignInterruptionStopped({ stopped: false }, "", { modelCalls: 120, maxModelCalls: 120, reservedCostUsd: 29.7, maxCostUsd: 30 }),
+    (error) => error?.code === "campaign_budget_exhausted_before_interrupt"
+  );
+  assert.throws(
     () => assertCampaignInterruptionStopped({ stopped: false }, ""),
     (error) => error?.code === "campaign_stop_failed"
   );
