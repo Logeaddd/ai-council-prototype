@@ -180,6 +180,7 @@ const PROPERTY_DEFINITIONS = {
   expectedEvidence: { type: "array", minItems: 1, items: NON_EMPTY_STRING, description: "Concrete evidence the contributor must hand back." },
   allowedTools: STRING_LIST,
   allowWorkspaceMutation: BOOLEAN,
+  allowRuntimeMutation: { ...BOOLEAN, description: "For an unblocker only: allow managed package, runtime, Skill, or MCP acquisition without allowing project-output mutation." },
   allowedPaths: STRING_LIST,
   taskContract: TASK_CONTRACT
 };

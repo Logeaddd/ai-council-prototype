@@ -1132,7 +1132,11 @@ function delegationScopeViolation(request, delegation) {
   if (!allowedTools.has(request.tool)) {
     return `The owner delegated only these tools to this contributor: ${[...allowedTools].join(", ") || "none"}.`;
   }
-  if (!delegatedMutationRequest(request)) return "";
+  if (delegatedRuntimeMutationRequest(request)) {
+    if (delegation.allowRuntimeMutation === true) return "";
+    return "This contributor has no runtime-acquisition delegation. Return evidence to the owner instead of installing or enabling capabilities.";
+  }
+  if (!delegatedWorkspaceMutationRequest(request)) return "";
   if (!delegation.allowWorkspaceMutation) {
     return "This contributor has no workspace-mutation delegation. Return research evidence to the owner instead of changing outputs.";
   }
@@ -1142,8 +1146,12 @@ function delegationScopeViolation(request, delegation) {
   return "";
 }
 
-function delegatedMutationRequest(request) {
-  if (["workspace_edit", "execute_command", "run_code", "install_package", "provision_tool", "run_tests", "git_operation", "create_archive", "extract_archive", "mcp_install_npm", "mcp_uninstall"].includes(request.tool)) return true;
+function delegatedRuntimeMutationRequest(request) {
+  return ["install_package", "provision_tool", "skill_install", "skill_enable", "skill_disable", "skill_remove", "mcp_install_npm", "mcp_uninstall"].includes(request.tool);
+}
+
+function delegatedWorkspaceMutationRequest(request) {
+  if (["workspace_edit", "execute_command", "run_code", "run_tests", "git_operation", "create_archive", "extract_archive"].includes(request.tool)) return true;
   if (request.tool === "database_query") return String(request.mode || "query").toLowerCase() !== "query" || Boolean(request.create);
   if (request.tool === "process_control") return ["input", "resize", "stop", "restart"].includes(String(request.action || "").toLowerCase());
   return false;
@@ -1243,6 +1251,7 @@ function normalizeToolRequest(item, index) {
     expectedEvidence: arrayOfStrings(item.expectedEvidence || item.expected_evidence),
     allowedTools: arrayOfStrings(item.allowedTools || item.allowed_tools),
     allowWorkspaceMutation: Boolean(item.allowWorkspaceMutation || item.allow_workspace_mutation),
+    allowRuntimeMutation: Boolean(item.allowRuntimeMutation || item.allow_runtime_mutation),
     allowedPaths: arrayOfStrings(item.allowedPaths || item.allowed_paths),
     taskContract: objectField(item.taskContract || item.task_contract),
     mode: stringField(item.mode),

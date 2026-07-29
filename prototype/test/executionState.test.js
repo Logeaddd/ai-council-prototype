@@ -223,6 +223,49 @@ test("a bounded review delegation is scheduled as durable work before ordinary c
   assert.equal(collaborationRequirementStatus(state).pending, false);
 });
 
+test("an unblocker can receive managed runtime authority without receiving workspace write authority", () => {
+  const owner = { id: "owner", name: "Owner", enabled: true };
+  const unblocker = { id: "unblocker", name: "Unblocker", enabled: true };
+  const state = createExecutionState({
+    question: "Create a report after the missing runtime is acquired.",
+    agents: [owner, unblocker],
+    workspaceGroup: { permissions: { defaultTier: "text", seatTiers: { owner: "full", unblocker: "full" } } }
+  });
+  const session = { toolExecutionResults: [], fileOperationExecutionResults: [], groupSnapshot: { agents: [owner, unblocker] } };
+  advanceExecutionState({
+    state,
+    session,
+    agent: owner,
+    response: {
+      status: "speak",
+      task_contract: {
+        mode: "delivery",
+        objective: "Create the report after acquiring its missing runtime.",
+        requires_workspace: true,
+        requires_verification: true,
+        deliverables: ["shared/report.pdf"],
+        completion_criteria: ["Use the acquired runtime.", "Verify the report."],
+        next_action: "Delegate the runtime acquisition."
+      },
+      task_delegations: [markNativeModelSource({
+        type: "unblocker",
+        assignee_id: "unblocker",
+        task: "Acquire the missing report runtime and return its verified command.",
+        expected_evidence: ["Verified runtime command"],
+        allowed_tools: ["provision_tool"],
+        allow_workspace_mutation: false,
+        allow_runtime_mutation: true
+      })]
+    }
+  });
+
+  const delegation = state.ownership.delegations.find((item) => item.type === "unblocker");
+  assert.equal(delegation.allowRuntimeMutation, true);
+  assert.equal(delegation.allowWorkspaceMutation, false);
+  assert.match(executionInstruction(state, unblocker), /no workspace-mutation delegation/i);
+  assert.match(executionInstruction(state, unblocker), /managed runtime, package, Skill, or MCP capability/i);
+});
+
 test("a delegation handoff cannot reuse evidence from before that delegation existed", () => {
   const owner = { id: "owner", name: "Owner", enabled: true };
   const researcher = { id: "researcher", name: "Researcher", enabled: true };

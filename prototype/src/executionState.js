@@ -110,7 +110,9 @@ export function executionInstruction(state, agent) {
       `Allowed tools: ${workDelegation.allowedTools.join(", ") || "read-only default"}.`,
       workDelegation.allowWorkspaceMutation
         ? `You may mutate only these explicitly delegated paths: ${workDelegation.allowedPaths.join(", ")}. Do not modify any final deliverable outside them.`
-        : "You have no workspace-mutation delegation. Do not write, move, delete, build, package, or otherwise mutate project outputs.",
+        : workDelegation.allowRuntimeMutation
+          ? "You have no workspace-mutation delegation. You may acquire only the explicitly allowed managed runtime, package, Skill, or MCP capability; do not run arbitrary commands or modify project outputs."
+          : "You have no workspace-mutation delegation. Do not write, move, delete, build, package, or otherwise mutate project outputs.",
       "Do not restart the whole task, do not independently finalize it, and do not delegate further. Return delegation_handoff with this exact delegation_id, a concise result, and concrete evidence for the owner."
     ].filter(Boolean).join("\n");
   }
@@ -948,7 +950,8 @@ function normalizeOwnership(value, state = {}) {
 
 const WORK_DELEGATION_TYPES = new Set(["research", "implementation", "review", "unblocker"]);
 const DEFAULT_RESEARCH_TOOLS = ["web_search", "fetch_url", "api_request", "list_directory", "read_file", "search_files", "grep_content", "search_context", "load_context"];
-const DEFAULT_UNBLOCKER_TOOLS = [...DEFAULT_RESEARCH_TOOLS, "read_process_status", "mcp_list_tools"];
+const DEFAULT_UNBLOCKER_TOOLS = [...DEFAULT_RESEARCH_TOOLS, "read_process_status", "skill_list", "skill_search", "mcp_search_npm", "mcp_list_tools"];
+const DEFAULT_UNBLOCKER_RUNTIME_TOOLS = [...DEFAULT_UNBLOCKER_TOOLS, "install_package", "provision_tool", "skill_install", "skill_enable", "mcp_install_npm"];
 
 export function collaborationRequirementStatus(state = {}) {
   const requirement = state?.taskContract?.collaboration || {};
@@ -1039,14 +1042,15 @@ function registerOwnerDelegations(state, response = {}, agents = []) {
     const task = String(request?.task || request?.question || "").trim().slice(0, 1200);
     const expectedEvidence = normalizeContractTextList(request?.expected_evidence ?? request?.expectedEvidence).slice(0, 8);
     const allowWorkspaceMutation = Boolean(request?.allow_workspace_mutation ?? request?.allowWorkspaceMutation);
+    const allowRuntimeMutation = Boolean(request?.allow_runtime_mutation ?? request?.allowRuntimeMutation);
     const allowedPaths = normalizeDelegationPaths(request?.allowed_paths ?? request?.allowedPaths);
-    const allowedTools = normalizeDelegationTools(request?.allowed_tools ?? request?.allowedTools, type, allowWorkspaceMutation);
+    const allowedTools = normalizeDelegationTools(request?.allowed_tools ?? request?.allowedTools, type, allowWorkspaceMutation, allowRuntimeMutation);
     const assignee = assignees.get(assigneeId);
-    const key = delegationRequestKey({ type, assigneeId, task, expectedEvidence, allowedTools, allowedPaths, allowWorkspaceMutation });
+    const key = delegationRequestKey({ type, assigneeId, task, expectedEvidence, allowedTools, allowedPaths, allowWorkspaceMutation, allowRuntimeMutation });
     if (registered.has(key)) continue;
     registered.add(key);
     const native = hasNativeModelSource(request);
-    if (!WORK_DELEGATION_TYPES.has(type) || !assigneeId || assigneeId === state.executorId || !task || !expectedEvidence.length || !assignee || (allowWorkspaceMutation && !allowedPaths.length)) {
+    if (!WORK_DELEGATION_TYPES.has(type) || !assigneeId || assigneeId === state.executorId || !task || !expectedEvidence.length || !assignee || (allowWorkspaceMutation && !allowedPaths.length) || (allowRuntimeMutation && type !== "unblocker")) {
       ownership.delegations.push({
         id: `delegation:rejected:${state.checkpointVersion}:${++state.delegationSequence}`,
         type: WORK_DELEGATION_TYPES.has(type) ? type : "invalid",
@@ -1082,6 +1086,7 @@ function registerOwnerDelegations(state, response = {}, agents = []) {
       allowedTools,
       allowedPaths,
       allowWorkspaceMutation,
+      allowRuntimeMutation,
       native,
       status: "pending",
       result: "",
@@ -1106,7 +1111,8 @@ function delegationRequestKey(value = {}) {
     expectedEvidence: value.expectedEvidence || [],
     allowedTools: value.allowedTools || [],
     allowedPaths: value.allowedPaths || [],
-    allowWorkspaceMutation: Boolean(value.allowWorkspaceMutation)
+    allowWorkspaceMutation: Boolean(value.allowWorkspaceMutation),
+    allowRuntimeMutation: Boolean(value.allowRuntimeMutation)
   });
 }
 
@@ -1196,11 +1202,11 @@ function uniqueDelegationEvidence(items = []) {
   }).slice(0, 16);
 }
 
-function normalizeDelegationTools(value, type, allowWorkspaceMutation) {
+function normalizeDelegationTools(value, type, allowWorkspaceMutation, allowRuntimeMutation) {
   const supplied = normalizeContractTextList(value).map((item) => item.toLowerCase().replace(/-/g, "_")).slice(0, 24);
   if (supplied.length) return supplied;
   if (type === "research" || type === "review") return DEFAULT_RESEARCH_TOOLS;
-  if (type === "unblocker") return DEFAULT_UNBLOCKER_TOOLS;
+  if (type === "unblocker") return allowRuntimeMutation ? DEFAULT_UNBLOCKER_RUNTIME_TOOLS : DEFAULT_UNBLOCKER_TOOLS;
   return allowWorkspaceMutation ? ["workspace_edit", "read_file", "list_directory", "search_files", "grep_content", "run_code", "run_tests"] : DEFAULT_RESEARCH_TOOLS;
 }
 

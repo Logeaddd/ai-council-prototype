@@ -474,6 +474,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
           expected_evidence: Array.isArray(request.expectedEvidence) ? request.expectedEvidence : [],
           allowed_tools: Array.isArray(request.allowedTools) ? request.allowedTools : [],
           allow_workspace_mutation: request.allowWorkspaceMutation === true,
+          allow_runtime_mutation: request.allowRuntimeMutation === true,
           allowed_paths: Array.isArray(request.allowedPaths) ? request.allowedPaths : []
         };
         if (!delegation.type || !delegation.assignee_id || !delegation.task || !delegation.expected_evidence.length) {

@@ -157,6 +157,34 @@ test("round response parser accepts a bounded review delegation without turning 
   assert.deepEqual(parsed.task_delegations[0].allowed_tools, ["read_file", "search_files"]);
 });
 
+test("round response parser permits managed runtime acquisition only for a bounded unblocker", () => {
+  const parsed = parseRoundResponse(JSON.stringify({
+    status: "speak",
+    task_delegations: [
+      {
+        type: "unblocker",
+        assignee_id: "unblocker",
+        task: "Acquire the missing document runtime.",
+        expected_evidence: ["Verified capability"],
+        allowed_tools: ["provision_tool"],
+        allow_runtime_mutation: true
+      },
+      {
+        type: "research",
+        assignee_id: "researcher",
+        task: "Try to acquire an unrelated runtime.",
+        expected_evidence: ["Should be rejected"],
+        allowed_tools: ["provision_tool"],
+        allow_runtime_mutation: true
+      }
+    ]
+  }));
+
+  assert.equal(parsed.task_delegations.length, 1);
+  assert.equal(parsed.task_delegations[0].type, "unblocker");
+  assert.equal(parsed.task_delegations[0].allow_runtime_mutation, true);
+});
+
 test("round response parser retains structured contributor handoff evidence instead of discarding it", () => {
   const parsed = parseRoundResponse(JSON.stringify({
     status: "speak",

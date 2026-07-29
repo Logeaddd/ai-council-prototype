@@ -1048,7 +1048,7 @@ function campaignUnblockerEvidenceItems(snapshot) {
   if (!isNativeTimestampedCampaignDelegation(delegation)) return [];
   const toolIds = campaignHandoffToolIds(delegation);
   if (!toolIds.size) return [];
-  const unblockerTools = new Set(["read_process_status", "process_control", "provision_tool", "install_package", "mcp_list_tools", "mcp_call", "mcp_install_npm"]);
+  const unblockerTools = new Set(["read_process_status", "process_control", "provision_tool", "install_package", "skill_install", "skill_enable", "mcp_list_tools", "mcp_call", "mcp_install_npm"]);
   return campaignSessionActionResults(snapshot.session).filter((item) => (
     toolIds.has(item?.id)
     && item?.source_agent_id === delegation.assigneeId

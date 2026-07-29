@@ -233,8 +233,10 @@ function normalizeTaskDelegations(value) {
         .slice(0, 24);
       const allowedPaths = normalizeStringArray(item.allowed_paths ?? item.allowedPaths).slice(0, 16);
       const allowWorkspaceMutation = Boolean(item.allow_workspace_mutation ?? item.allowWorkspaceMutation);
+      const allowRuntimeMutation = Boolean(item.allow_runtime_mutation ?? item.allowRuntimeMutation);
       if (!allowedTypes.has(type) || !assigneeId || !task || !expectedEvidence.length) return undefined;
       if (allowWorkspaceMutation && !allowedPaths.length) return undefined;
+      if (allowRuntimeMutation && type !== "unblocker") return undefined;
       return {
         type,
         assignee_id: assigneeId,
@@ -242,7 +244,8 @@ function normalizeTaskDelegations(value) {
         expected_evidence: expectedEvidence,
         allowed_tools: allowedTools,
         allowed_paths: allowedPaths,
-        allow_workspace_mutation: allowWorkspaceMutation
+        allow_workspace_mutation: allowWorkspaceMutation,
+        ...(allowRuntimeMutation ? { allow_runtime_mutation: true } : {})
       };
     })
     .filter(Boolean)

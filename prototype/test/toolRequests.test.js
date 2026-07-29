@@ -72,6 +72,41 @@ test("delegated contributors cannot write outside the owner's explicit tool and 
   assert.equal(fs.existsSync(path.join(tmp, "shared", "final.txt")), false);
 });
 
+test("a delegated unblocker needs explicit runtime authority before it can install a Skill", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-unblocker-runtime-scope-"));
+  const groupPath = path.join(tmp, "group");
+  fs.mkdirSync(groupPath, { recursive: true });
+  const request = {
+    tool: "skill_install",
+    skillMarkdown: "---\nname: unblocker-runtime-skill\ndescription: A local capability used only by the delegated unblocker test.\n---\n\n# Unblocker Runtime Skill\n",
+    reason: "Acquire the missing bounded capability."
+  };
+  const common = {
+    permissionTier: "full",
+    baseDir: tmp,
+    groupPath,
+    agent: { id: "unblocker", name: "Unblocker" },
+    delegation: {
+      id: "delegation:1:1:unblocker",
+      type: "unblocker",
+      allowedTools: ["skill_install"],
+      allowedPaths: [],
+      allowWorkspaceMutation: false
+    },
+    requests: [request]
+  };
+  const denied = await executeToolRequests(common);
+  const allowed = await executeToolRequests({
+    ...common,
+    delegation: { ...common.delegation, allowRuntimeMutation: true }
+  });
+
+  assert.equal(denied.rejected[0].code, "delegation_scope_denied");
+  assert.match(denied.rejected[0].error, /runtime-acquisition delegation/i);
+  assert.equal(allowed.results[0].status, "completed", JSON.stringify(allowed.results[0]));
+  assert.equal(allowed.results[0].result.ok, true);
+});
+
 test("repeated unchanged file observations are bounded across tool loops", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-repeat-observation-"));
   fs.writeFileSync(path.join(tmp, "build.gradle"), "plugins {}\n", "utf8");
