@@ -305,12 +305,16 @@ test("private chat is wired through the renderer and backend API", () => {
 });
 
 test("desktop private-draft probe exercises the real API and browser interaction path", () => {
+  const sidebar = read("renderer/components/council/groups-sidebar.tsx");
   const desktop = read("desktop/main.mjs");
   const probe = read("scripts/probe-electron-private-draft.mjs");
   const packageJson = read("package.json");
 
   assert.match(desktop, /AI_COUNCIL_E2E_PRIVATE_DRAFT_PROBE/);
-  assert.match(desktop, /\/api\/workspace\/init/);
+  assert.match(sidebar, /data-testid="create-group"/);
+  assert.match(desktop, /createGroupThroughUi/);
+  assert.match(desktop, /\[data-testid='create-group'\]/);
+  assert.doesNotMatch(desktop, /\/api\/workspace\/init/);
   assert.doesNotMatch(desktop, /ai-council-local-api-token/);
   assert.doesNotMatch(desktop, /__AI_COUNCIL_LOCAL_API_TOKEN__/);
   assert.match(desktop, /typeProbeText/);

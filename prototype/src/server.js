@@ -62,7 +62,7 @@ const port = Number(process.env.AI_COUNCIL_UI_PORT || 4317);
 const host = process.env.AI_COUNCIL_UI_HOST || "127.0.0.1";
 const dataDir = userDataDir(baseDir);
 const allowedWorkspaceRoot = path.resolve(process.env.AI_COUNCIL_WORKSPACE_ROOT || (process.env.AI_COUNCIL_DATA_DIR ? dataDir : baseDir));
-const defaultGroupsRoot = path.join(process.env.AI_COUNCIL_DATA_DIR ? dataDir : baseDir, "workspace-ui");
+const defaultGroupsRoot = path.join(allowedWorkspaceRoot, "workspace-ui");
 const harnessAllowsLocalHttp = process.env.AI_COUNCIL_HARNESS_ALLOW_LOCAL_HTTP === "1";
 const harnessCampaignBudget = readHarnessCampaignBudget(process.env);
 const execFileAsync = promisify(execFile);

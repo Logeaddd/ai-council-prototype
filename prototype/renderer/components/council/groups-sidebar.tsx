@@ -56,7 +56,11 @@ export function GroupsSidebar({
           </p>
           <p className="truncate text-[11px] text-muted-foreground">智能议会</p>
         </div>
-        <IconButton label="新建议会组" onClick={onCreateGroup}>
+        <IconButton
+          label="新建议会组"
+          onClick={onCreateGroup}
+          data-testid="create-group"
+        >
           <Plus className="size-4" />
         </IconButton>
       </div>

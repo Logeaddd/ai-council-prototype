@@ -273,36 +273,7 @@ async function runComposerDropProbe(window, filePath) {
 }
 
 async function runPrivateDraftProbe(window) {
-  const created = await window.webContents.executeJavaScript(`
-    (async () => {
-      async function request(path, body) {
-        const response = await fetch(path, {
-          method: body ? "POST" : "GET",
-          headers: {
-            ...(body ? { "Content-Type": "application/json" } : {}),
-          },
-          body: body ? JSON.stringify(body) : undefined,
-        });
-        const payload = await response.json();
-        if (!response.ok) throw new Error(payload.error || response.statusText);
-        return payload;
-      }
-      const health = await request("/api/health");
-      return request("/api/workspace/init", {
-        root: health.allowedWorkspaceRoot,
-        groupFolderName: "private-draft-probe",
-        members: [{
-          seatId: "probe_member",
-          displayName: "Probe Member",
-          model: "probe-model",
-          role: "ordinary",
-        }],
-      });
-    })()
-  `, true);
-  if (!created?.groupPath || !created?.seats?.length) throw new Error("probe_group_not_created");
-
-  await window.loadURL(window.webContents.getURL());
+  await createGroupThroughUi(window, "private_probe_group_not_ready");
   const groupDraft = "group draft stays in the group composer";
   const privateDraft = "private draft stays with the selected member";
   await window.webContents.executeJavaScript(`
@@ -411,37 +382,7 @@ async function runPrivateDraftProbe(window) {
 }
 
 async function runTranscriptFollowProbe(window) {
-  const memberCount = 10;
-  const created = await window.webContents.executeJavaScript(`
-    (async () => {
-      async function request(path, body) {
-        const response = await fetch(path, {
-          method: body ? "POST" : "GET",
-          headers: {
-            ...(body ? { "Content-Type": "application/json" } : {}),
-          },
-          body: body ? JSON.stringify(body) : undefined,
-        });
-        const payload = await response.json();
-        if (!response.ok) throw new Error(payload.error || response.statusText);
-        return payload;
-      }
-      const health = await request("/api/health");
-      return request("/api/workspace/init", {
-        root: health.allowedWorkspaceRoot,
-        groupFolderName: "transcript-follow-probe",
-        members: Array.from({ length: ${memberCount} }, (_, index) => ({
-          seatId: "probe_member_" + (index + 1),
-          displayName: "Probe Member " + (index + 1),
-          model: "mock-builder",
-          role: "ordinary",
-        })),
-      });
-    })()
-  `, true);
-  if (!created?.groupPath || created?.seats?.length !== memberCount) throw new Error("transcript_probe_group_not_created");
-
-  await window.loadURL(window.webContents.getURL());
+  await createGroupThroughUi(window, "transcript_probe_group_not_ready");
   await focusProbeElement(window, "[data-testid='group-chat-draft']", "transcript_probe_composer_missing");
   const question = `Transcript follow probe. ${"This deliberately creates visible transcript height. ".repeat(420)}`;
   await typeProbeText(window, "[data-testid='group-chat-draft']", question, "transcript_probe_text_input_failed");
@@ -530,6 +471,44 @@ async function runTranscriptFollowProbe(window) {
     atBottomDuringLiveUpdates,
     afterManualScroll,
   };
+}
+
+async function createGroupThroughUi(window, reason) {
+  return window.webContents.executeJavaScript(`
+    (async () => {
+      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const deadline = Date.now() + 10000;
+      let createButton = null;
+      while (Date.now() < deadline) {
+        createButton = document.querySelector("[data-testid='create-group']");
+        if (createButton && !createButton.disabled) break;
+        await sleep(50);
+      }
+      if (!createButton) throw new Error("create_group_button_missing");
+      createButton.click();
+
+      while (Date.now() < deadline) {
+        const composer = document.querySelector("[data-testid='group-chat-draft']");
+        const privateButton = document.querySelector("[data-testid='open-private-chat']");
+        if (composer?.dataset.draftReady === "true" && privateButton && !privateButton.disabled) {
+          return { ok: true };
+        }
+        await sleep(50);
+      }
+      const composer = document.querySelector("[data-testid='group-chat-draft']");
+      const privateButton = document.querySelector("[data-testid='open-private-chat']");
+      const groupLabels = [...document.querySelectorAll("nav button")]
+        .map((button) => button.textContent?.trim())
+        .filter(Boolean)
+        .slice(0, 12);
+      throw new Error(${JSON.stringify(reason)} + ":" + JSON.stringify({
+        composerDraftReady: composer?.dataset.draftReady,
+        privateButtonDisabled: privateButton?.disabled,
+        groupLabels,
+        visibleText: document.body.innerText.slice(0, 1200),
+      }));
+    })()
+  `, true);
 }
 
 async function focusProbeElement(window, selector, reason) {

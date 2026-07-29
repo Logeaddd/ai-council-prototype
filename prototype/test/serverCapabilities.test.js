@@ -151,6 +151,49 @@ test("local API uses a HttpOnly per-server cookie and rejects cross-origin or no
   }
 });
 
+test("default UI group creation stays inside an independently configured workspace root", async () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-server-workspace-root-"));
+  const dataDir = path.join(sandbox, "data");
+  const workspaceRoot = path.join(sandbox, "workspace");
+  const port = await availablePort();
+  const child = spawn(process.execPath, [path.join(root, "src", "server.js")], {
+    cwd: root,
+    env: {
+      ...process.env,
+      AI_COUNCIL_DATA_DIR: dataDir,
+      AI_COUNCIL_WORKSPACE_ROOT: workspaceRoot,
+      AI_COUNCIL_UI_PORT: String(port),
+      AI_COUNCIL_UI_HOST: "127.0.0.1",
+      AI_COUNCIL_LOCAL_API_TOKEN: localApiToken
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+    windowsHide: true
+  });
+  let output = "";
+  child.stdout.on("data", (chunk) => { output += chunk; });
+  child.stderr.on("data", (chunk) => { output += chunk; });
+
+  try {
+    await waitForServer(port, child, () => output);
+    const settings = await requestJson(port, "/api/app-settings", undefined, "GET");
+    assert.equal(settings.status, 200);
+    assert.equal(settings.body.groupsRoot, path.join(workspaceRoot, "workspace-ui"));
+
+    const created = await requestJson(port, "/api/workspace/init", {
+      root: settings.body.groupsRoot,
+      groupFolderName: "ui-created-group",
+      members: [{ displayName: "Builder", model: "mock-builder", role: "builder" }]
+    });
+    assert.equal(created.status, 200, JSON.stringify(created.body));
+    assert.equal(created.body.groupPath, path.join(workspaceRoot, "workspace-ui", "ui-created-group"));
+    assert.equal(fs.existsSync(path.join(created.body.groupPath, "group.json")), true);
+  } finally {
+    child.kill();
+    await waitForExit(child);
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+});
+
 async function availablePort() {
   const server = http.createServer();
   await new Promise((resolve, reject) => {
