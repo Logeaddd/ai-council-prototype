@@ -82,7 +82,7 @@ export function executionInstruction(state, agent) {
   if (agent.id === state.executorId) {
     if (state.phase === "intake") {
       return [
-        "[Task intake owner] You alone own the initial interpretation of this task. Read the user's actual meaning in any language and return a valid task_contract in this response.",
+        "[Task intake owner] You alone own the initial interpretation of this task. Read the user's actual meaning in any language and record one valid task contract before any other action.",
         "Do not use keywords, file extensions, or role names as the classifier. Set mode=delivery only when work must be carried out; set mode=discussion only when the user wants analysis, advice, or an answer without carrying out work.",
         "For delivery, state the requested outputs and mechanical completion criteria, then begin a real material action when one is available. For discussion, give a substantive answer; the group will be released after this contract is recorded."
       ].join("\n");
@@ -696,9 +696,9 @@ export function normalizeTaskContract(value) {
   const mode = String(value.mode || "").trim().toLowerCase();
   if (mode !== "delivery" && mode !== "discussion") return undefined;
   const objective = String(value.objective || "").trim().slice(0, 1200);
-  const deliverables = normalizeContractTextList(value.deliverables);
+  const deliverables = normalizeTaskContractTextList(value.deliverables);
   const artifacts = normalizeTaskContractArtifacts(value.artifacts);
-  const completionCriteria = normalizeContractTextList(value.completion_criteria ?? value.completionCriteria);
+  const completionCriteria = normalizeTaskContractTextList(value.completion_criteria ?? value.completionCriteria);
   const nextAction = String(value.next_action ?? value.nextAction ?? "").trim().slice(0, 1200);
   const hasWorkspaceRequirement = Object.hasOwn(value, "requires_workspace") || Object.hasOwn(value, "requiresWorkspace");
   const hasVerificationRequirement = Object.hasOwn(value, "requires_verification") || Object.hasOwn(value, "requiresVerification");
@@ -720,27 +720,43 @@ export function normalizeTaskContract(value) {
 }
 
 function normalizeTaskContractArtifacts(value) {
-  if (!Array.isArray(value)) return [];
+  const items = Array.isArray(value) ? value : value == null ? [] : [value];
   const seen = new Set();
   const artifacts = [];
-  for (const item of value) {
-    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
-    const artifactPath = String(item.path || item.file || "").trim().slice(0, 1200);
-    const rawExtension = String(item.extension || path.extname(artifactPath) || "").trim().toLowerCase();
+  for (const item of items) {
+    const source = item && typeof item === "object" && !Array.isArray(item) ? item : {};
+    const artifactPath = String(typeof item === "string" ? item : source.path || source.file || "").trim().slice(0, 1200);
+    const rawExtension = String(source.extension || source.format || path.extname(artifactPath) || "").trim().toLowerCase();
     const extension = rawExtension ? (rawExtension.startsWith(".") ? rawExtension : `.${rawExtension}`) : "";
     if (!extension) continue;
-    const minimumPages = Math.max(0, Math.floor(Number(item.minimumPages ?? item.minimum_pages) || 0));
-    const key = `${artifactPath.toLowerCase()}:${extension}:${Boolean(item.requiresImages ?? item.requires_images)}:${minimumPages}`;
+    const minimumPages = Math.max(0, Math.floor(Number(source.minimumPages ?? source.minimum_pages) || 0));
+    const requiresImages = Boolean(source.requiresImages ?? source.requires_images);
+    const key = `${artifactPath.toLowerCase()}:${extension}:${requiresImages}:${minimumPages}`;
     if (seen.has(key)) continue;
     seen.add(key);
     artifacts.push({
       ...(artifactPath ? { path: artifactPath } : {}),
       extension,
-      requiresImages: Boolean(item.requiresImages ?? item.requires_images),
+      requiresImages,
       minimumPages
     });
   }
   return artifacts.slice(0, 20);
+}
+
+// Providers do not all preserve the JSON-schema shape exactly. Normalize a
+// complete semantic contract instead of discarding it because a provider used
+// one string or a structured deliverable descriptor for the same fact.
+function normalizeTaskContractTextList(value) {
+  const items = Array.isArray(value) ? value : value == null ? [] : [value];
+  return items.map((item) => {
+    if (typeof item === "string") return item;
+    if (!item || typeof item !== "object" || Array.isArray(item)) return "";
+    return [
+      item.path || item.file || item.name || item.title,
+      item.requirements || item.requirement || item.description || item.details
+    ].map((part) => String(part || "").trim()).filter(Boolean).join(": ");
+  }).map((item) => item.trim().slice(0, 600)).filter(Boolean).slice(0, 12);
 }
 
 function normalizeCollaborationRequirement(value, contract = {}) {

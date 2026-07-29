@@ -21,11 +21,32 @@ const OBJECT = { type: "object", additionalProperties: true };
 const STRING_LIST = { type: "array", items: STRING };
 const PRIMITIVE_LIST = { type: "array", items: { type: ["string", "number", "boolean", "null"] } };
 const OBJECT_LIST = { type: "array", items: OBJECT };
+const TEXT_OR_LIST = { anyOf: [NON_EMPTY_STRING, { type: "array", items: NON_EMPTY_STRING }] };
+const TASK_DELIVERABLE = {
+  anyOf: [
+    NON_EMPTY_STRING,
+    {
+      type: "object",
+      properties: {
+        path: STRING,
+        file: STRING,
+        name: STRING,
+        requirements: STRING,
+        requirement: STRING,
+        description: STRING
+      },
+      additionalProperties: false,
+      anyOf: [{ required: ["path"] }, { required: ["file"] }, { required: ["name"] }, { required: ["description"] }]
+    }
+  ]
+};
 const TASK_ARTIFACT = {
   type: "object",
   properties: {
     path: STRING,
     extension: STRING,
+    format: STRING,
+    artifactType: STRING,
     requiresImages: BOOLEAN,
     minimumPages: { type: "integer", minimum: 0 }
   },
@@ -50,9 +71,9 @@ const TASK_CONTRACT = {
     objective: NON_EMPTY_STRING,
     requiresWorkspace: BOOLEAN,
     requiresVerification: BOOLEAN,
-    deliverables: { type: "array", items: NON_EMPTY_STRING },
+    deliverables: { type: "array", items: TASK_DELIVERABLE },
     artifacts: { type: "array", items: TASK_ARTIFACT },
-    completionCriteria: { type: "array", minItems: 1, items: NON_EMPTY_STRING },
+    completionCriteria: TEXT_OR_LIST,
     nextAction: NON_EMPTY_STRING,
     collaboration: TASK_COLLABORATION
   },

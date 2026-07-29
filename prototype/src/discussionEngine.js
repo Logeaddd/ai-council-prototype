@@ -544,7 +544,10 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
       };
 
       establishTaskContractBeforeActions(response);
-      if (!ownerRequestedDelegation(response, session.executionState, agent)) {
+      const intakeContractAttemptPending = agent.id === session.executionState?.executorId
+        && session.executionState?.phase === "intake"
+        && (response.tool_requests || []).some((request) => String(request?.tool || "").trim().toLowerCase() === "record_task_contract");
+      if (!intakeContractAttemptPending && !ownerRequestedDelegation(response, session.executionState, agent)) {
         processResponseFileOperations(response);
       }
 
@@ -614,15 +617,21 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
         const allRequestedTools = response.tool_requests || [];
         const contractRequests = allRequestedTools.filter((request) => String(request?.tool || "").trim().toLowerCase() === "record_task_contract");
         const requestsAfterContract = allRequestedTools.filter((request) => String(request?.tool || "").trim().toLowerCase() !== "record_task_contract");
-        const deferredForDelegation = ownerDelegationTurn
+        const taskContractStillRequired = agent.id === session.executionState?.executorId
+          && session.executionState?.phase === "intake"
+          && contractRequests.length > 0;
+        const deferredForDelegation = !taskContractStillRequired && ownerDelegationTurn
           ? requestsAfterContract.filter((request) => String(request?.tool || "").trim().toLowerCase() !== "delegate_task")
             .map((request) => deferredToolRequestForDelegation(request))
           : [];
+        const deferredForTaskIntake = taskContractStillRequired
+          ? requestsAfterContract.map((request) => deferredToolRequestForTaskIntake(request))
+          : [];
         const executableRequests = [
           ...contractRequests,
-          ...(ownerDelegationTurn
+          ...(!taskContractStillRequired && ownerDelegationTurn
             ? requestsAfterContract.filter((request) => String(request?.tool || "").trim().toLowerCase() === "delegate_task")
-            : requestsAfterContract)
+            : !taskContractStillRequired ? requestsAfterContract : [])
         ];
         const recoveryGate = gateDeliveryRecoveryToolRequests(session.executionState, agent, executableRequests);
         const executedToolResult = await executeToolRequests({
@@ -662,7 +671,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
         });
         const toolResult = {
           ...executedToolResult,
-          rejected: [...recoveryGate.rejected, ...executedToolResult.rejected, ...deferredForDelegation],
+          rejected: [...recoveryGate.rejected, ...executedToolResult.rejected, ...deferredForDelegation, ...deferredForTaskIntake],
           events: [
             ...recoveryGate.rejected.map((item) => ({
               type: "tool_failure",
@@ -677,7 +686,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
               createdAt: item.createdAt
             })),
             ...executedToolResult.events,
-            ...deferredForDelegation.map((item) => ({
+            ...[...deferredForDelegation, ...deferredForTaskIntake].map((item) => ({
               type: "tool_failure",
               id: item.id,
               tool: item.tool,
@@ -2438,6 +2447,17 @@ function deferredToolRequestForDelegation(request = {}) {
     status: "rejected",
     code: "delegation_handoff_required",
     error: "The delivery owner requested a bounded delegation in this response. All other same-turn actions are deferred until the contributor handoff is durable and acknowledged.",
+    createdAt: nowIso()
+  };
+}
+
+function deferredToolRequestForTaskIntake(request = {}) {
+  return {
+    id: String(request.id || `task_contract_deferred:${request.tool || "tool"}`),
+    tool: String(request.tool || ""),
+    status: "rejected",
+    code: "task_contract_required",
+    error: "The task contract has not been accepted. No file, command, package, network, or delegation action may run until the intake owner records one complete semantic contract.",
     createdAt: nowIso()
   };
 }

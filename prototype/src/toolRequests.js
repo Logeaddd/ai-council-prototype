@@ -291,7 +291,7 @@ export async function executeToolRequests(options = {}) {
     events.push(startEvent);
     publishLiveToolStart(options, startEvent);
     const result = await executeOne(base, { ...options, currentResults: results });
-    attachCapabilityUsage(result, base, [...(options.previousResults || []), ...results]);
+    attachCapabilityUsage(result, base, [...(options.previousResults || []), ...results], options);
     results.push(result);
     if (result.status === "completed" && isObservationRequest(base)) {
       options.observationCache?.set(base, result.result, result);
@@ -334,16 +334,16 @@ export async function executeToolRequests(options = {}) {
 // A completed install alone is not evidence that the task actually gained a
 // capability. Record the concrete later command/code reference while the
 // original request is still available, then retain only the small link ID.
-function attachCapabilityUsage(record, request, earlierResults = []) {
+function attachCapabilityUsage(record, request, earlierResults = [], options = {}) {
   if (record?.status !== "completed") return;
-  const uses = capabilityUsageForRequest(request, earlierResults);
+  const uses = capabilityUsageForRequest(request, earlierResults, options);
   if (uses.length) record.capabilityUsage = uses;
 }
 
-function capabilityUsageForRequest(request = {}, earlierResults = []) {
+function capabilityUsageForRequest(request = {}, earlierResults = [], options = {}) {
   const prior = Array.isArray(earlierResults) ? earlierResults : [];
   const uses = [];
-  const executionText = requestExecutionText(request);
+  const executionText = requestExecutionText(request, options.groupPath);
 
   for (const acquisition of prior) {
     if (acquisition?.status !== "completed" || acquisition?.result?.ok === false || !acquisition?.id) continue;
@@ -380,11 +380,32 @@ function executableWorkRequest(request = {}) {
   return ["execute_command", "run_code", "run_tests"].includes(request.tool);
 }
 
-function requestExecutionText(request = {}) {
-  return [request.command, request.code, request.cwd, request.runner]
+function requestExecutionText(request = {}, groupPath = "") {
+  return [request.command, request.code, request.cwd, request.runner, ...referencedCommandFileContents(request, groupPath)]
     .map((value) => String(value || ""))
     .join("\n")
     .toLowerCase();
+}
+
+function referencedCommandFileContents(request = {}, groupPath = "") {
+  if (!groupPath || request.tool !== "execute_command") return [];
+  const root = path.resolve(groupPath);
+  const command = String(request.command || "");
+  const candidates = [...command.matchAll(/(?:^|[\s"'])([^\s"']+\.(?:py|pyw|js|mjs|cjs|ts|tsx|sh|ps1))(?:$|[\s"'])/gi)]
+    .map((match) => String(match[1] || "").trim())
+    .filter(Boolean);
+  return [...new Set(candidates)].flatMap((candidate) => {
+    const filePath = path.resolve(root, candidate);
+    const relative = path.relative(root, filePath);
+    if (relative.startsWith("..") || path.isAbsolute(relative)) return [];
+    try {
+      const stat = fs.statSync(filePath);
+      if (!stat.isFile() || stat.size > 256 * 1024) return [];
+      return [fs.readFileSync(filePath, "utf8")];
+    } catch {
+      return [];
+    }
+  });
 }
 
 function provisionReferences(record = {}) {

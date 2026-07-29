@@ -1497,6 +1497,19 @@ test("install_package makes a real local pip package available to later run_code
     assert.equal(used.results[0].status, "completed", JSON.stringify(used.results[0]));
     assert.equal(used.results[0].result.stdout.trim(), "LOCAL_PIP_FACT");
     assert.equal(used.results[0].capabilityUsage?.[0]?.acquisitionId, installed.results[0].id);
+
+    fs.writeFileSync(path.join(tmp, "uses_local_pip_fact.py"), "import local_pip_fact\nprint(local_pip_fact.VALUE)\n", "utf8");
+    const scriptUse = await executeToolRequests({
+      permissionTier: "full",
+      groupPath: tmp,
+      agent: { id: "full", name: "Full" },
+      round: 3,
+      previousResults: installed.results,
+      requests: [{ tool: "execute_command", command: "python uses_local_pip_fact.py", shell: "cmd", reason: "Run the script that imports the acquired package." }]
+    });
+    assert.equal(scriptUse.results[0].status, "completed", JSON.stringify(scriptUse.results[0]));
+    assert.equal(scriptUse.results[0].result.stdout.trim(), "LOCAL_PIP_FACT");
+    assert.equal(scriptUse.results[0].capabilityUsage?.[0]?.acquisitionId, installed.results[0].id);
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }

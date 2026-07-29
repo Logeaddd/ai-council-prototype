@@ -70,6 +70,38 @@ test("a semantic task contract, rather than task wording, activates delivery exe
   assert.match(instruction, /verify the output/);
 });
 
+test("a complete provider contract survives equivalent object and scalar field shapes", () => {
+  const state = createExecutionState({ question: "Create the requested report.", agents, workspaceGroup });
+  advanceExecutionState({
+    state,
+    session: { toolExecutionResults: [], fileOperationExecutionResults: [] },
+    agent: agents[1],
+    response: {
+      status: "speak",
+      task_contract: {
+        mode: "delivery",
+        objective: "Create the requested illustrated report.",
+        requiresWorkspace: true,
+        requiresVerification: true,
+        deliverables: [{ path: "deliverables/report.pdf", requirements: "At least two pages." }],
+        artifacts: [{ path: "deliverables/report.pdf", artifact_type: "generated_file", minimumPages: 2, requiresImages: true }],
+        completionCriteria: "The report parses as a multi-page illustrated PDF.",
+        nextAction: "Read the source material and generate the report."
+      }
+    }
+  });
+
+  assert.equal(state.phase, "inspect");
+  assert.deepEqual(state.taskContract.deliverables, ["deliverables/report.pdf: At least two pages."]);
+  assert.deepEqual(state.taskContract.completionCriteria, ["The report parses as a multi-page illustrated PDF."]);
+  assert.deepEqual(state.taskContract.artifacts, [{
+    path: "deliverables/report.pdf",
+    extension: ".pdf",
+    requiresImages: true,
+    minimumPages: 2
+  }]);
+});
+
 test("a required collaboration contract blocks material work until a real handoff is integrated", () => {
   const owner = { id: "owner", name: "Owner", enabled: true };
   const researcher = { id: "researcher", name: "Researcher", enabled: true };
