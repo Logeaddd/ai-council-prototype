@@ -831,8 +831,84 @@ export function verifyCampaignToolEvidence(verifier = {}, sessions = []) {
     checks.push(check("capability_acquired_in_current_campaign", acquisitionResults.length > 0, acquisition.acquiredTools.join(", ") || "no successful acquisition tool result"));
     checks.push(check("acquired_capability_used_by_later_work", acquisition.passed, acquisition.tools.join(", ") || "no later successful tool referenced the acquired package, environment, skill, server or command"));
   }
+  const skillLifecycle = verifySkillLifecycle(verifier, results);
+  const mcpLifecycle = verifyMcpLifecycle(verifier, results);
+  if (skillLifecycle.required) checks.push(...skillLifecycle.checks);
+  if (mcpLifecycle.required) checks.push(...mcpLifecycle.checks);
   if (!checks.length) checks.push(check("required_tool_evidence", true, "not_required"));
-  return { passed: checks.every((item) => item.passed), checks, acquisition, contextRetrieval };
+  return { passed: checks.every((item) => item.passed), checks, acquisition, contextRetrieval, skillLifecycle, mcpLifecycle };
+}
+
+function verifySkillLifecycle(verifier = {}, results = []) {
+  const required = verifier.requiresSkillLifecycle === true;
+  if (!required) return { required: false, passed: true, checks: [check("skill_lifecycle_not_required", true, "not_required")] };
+  const search = results.filter((item) => item.tool === "skill_search" && item.status === "completed" && item.result?.ok !== false);
+  const installs = results.map((item, index) => ({ item, index })).filter(({ item }) => (
+    item.tool === "skill_install" && item.status === "completed" && item.result?.ok !== false
+  ));
+  const enabled = installs.flatMap(({ item, index }) => results.slice(index + 1).filter((later) => (
+    later.tool === "skill_enable" && later.status === "completed" && later.result?.ok !== false && sameSkill(item, later)
+  )));
+  const read = installs.flatMap(({ item, index }) => results.slice(index + 1).filter((later) => (
+    later.tool === "skill_read" && later.status === "completed" && later.result?.ok !== false && sameSkill(item, later)
+  )));
+  const checks = [
+    check("skill_candidate_search_recorded", search.length > 0, `${search.length} successful skill searches persisted`),
+    check("skill_installed_in_current_campaign", installs.length > 0, `${installs.length} successful skill installs persisted`),
+    check("installed_skill_enabled", enabled.length > 0, `${enabled.length} enable operations followed an install`),
+    check("installed_skill_read", read.length > 0, `${read.length} reads followed an install`)
+  ];
+  return {
+    required,
+    passed: checks.every((item) => item.passed),
+    checks,
+    evidence: { installedSkillIds: installs.map(({ item }) => skillIdentity(item)).filter(Boolean), enabledResultIds: enabled.map((item) => String(item.id || "")), readResultIds: read.map((item) => String(item.id || "")) }
+  };
+}
+
+function verifyMcpLifecycle(verifier = {}, results = []) {
+  const required = verifier.requiresMcpLifecycle === true;
+  if (!required) return { required: false, passed: true, checks: [check("mcp_lifecycle_not_required", true, "not_required")] };
+  const search = results.filter((item) => item.tool === "mcp_search_npm" && item.status === "completed" && item.result?.ok !== false);
+  const installs = results.map((item, index) => ({ item, index })).filter(({ item }) => (
+    item.tool === "mcp_install_npm" && item.status === "completed" && item.result?.ok !== false
+  ));
+  const listed = installs.flatMap(({ item, index }) => results.slice(index + 1).filter((later) => (
+    later.tool === "mcp_list_tools" && later.status === "completed" && later.result?.ok !== false && sameMcpServer(item, later)
+  )));
+  const called = installs.flatMap(({ item, index }) => results.slice(index + 1).filter((later) => (
+    later.tool === "mcp_call" && later.status === "completed" && later.result?.ok !== false && later.result?.isError !== true && sameMcpServer(item, later)
+  )));
+  const checks = [
+    check("mcp_package_search_recorded", search.length > 0, `${search.length} successful npm MCP searches persisted`),
+    check("mcp_server_installed_in_current_campaign", installs.length > 0, `${installs.length} successful MCP installs persisted`),
+    check("installed_mcp_tools_listed", listed.length > 0, `${listed.length} tool listings followed an install`),
+    check("installed_mcp_tool_called", called.length > 0, `${called.length} successful MCP calls followed an install`)
+  ];
+  return {
+    required,
+    passed: checks.every((item) => item.passed),
+    checks,
+    evidence: { installedServerIds: installs.map(({ item }) => mcpServerIdentity(item)).filter(Boolean), listResultIds: listed.map((item) => String(item.id || "")), callResultIds: called.map((item) => String(item.id || "")) }
+  };
+}
+
+function skillIdentity(item = {}) {
+  return String(item.result?.skill?.id || item.skillId || item.catalogId || "").trim();
+}
+
+function sameSkill(installed = {}, later = {}) {
+  const id = skillIdentity(installed);
+  return Boolean(id) && id === skillIdentity(later);
+}
+
+function mcpServerIdentity(item = {}) {
+  return String(item.result?.id || item.result?.server?.id || item.result?.serverId || item.serverId || item.catalogId || "").trim();
+}
+
+function sameMcpServer(installed = {}, later = {}) {
+  const id = mcpServerIdentity(installed);
+  return Boolean(id) && id === mcpServerIdentity(later);
 }
 
 function createCapabilityExecutionReceipt(groupPath, sessionEntries = [], evidence = {}) {

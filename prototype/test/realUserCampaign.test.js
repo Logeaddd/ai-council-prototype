@@ -119,6 +119,34 @@ test("document campaigns require a self-acquired illustrated multi-page PDF with
   assert.doesNotMatch(JSON.stringify(publicScenario), /reportlab|pdfkit|weasyprint|pandoc/i);
 });
 
+test("Skill campaigns require discovery, installation, enablement, instruction reading, and a mechanically verifiable artifact", () => {
+  const campaign = createSeededCampaignScenario({ seed: 11 });
+  const publicScenario = publicCampaignScenario(campaign);
+
+  assert.equal(campaign.task.id, "skill-guided-document");
+  assert.equal(campaign.task.capabilityAcquisitionRequired, true);
+  assert.equal(campaign.hiddenVerifier.kind, "json");
+  assert.equal(campaign.hiddenVerifier.requiresAcquisition, true);
+  assert.equal(campaign.hiddenVerifier.requiresSkillLifecycle, true);
+  assert.match(campaign.task.initialQuestion, /skill_search.*skill_install.*skill_enable.*skill_read/i);
+  assert.equal(JSON.stringify(publicScenario).includes(campaign.hiddenVerifier.expected.title), false);
+  assert.equal(JSON.stringify(publicScenario).includes(campaign.hiddenVerifier.expected.summary), false);
+});
+
+test("MCP campaigns require registry discovery, configuration, schema inspection, invocation, and a mechanically verifiable artifact", () => {
+  const campaign = createSeededCampaignScenario({ seed: 12 });
+  const publicScenario = publicCampaignScenario(campaign);
+
+  assert.equal(campaign.task.id, "mcp-memory-record");
+  assert.equal(campaign.task.capabilityAcquisitionRequired, true);
+  assert.equal(campaign.hiddenVerifier.kind, "json");
+  assert.equal(campaign.hiddenVerifier.requiresAcquisition, true);
+  assert.equal(campaign.hiddenVerifier.requiresMcpLifecycle, true);
+  assert.match(campaign.task.initialQuestion, /mcp_search_npm.*mcp_install_npm.*mcp_list_tools.*mcp_call/i);
+  assert.equal(JSON.stringify(publicScenario).includes(campaign.hiddenVerifier.expected.value), false);
+  assert.equal(JSON.stringify(publicScenario).includes(campaign.fixtures[0].content), false);
+});
+
 test("different seeds select deterministic task variants while preserving the campaign contract", () => {
   const campaigns = [1, 2, 3, 4, 5, 6, 7].map((seed) => createSeededCampaignScenario({ seed }));
   assert.equal(new Set(campaigns.map((campaign) => campaign.task.id)).size >= 2, true);

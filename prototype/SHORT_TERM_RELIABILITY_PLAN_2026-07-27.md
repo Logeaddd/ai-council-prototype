@@ -432,3 +432,25 @@ Still open before the real-provider release gate:
 * Run the paid real-provider campaign with its mechanical oracles, distinct
   task families, and evidence window. Local tests and deterministic context
   pressure reports do not satisfy this release gate.
+
+## Current execution state - 2026-07-30
+
+* Native `delegate_task` schemas now expose `allowRuntimeMutation`, so a
+  delivery owner can give an `unblocker` bounded managed-runtime authority in
+  an actual Provider tool call. The authority still excludes arbitrary command
+  execution and project-output mutation.
+* The real-provider matrix now requires two additional task families before
+  T105/T117 can close: Skill discovery/install/enable/read plus a verified
+  artifact, and npm MCP discovery/install/tool-list/call plus a verified
+  artifact. Both require current-campaign acquisition-and-use receipts; a
+  catalog listing or an installed package alone cannot pass.
+* Local live capability physiology passed in an isolated temporary workspace:
+  the product tool chain searched, installed, enabled, and read the pinned
+  public `openai-pdf` Skill; it also searched npm, installed the official
+  Memory MCP server, listed its tools, and completed a real `create_entities`
+  call. This is real network/tool evidence, not a Provider autonomy claim.
+* Full regression after these changes: 804 tests, 803 passed, 0 failed, and
+  one Windows-only platform skip. The installer must not be rebuilt or marked
+  releasable until a newly configured real Provider completes the expanded
+  HTTP/SSE campaign window. No Provider URL, key, model, or `.env` is present
+  in the current execution environment.

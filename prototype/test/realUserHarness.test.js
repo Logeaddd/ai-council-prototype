@@ -436,6 +436,42 @@ test("capability acquisition evidence must come from a successful current-campai
   assert.equal(maskedFailure.passed, false);
 });
 
+test("Skill lifecycle evidence requires a current search, install, enablement, and instruction read", () => {
+  const verifier = { requiresSkillLifecycle: true };
+  const base = [
+    { id: "search-skill", tool: "skill_search", status: "completed", result: { ok: true } },
+    { id: "install-skill", tool: "skill_install", skillId: "openai-pdf", status: "completed", result: { ok: true, skill: { id: "openai-pdf" } } },
+    { id: "enable-skill", tool: "skill_enable", skillId: "openai-pdf", status: "completed", result: { ok: true, skill: { id: "openai-pdf" } } },
+    { id: "read-skill", tool: "skill_read", skillId: "openai-pdf", status: "completed", result: { ok: true, skill: { id: "openai-pdf" } } }
+  ];
+  const passed = verifyCampaignToolEvidence(verifier, [{ toolExecutionResults: base }]);
+  assert.equal(passed.passed, true);
+  assert.equal(passed.skillLifecycle.passed, true);
+  assert.equal(passed.skillLifecycle.evidence.installedSkillIds[0], "openai-pdf");
+
+  const missingRead = verifyCampaignToolEvidence(verifier, [{ toolExecutionResults: base.slice(0, 3) }]);
+  assert.equal(missingRead.passed, false);
+  assert.equal(missingRead.skillLifecycle.passed, false);
+});
+
+test("MCP lifecycle evidence requires registry search, installation, tool listing, and a successful call", () => {
+  const verifier = { requiresMcpLifecycle: true };
+  const base = [
+    { id: "search-mcp", tool: "mcp_search_npm", status: "completed", result: { ok: true } },
+    { id: "install-mcp", tool: "mcp_install_npm", serverId: "memory", status: "completed", result: { ok: true, id: "memory" } },
+    { id: "list-mcp-tools", tool: "mcp_list_tools", serverId: "memory", status: "completed", result: { ok: true, serverId: "memory" } },
+    { id: "call-mcp-tool", tool: "mcp_call", serverId: "memory", status: "completed", result: { ok: true, serverId: "memory", isError: false } }
+  ];
+  const passed = verifyCampaignToolEvidence(verifier, [{ toolExecutionResults: base }]);
+  assert.equal(passed.passed, true);
+  assert.equal(passed.mcpLifecycle.passed, true);
+  assert.equal(passed.mcpLifecycle.evidence.installedServerIds[0], "memory");
+
+  const failedCall = verifyCampaignToolEvidence(verifier, [{ toolExecutionResults: [...base.slice(0, 3), { ...base[3], result: { ok: true, serverId: "memory", isError: true } }] }]);
+  assert.equal(failedCall.passed, false);
+  assert.equal(failedCall.mcpLifecycle.passed, false);
+});
+
 test("context retrieval evidence requires the seeded event and a later target write by the retrieving agent", () => {
   const verifier = {
     kind: "json",

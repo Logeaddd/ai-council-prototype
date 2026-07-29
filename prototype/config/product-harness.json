@@ -16,9 +16,9 @@
           "id": "universal_real_provider_survival_pass",
           "type": "real_user_campaign",
           "reportsRoot": "eval/real-user-campaign",
-          "minimumPassedReports": 6,
-          "minimumDistinctTaskIds": 6,
-          "minimumDistinctSeeds": 5,
+          "minimumPassedReports": 8,
+          "minimumDistinctTaskIds": 8,
+          "minimumDistinctSeeds": 7,
           "evidenceWindowPerTask": 3,
           "minimumPassRate": 0.75,
           "requireLatestPerTaskPass": true,
@@ -28,7 +28,9 @@
             { "id": "external_workspace", "taskIds": ["external-node-cli"] },
             { "id": "archive_packaging", "taskIds": ["zip-archive"] },
             { "id": "capability_acquisition", "taskIds": ["image-tool-acquisition"], "requireAcquisitionEvidence": true },
-            { "id": "document_generation", "taskIds": ["pdf-report"], "requireAcquisitionEvidence": true }
+            { "id": "document_generation", "taskIds": ["pdf-report"], "requireAcquisitionEvidence": true },
+            { "id": "skill_lifecycle", "taskIds": ["skill-guided-document"], "requireAcquisitionEvidence": true },
+            { "id": "mcp_lifecycle", "taskIds": ["mcp-memory-record"], "requireAcquisitionEvidence": true }
           ]
         }
       ]
@@ -74,9 +76,9 @@
           "id": "real_provider_campaign",
           "type": "real_user_campaign",
           "reportsRoot": "eval/real-user-campaign",
-          "minimumPassedReports": 6,
-          "minimumDistinctTaskIds": 6,
-          "minimumDistinctSeeds": 5,
+          "minimumPassedReports": 8,
+          "minimumDistinctTaskIds": 8,
+          "minimumDistinctSeeds": 7,
           "evidenceWindowPerTask": 3,
           "minimumPassRate": 0.75,
           "requireLatestPerTaskPass": true,
@@ -86,7 +88,9 @@
             { "id": "external_workspace", "taskIds": ["external-node-cli"] },
             { "id": "archive_packaging", "taskIds": ["zip-archive"] },
             { "id": "capability_acquisition", "taskIds": ["image-tool-acquisition"], "requireAcquisitionEvidence": true },
-            { "id": "document_generation", "taskIds": ["pdf-report"], "requireAcquisitionEvidence": true }
+            { "id": "document_generation", "taskIds": ["pdf-report"], "requireAcquisitionEvidence": true },
+            { "id": "skill_lifecycle", "taskIds": ["skill-guided-document"], "requireAcquisitionEvidence": true },
+            { "id": "mcp_lifecycle", "taskIds": ["mcp-memory-record"], "requireAcquisitionEvidence": true }
           ]
         }
       ]

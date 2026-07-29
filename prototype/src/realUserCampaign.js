@@ -423,7 +423,74 @@ function pdfDocumentTemplate(seed, random) {
   };
 }
 
-const TASK_TEMPLATES = [nodeCliTemplate, pythonCliTemplate, jsonDocumentTemplate, externalNodeCliTemplate, jsonToCsvTemplate, zipArchiveTemplate, apiCollectionTemplate, imageToolAcquisitionTemplate, delegatedBriefTemplate, contextHistoryRetrievalTemplate, pdfDocumentTemplate];
+function skillGuidedDocumentTemplate(seed, random) {
+  const file = `deliverables/skill-brief-${seed}.json`;
+  const source = `inputs/skill-brief-${seed}.json`;
+  const title = `Skill Brief ${seed % 97}`;
+  const summary = `Structured workflow note ${randomInteger(random, 1000, 9999)}`;
+  const audience = ["contributors", "reviewers", "operators"][Math.floor(random() * 3)];
+  const spec = { title, summary, audience };
+  return {
+    id: "skill-guided-document",
+    domain: "skill_discovery_install_enable_read_and_structured_delivery",
+    deliverable: file,
+    capabilityAcquisitionRequired: true,
+    initialQuestion: `Read ${source}. Then independently find a suitable maintained Skill for structured document work: use skill_search, install the chosen Skill with skill_install, enable it with skill_enable, and read its instructions with skill_read before making the deliverable. Do not invoke a made-up dynamic tool such as skill:<id>. Create ${file} as valid JSON containing the title, summary, and audience from the input plus status set to draft. Validate the artifact.`,
+    edits: [
+      { prompt: "Update the existing skill-guided JSON so status is review. Preserve the input-derived title, summary and audience, keep valid JSON, and validate it." },
+      { prompt: "Update the same JSON to add format set to skill_guided. Keep every existing required field and validate the artifact." },
+      { prompt: "Use only the newest requirements: keep title, summary, audience, format skill_guided, and set version to 2. Preserve valid JSON and validate it." },
+      { prompt: "Make the final requested update in the same JSON: keep every current required field, set status to approved, and validate the finished artifact." }
+    ],
+    reversalPrompt: "Use only the current skill-guided document requirements. Do not restore an obsolete status or remove the current format and version fields.",
+    recallPrompt: `Inspect ${source}, the current ${file}, and retained task context. Continue the existing skill-guided document from the newest requirement without creating a replacement project.`,
+    finalPrompt: `Apply the final skill-guided document requirement in ${file} and validate the current JSON one more time.`,
+    recoveryVerificationPrompt: `After recovery, inspect ${file} and validate its current JSON structure without reinstalling an already enabled Skill or recreating the project.`,
+    fixtures: [{ path: source, content: JSON.stringify(spec, null, 2) + "\n" }],
+    hiddenVerifier: {
+      kind: "json",
+      file,
+      expected: { title, summary, audience, status: "approved", format: "skill_guided", version: 2 },
+      requiresAcquisition: true,
+      requiresSkillLifecycle: true
+    }
+  };
+}
+
+function mcpMemoryRecordTemplate(seed, random) {
+  const file = `deliverables/mcp-record-${seed}.json`;
+  const source = `inputs/mcp-record-${seed}.json`;
+  const topic = `record-${seed % 97}`;
+  const value = `mcp-fact-${randomInteger(random, 10000, 99999)}`;
+  const spec = { topic, value };
+  return {
+    id: "mcp-memory-record",
+    domain: "mcp_discovery_configuration_tool_use_and_structured_delivery",
+    deliverable: file,
+    capabilityAcquisitionRequired: true,
+    initialQuestion: `Read ${source}. Independently obtain and use an MCP server appropriate for recording a small fact: first search npm with mcp_search_npm, configure the selected server with mcp_install_npm, inspect its real tools with mcp_list_tools, and invoke a suitable tool with mcp_call. Do not guess the MCP tool schema. Then create ${file} as valid JSON containing topic and value from the input plus source set to mcp_memory and status set to draft. Workspace tools may create the final JSON but cannot substitute for the required MCP search, configuration, tool listing, and tool call. Validate the artifact.`,
+    edits: [
+      { prompt: "Update the existing MCP record JSON so status is review. Preserve topic, value and source mcp_memory, keep valid JSON, and validate it." },
+      { prompt: "Update the same MCP record JSON to add version set to 2. Preserve every current field and validate it." },
+      { prompt: "Use the newest requirements only: keep topic, value, source mcp_memory, version 2, and set status to approved. Validate the current JSON artifact." },
+      { prompt: "Make the final requested MCP record update in the same artifact. Keep every current required field and validate the finished JSON." }
+    ],
+    reversalPrompt: "Use only the current MCP record requirements. Do not restore an obsolete status or remove the required source and version fields.",
+    recallPrompt: `Inspect ${source}, the current ${file}, and retained task context. Continue the same MCP-backed record from the newest requirement without replacing the project.`,
+    finalPrompt: `Apply the final MCP record requirement in ${file} and validate the current JSON one more time.`,
+    recoveryVerificationPrompt: `After recovery, inspect ${file} and validate its current JSON without repeating a completed MCP installation or recreating the project.`,
+    fixtures: [{ path: source, content: JSON.stringify(spec, null, 2) + "\n" }],
+    hiddenVerifier: {
+      kind: "json",
+      file,
+      expected: { topic, value, source: "mcp_memory", status: "approved", version: 2 },
+      requiresAcquisition: true,
+      requiresMcpLifecycle: true
+    }
+  };
+}
+
+const TASK_TEMPLATES = [nodeCliTemplate, pythonCliTemplate, jsonDocumentTemplate, externalNodeCliTemplate, jsonToCsvTemplate, zipArchiveTemplate, apiCollectionTemplate, imageToolAcquisitionTemplate, delegatedBriefTemplate, contextHistoryRetrievalTemplate, pdfDocumentTemplate, skillGuidedDocumentTemplate, mcpMemoryRecordTemplate];
 
 function expectedImagePixels(spec) {
   const background = hexRgba(spec.background);
