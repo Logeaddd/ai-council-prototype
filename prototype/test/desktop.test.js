@@ -122,6 +122,7 @@ test("Electron runs the detached supervisor as Node and retains a packaged PTY p
   const processTools = fs.readFileSync(path.join(root, "src", "processTools.js"), "utf8");
   assert.match(processTools, /ELECTRON_RUN_AS_NODE: "1"/);
   assert.match(main, /AI_COUNCIL_E2E_PTY_PROBE/);
+  assert.match(main, /AI_COUNCIL_E2E_PTY_RESULT_PATH/);
   assert.match(main, /runPackagedPtyProbe/);
   assert.match(main, /startManagedInteractiveProcess/);
   assert.match(main, /processControlTool/);

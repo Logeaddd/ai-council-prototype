@@ -15,6 +15,7 @@ const historySeedProbeEnabled = process.env.AI_COUNCIL_E2E_HISTORY_SEED_PROBE ==
 const historyReopenProbeEnabled = process.env.AI_COUNCIL_E2E_HISTORY_REOPEN_PROBE === "1";
 const historyProbeMarker = String(process.env.AI_COUNCIL_E2E_HISTORY_MARKER || "").trim();
 const packagedPtyProbeEnabled = process.env.AI_COUNCIL_E2E_PTY_PROBE === "1";
+const packagedPtyProbeResultPath = String(process.env.AI_COUNCIL_E2E_PTY_RESULT_PATH || "").trim();
 
 let mainWindow;
 
@@ -54,10 +55,12 @@ async function startDesktop() {
     try {
       const result = await runPackagedPtyProbe();
       console.log(`AI_COUNCIL_E2E_PTY=${JSON.stringify(result)}`);
+      writeE2eProbeResult(packagedPtyProbeResultPath, result);
       if (!result.ok) process.exitCode = 1;
     } catch (error) {
       process.exitCode = 1;
       console.error("AI_COUNCIL_E2E_PTY_FAILED", error);
+      writeE2eProbeResult(packagedPtyProbeResultPath, { ok: false, error: String(error?.message || error) });
     } finally {
       setTimeout(() => app.quit(), 50);
     }
@@ -751,6 +754,16 @@ function configureDataDirectory() {
   process.env.AI_COUNCIL_DATA_DIR = path.resolve(dataDir);
   if (!process.env.AI_COUNCIL_WORKSPACE_ROOT) {
     process.env.AI_COUNCIL_WORKSPACE_ROOT = process.env.AI_COUNCIL_DATA_DIR;
+  }
+}
+
+function writeE2eProbeResult(filePath, result) {
+  if (!filePath) return;
+  try {
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(filePath, JSON.stringify(result, null, 2), "utf8");
+  } catch (error) {
+    console.error("AI_COUNCIL_E2E_PTY_RESULT_WRITE_FAILED", error);
   }
 }
 
