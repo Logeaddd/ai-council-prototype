@@ -21,6 +21,7 @@
     "probe:electron-private-draft": "node ./scripts/probe-electron-private-draft.mjs",
     "probe:electron-transcript-follow": "node ./scripts/probe-electron-transcript-follow.mjs",
     "probe:electron-history-recovery": "node ./scripts/probe-electron-history-recovery.mjs",
+    "probe:document-physiology": "node ./scripts/probe-document-physiology.mjs",
     "test": "node --test --test-concurrency=1 test/*.test.js",
     "show-memory": "node ./src/cli.js list-memory-pending",
     "desktop:shortcut": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/install-desktop-shortcut.ps1",

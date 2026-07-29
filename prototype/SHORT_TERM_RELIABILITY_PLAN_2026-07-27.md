@@ -391,6 +391,14 @@ Completed on 2026-07-27:
   failures and 1 Windows platform skip; the optimized renderer build passed.
   This eliminates a false-success path but does not claim real-provider task
   completion.
+* The missing `document_generation` family now also has a reusable real local
+  tool-path preflight: `npm run probe:document-physiology`. It creates a
+  temporary workspace, uses `install_package` to acquire public `reportlab`,
+  uses the managed Python environment and package dependency to generate a
+  two-page PDF with an embedded raster image, and verifies it through the
+  campaign PDF parser. It emits package-use evidence and cleans up the
+  workspace. It is deliberately outside default CI because it downloads a
+  public package, and it is explicitly not a real Provider or real-user pass.
 
 Still open before the real-provider release gate:
 
