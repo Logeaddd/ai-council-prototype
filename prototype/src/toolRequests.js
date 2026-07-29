@@ -351,7 +351,7 @@ function capabilityUsageForRequest(request = {}, earlierResults = []) {
       if (references.length) uses.push(capabilityUsage(acquisition, "provisioned_command", references));
     }
     if (acquisition.tool === "install_package" && executableWorkRequest(request)) {
-      const references = matchingReferences(executionText, packageReferences(acquisition.result?.packageName || acquisition.packageName));
+      const references = matchingReferences(executionText, installedPackageReferences(acquisition));
       if (references.length) uses.push(capabilityUsage(acquisition, "installed_package", references));
     }
     if (acquisition.tool === "execute_command" && executableWorkRequest(request)) {
@@ -403,6 +403,14 @@ function packageReferences(value) {
   const secondAt = raw.startsWith("@") ? raw.indexOf("@", 1) : raw.indexOf("@");
   const withoutAtVersion = secondAt > 0 ? raw.slice(0, secondAt) : raw;
   return [...new Set([raw, withoutRange, withoutAtVersion].map(normalizeCapabilityReference).filter(Boolean))];
+}
+
+function installedPackageReferences(record = {}) {
+  const recorded = Array.isArray(record.result?.capabilityReferences) ? record.result.capabilityReferences : [];
+  return [...new Set([
+    ...packageReferences(record.result?.packageName || record.packageName),
+    ...recorded.map(normalizeCapabilityReference).filter(Boolean)
+  ])];
 }
 
 function shellAcquisitionReferences(record = {}) {

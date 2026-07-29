@@ -160,6 +160,7 @@ export async function runSeededRealUserCampaign(options = {}) {
   const interruptedActivities = [];
   let failure;
   let failureKind = "failed";
+  let runtimePreconditions = { cleanPythonEnvironment: { required: false, status: "not_required" } };
 
   fs.mkdirSync(runDir, { recursive: true });
   try {
@@ -167,6 +168,7 @@ export async function runSeededRealUserCampaign(options = {}) {
     campaign = materializeCampaignPaths(sourceCampaign, runDir, options.externalWorkspaceRoot, apiFixture?.url);
     prepareGroupWorkspace(groupPath, group);
     prepareCampaignFixtures(groupPath, campaign.fixtures);
+    runtimePreconditions = await prepareCampaignRuntimePreconditions(groupPath, campaign);
     if (campaign.externalWorkspaceRoot) prepareCampaignFixtures(campaign.externalWorkspaceRoot, campaign.externalFixtures);
     const environment = harnessEnvironment(providerEnvironment, Boolean(apiFixture), options.allowMockProvider === true ? undefined : {
       maxCostUsd: options.maxCostUsd,
@@ -284,6 +286,7 @@ export async function runSeededRealUserCampaign(options = {}) {
         blockedBeforeSendModelCalls: providerCalls.blockedBeforeSendModelCalls,
         budgetLedger: budgetLedger || null
       },
+      runtimePreconditions,
       scenario: publicCampaignScenario(campaign),
       group: redactGroup(group),
       workspacePath: groupPath,
@@ -1354,6 +1357,86 @@ export function prepareCampaignFixtures(groupPath, fixtures = []) {
     fs.mkdirSync(path.dirname(target), { recursive: true });
     fs.writeFileSync(target, String(fixture?.content || ""), "utf8");
   }
+}
+
+async function prepareCampaignRuntimePreconditions(groupPath, campaign = {}) {
+  if (campaign?.hiddenVerifier?.requiresCleanPythonEnvironment !== true) {
+    return { cleanPythonEnvironment: { required: false, status: "not_required" } };
+  }
+
+  const environmentRoot = path.join(groupPath, "shared", "environments", "pip");
+  const environmentPath = path.join(environmentRoot, ".venv");
+  fs.mkdirSync(environmentRoot, { recursive: true });
+  if (fs.existsSync(environmentPath)) {
+    return {
+      cleanPythonEnvironment: {
+        required: true,
+        status: "already_prepared",
+        path: path.relative(groupPath, environmentPath).replaceAll("\\", "/")
+      }
+    };
+  }
+
+  const result = await runHarnessCommand("python", ["-m", "venv", ".venv"], {
+    cwd: environmentRoot,
+    timeoutMs: 120000
+  });
+  if (result.exitCode !== 0 || !fs.existsSync(environmentPath)) {
+    throw harnessFailure(
+      "campaign_clean_python_environment_unavailable",
+      `Could not prepare the clean Python environment required by this capability-acquisition campaign. ${result.output}`.slice(0, 1600),
+      true
+    );
+  }
+  return {
+    cleanPythonEnvironment: {
+      required: true,
+      status: "prepared",
+      path: path.relative(groupPath, environmentPath).replaceAll("\\", "/")
+    }
+  };
+}
+
+function runHarnessCommand(file, args, options = {}) {
+  const timeoutMs = Number(options.timeoutMs) || 120000;
+  return new Promise((resolve) => {
+    let output = "";
+    let timedOut = false;
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      resolve(result);
+    };
+    let child;
+    try {
+      child = spawn(file, args, {
+        cwd: options.cwd,
+        windowsHide: true,
+        stdio: ["ignore", "pipe", "pipe"]
+      });
+    } catch (error) {
+      finish({ exitCode: -1, output: String(error?.message || error) });
+      return;
+    }
+    child.stdout.on("data", (chunk) => { output += String(chunk); });
+    child.stderr.on("data", (chunk) => { output += String(chunk); });
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill();
+    }, timeoutMs);
+    child.once("error", (error) => {
+      clearTimeout(timer);
+      finish({ exitCode: -1, output: `${output}\n${String(error?.message || error)}`.trim() });
+    });
+    child.once("exit", (code) => {
+      clearTimeout(timer);
+      finish({
+        exitCode: timedOut ? -1 : Number(code ?? -1),
+        output: `${timedOut ? "timed out" : ""}\n${output}`.trim()
+      });
+    });
+  });
 }
 
 async function startHarnessServer(options = {}) {

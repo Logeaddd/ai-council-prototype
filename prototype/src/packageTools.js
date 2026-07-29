@@ -29,6 +29,7 @@ export async function installPackageTool(request, options = {}) {
     source: "local_package_manager",
     manager,
     packageName: redactPackageSpec(packageName),
+    capabilityReferences: result.ok ? discoverCapabilityReferences(manager, packageName, envRoot, result.stdout) : [],
     environmentPath: path.relative(groupRoot, envRoot).replaceAll("\\", "/"),
     command: result.command,
     shell: result.shell,
@@ -43,6 +44,64 @@ export async function installPackageTool(request, options = {}) {
     code: result.code,
     error: result.error
   };
+}
+
+function discoverCapabilityReferences(manager, packageName, envRoot, stdout = "") {
+  if (manager !== "pip") return packageReferences(packageName);
+  const requested = new Set([
+    ...packageReferences(packageName),
+    ...successfulPipDistributions(stdout)
+  ].map(normalizeDistributionName).filter(Boolean));
+  const sitePackages = path.join(envRoot, ".venv", process.platform === "win32" ? "Lib" : "lib", "site-packages");
+  if (!fs.existsSync(sitePackages)) return [];
+  const references = [];
+  for (const entry of fs.readdirSync(sitePackages, { withFileTypes: true })) {
+    if (!entry.isDirectory() || !/\.(?:dist|egg)-info$/i.test(entry.name)) continue;
+    const metadataPath = path.join(sitePackages, entry.name, "METADATA");
+    const metadata = readText(metadataPath);
+    const name = metadata.match(/^Name:\s*(.+)$/mi)?.[1] || entry.name.replace(/\.(?:dist|egg)-info$/i, "");
+    if (!requested.has(normalizeDistributionName(name))) continue;
+    const topLevel = readText(path.join(sitePackages, entry.name, "top_level.txt"));
+    references.push(...topLevel.split(/\r?\n/).map(normalizeImportReference).filter(Boolean));
+    references.push(...pipRecordReferences(readText(path.join(sitePackages, entry.name, "RECORD"))));
+  }
+  return [...new Set([...packageReferences(packageName), ...references])];
+}
+
+function pipRecordReferences(record) {
+  return String(record || "").split(/\r?\n/).flatMap((line) => {
+    const relative = line.split(",", 1)[0].replaceAll("\\", "/");
+    if (!relative || relative.startsWith("../") || /\.(?:dist|egg)-info\//i.test(relative)) return [];
+    const topLevel = relative.split("/", 1)[0].replace(/\.py$/i, "");
+    if (!topLevel || topLevel.startsWith("__") || topLevel === "bin") return [];
+    return [normalizeImportReference(topLevel)];
+  }).filter(Boolean);
+}
+
+function successfulPipDistributions(stdout) {
+  const line = String(stdout || "").match(/Successfully installed\s+([^\r\n]+)/i)?.[1] || "";
+  return line.split(/\s+/).map((item) => item.replace(/-[0-9][A-Za-z0-9.+!_-]*$/, ""));
+}
+
+function packageReferences(value) {
+  const raw = String(value || "").trim();
+  if (!raw || /[\\/]/.test(raw)) return [];
+  const withoutRange = raw.split(/[<>=!~\s\[]/, 1)[0];
+  const secondAt = raw.startsWith("@") ? raw.indexOf("@", 1) : raw.indexOf("@");
+  const withoutAtVersion = secondAt > 0 ? raw.slice(0, secondAt) : raw;
+  return [...new Set([raw, withoutRange, withoutAtVersion].map(normalizeImportReference).filter(Boolean))];
+}
+
+function normalizeDistributionName(value) {
+  return String(value || "").trim().toLowerCase().replace(/[_.-]+/g, "-");
+}
+
+function normalizeImportReference(value) {
+  return String(value || "").trim().toLowerCase().replace(/[^a-z0-9_./-]/g, "");
+}
+
+function readText(filePath) {
+  try { return fs.readFileSync(filePath, "utf8"); } catch { return ""; }
 }
 
 function prepareEnvironment(groupRoot, manager) {
@@ -96,7 +155,9 @@ function installCommand(manager, packageName) {
     const venv = process.platform === "win32" ? ".venv\\Scripts\\python.exe" : ".venv/bin/python";
     const create = `${python} -m venv .venv`;
     const install = `${quoteShell(venv)} -m pip install ${quoted}`;
-    return process.platform === "win32" ? `if not exist .venv ${create} && ${install}` : `test -d .venv || ${create}; ${install}`;
+    return process.platform === "win32"
+      ? `(if not exist ".venv" (${create})) & ${install}`
+      : `test -d .venv || ${create}; ${install}`;
   }
   if (manager === "cargo") return `cargo add ${quoted}`;
   if (manager === "go") return `go get ${quoted}`;

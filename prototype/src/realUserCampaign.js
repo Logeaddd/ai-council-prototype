@@ -301,7 +301,10 @@ function imageToolAcquisitionTemplate(seed, random) {
       width,
       height,
       pixels: expectedImagePixels(spec),
-      requiresAcquisition: true
+      requiresAcquisition: true,
+      // A clean, real virtual environment prevents an ambient host package
+      // from being mistaken for agent-acquired capability evidence.
+      requiresCleanPythonEnvironment: true
     }
   };
 }

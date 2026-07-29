@@ -70,9 +70,11 @@ test("capability-acquisition campaigns require an unnamed third-party choice and
   assert.equal(campaign.task.capabilityAcquisitionRequired, true);
   assert.equal(campaign.hiddenVerifier.kind, "png_rgba");
   assert.equal(campaign.hiddenVerifier.requiresAcquisition, true);
+  assert.equal(campaign.hiddenVerifier.requiresCleanPythonEnvironment, true);
   assert.equal(campaign.fixtures.length, 1);
   assert.match(campaign.task.initialQuestion, /choose and acquire a suitable third-party package or CLI yourself/i);
   assert.doesNotMatch(JSON.stringify(publicScenario), /pngjs|pillow|imagemagick/i);
+  assert.equal(JSON.stringify(publicScenario).includes("requiresCleanPythonEnvironment"), false);
   assert.equal(JSON.stringify(publicScenario).includes(JSON.stringify(campaign.hiddenVerifier.pixels)), false);
 });
 

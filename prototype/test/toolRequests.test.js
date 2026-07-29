@@ -1459,6 +1459,49 @@ test("install_package installs a real local npm package into managed workspace e
   assert.equal(reused.results[0].result.stdout, "LOCAL_INSTALL_FACT");
 });
 
+test("install_package makes a real local pip package available to later run_code", async (t) => {
+  try {
+    execFileSync("python", ["--version"], { stdio: "pipe" });
+  } catch {
+    t.skip("python is not available on this host");
+    return;
+  }
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-install-pip-package-"));
+  const pkg = path.join(tmp, "local-pip-package");
+  fs.mkdirSync(pkg, { recursive: true });
+  fs.writeFileSync(path.join(pkg, "setup.py"), "from setuptools import setup\nsetup(name='local-pip-fact', version='1.0.0', py_modules=['local_pip_fact'])\n", "utf8");
+  fs.writeFileSync(path.join(pkg, "local_pip_fact.py"), "VALUE = 'LOCAL_PIP_FACT'\n", "utf8");
+  try {
+    const environmentRoot = path.join(tmp, "shared", "environments", "pip");
+    fs.mkdirSync(environmentRoot, { recursive: true });
+    execFileSync("python", ["-m", "venv", ".venv"], { cwd: environmentRoot, stdio: "pipe" });
+    const installed = await executeToolRequests({
+      permissionTier: "full",
+      groupPath: tmp,
+      agent: { id: "full", name: "Full" },
+      round: 1,
+      requests: [{ tool: "install_package", manager: "pip", packageName: pkg, reason: "Install a local Python package." }]
+    });
+    assert.equal(installed.results[0].status, "completed", JSON.stringify(installed.results[0]));
+    assert.equal(installed.results[0].result.environmentPath, "shared/environments/pip");
+    assert.equal(installed.results[0].result.capabilityReferences.includes("local_pip_fact"), true, JSON.stringify(installed.results[0]));
+
+    const used = await executeToolRequests({
+      permissionTier: "full",
+      groupPath: tmp,
+      agent: { id: "full", name: "Full" },
+      round: 2,
+      previousResults: installed.results,
+      requests: [{ tool: "run_code", language: "python", code: "import local_pip_fact\nprint(local_pip_fact.VALUE)", reason: "Use the acquired package." }]
+    });
+    assert.equal(used.results[0].status, "completed", JSON.stringify(used.results[0]));
+    assert.equal(used.results[0].result.stdout.trim(), "LOCAL_PIP_FACT");
+    assert.equal(used.results[0].capabilityUsage?.[0]?.acquisitionId, installed.results[0].id);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test("install_package supports cargo go and gem managers in managed workspace environments", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-install-package-managers-"));
   const bin = path.join(tmp, "fake-bin");
