@@ -83,10 +83,11 @@ const ALLOWED_TOOLS = new Set([
   "skill_enable",
   "skill_disable",
   "skill_remove",
+  "record_task_contract",
   "delegate_task"
 ]);
 const FILE_TOOLS = new Set(["list_directory", "read_file", "search_files", "grep_content"]);
-const CONTEXT_TOOLS = new Set(["search_context", "load_context"]);
+const CONTEXT_TOOLS = new Set(["record_task_contract", "search_context", "load_context"]);
 const ARCHIVE_TOOLS = new Set(["extract_archive", "create_archive"]);
 const WORKSPACE_EDIT_TOOLS = new Set(["workspace_edit"]);
 const COMMAND_TOOLS = new Set(["execute_command"]);
@@ -620,6 +621,16 @@ function failureStrategyFamily(item = {}) {
 
 async function executeOne(request, options) {
   try {
+    if (request.tool === "record_task_contract") {
+      if (typeof options.recordTaskContractTool !== "function") {
+        return resultRecord(request, { status: "failed", code: "task_contract_controller_unavailable", error: "No active execution controller can record the task contract." });
+      }
+      const result = await options.recordTaskContractTool(request, { nativeToolCall: request.nativeToolCall === true });
+      if (result?.ok === false) {
+        return resultRecord(request, { status: "failed", code: String(result.code || "task_contract_rejected"), error: String(result.error || "The task contract was rejected."), result });
+      }
+      return resultRecord(request, { status: "completed", result: result || { ok: true } });
+    }
     if (request.tool === "delegate_task") {
       if (typeof options.delegateTaskTool !== "function") {
         return resultRecord(request, { status: "failed", code: "delegation_controller_unavailable", error: "No active delivery controller can create a bounded delegation." });
@@ -1212,6 +1223,7 @@ function normalizeToolRequest(item, index) {
     allowedTools: arrayOfStrings(item.allowedTools || item.allowed_tools),
     allowWorkspaceMutation: Boolean(item.allowWorkspaceMutation || item.allow_workspace_mutation),
     allowedPaths: arrayOfStrings(item.allowedPaths || item.allowed_paths),
+    taskContract: objectField(item.taskContract || item.task_contract),
     mode: stringField(item.mode),
     maxRows: normalizeOptionalNumber(item.maxRows || item.max_rows),
     headers: objectField(item.headers),

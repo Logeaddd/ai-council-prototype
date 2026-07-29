@@ -508,6 +508,41 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
         };
       };
 
+      const registerNativeTaskContract = async (request, provenance = {}) => {
+        if (agent.id !== session.executionState?.executorId || session.executionState?.phase !== "intake") {
+          return { ok: false, code: "task_contract_owner_required", error: "Only the active intake owner may record the task contract before execution begins." };
+        }
+        const taskContract = request.taskContract;
+        if (!taskContract || typeof taskContract !== "object" || Array.isArray(taskContract)) {
+          return { ok: false, code: "invalid_task_contract", error: "record_task_contract requires one complete taskContract object." };
+        }
+        if (provenance.nativeToolCall === true) markNativeModelSource(taskContract);
+        response.task_contract = taskContract;
+        advanceExecutionState({
+          state: session.executionState,
+          session,
+          agent,
+          groupPath: options.groupPath,
+          question: executionQuestion,
+          response: {
+            ...response,
+            task_contract: taskContract,
+            tool_requests: [],
+            file_operations: []
+          }
+        });
+        refreshExecutionCheckpoint();
+        executionDirective = executionInstruction(session.executionState, agent);
+        if (session.executionState?.phase === "intake") {
+          return { ok: false, code: "invalid_task_contract", error: "The task contract is incomplete. Include its mode, objective, requirements, deliverables, completion criteria, and next action." };
+        }
+        return {
+          ok: true,
+          mode: session.executionState?.taskContract?.mode,
+          nextAction: session.executionState?.nextAction || "Proceed with the recorded task contract."
+        };
+      };
+
       establishTaskContractBeforeActions(response);
       if (!ownerRequestedDelegation(response, session.executionState, agent)) {
         processResponseFileOperations(response);
@@ -577,13 +612,18 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
         const requestedToolTimeoutMs = positiveDuration(group.settings.toolTimeoutMs);
         const ownerDelegationTurn = ownerRequestedDelegation(response, session.executionState, agent);
         const allRequestedTools = response.tool_requests || [];
+        const contractRequests = allRequestedTools.filter((request) => String(request?.tool || "").trim().toLowerCase() === "record_task_contract");
+        const requestsAfterContract = allRequestedTools.filter((request) => String(request?.tool || "").trim().toLowerCase() !== "record_task_contract");
         const deferredForDelegation = ownerDelegationTurn
-          ? allRequestedTools.filter((request) => String(request?.tool || "").trim().toLowerCase() !== "delegate_task")
+          ? requestsAfterContract.filter((request) => String(request?.tool || "").trim().toLowerCase() !== "delegate_task")
             .map((request) => deferredToolRequestForDelegation(request))
           : [];
-        const executableRequests = ownerDelegationTurn
-          ? allRequestedTools.filter((request) => String(request?.tool || "").trim().toLowerCase() === "delegate_task")
-          : allRequestedTools;
+        const executableRequests = [
+          ...contractRequests,
+          ...(ownerDelegationTurn
+            ? requestsAfterContract.filter((request) => String(request?.tool || "").trim().toLowerCase() === "delegate_task")
+            : requestsAfterContract)
+        ];
         const recoveryGate = gateDeliveryRecoveryToolRequests(session.executionState, agent, executableRequests);
         const executedToolResult = await executeToolRequests({
           requests: recoveryGate.accepted,
@@ -617,7 +657,8 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
           ],
           delegation: activeDelegationForAgent(session.executionState, agent),
           blockVerifiedContinuationCommands: Boolean(continuationContext && isPlainContinuationRequest(question)),
-          delegateTaskTool: registerNativeDelegation
+          delegateTaskTool: registerNativeDelegation,
+          recordTaskContractTool: registerNativeTaskContract
         });
         const toolResult = {
           ...executedToolResult,
@@ -1407,7 +1448,19 @@ async function* callRoundModel({ options, session, phase, round, agent, memberCo
     contextReceipt
   });
   throwIfAborted(options.signal);
-  const streamingCall = startAgentCallWithDeltaQueue(agent, messages, timeoutMs, options.signal, nativeToolDefinitions(nativeToolPermissionTier), nativeToolChoice, nativeToolConversation);
+  const taskIntakeCall = agent.id === session.executionState?.executorId && session.executionState?.phase === "intake";
+  const nativeTools = taskIntakeCall
+    ? nativeToolDefinitions(nativeToolPermissionTier, { tools: ["record_task_contract"] })
+    : nativeToolDefinitions(nativeToolPermissionTier);
+  const streamingCall = startAgentCallWithDeltaQueue(
+    agent,
+    messages,
+    timeoutMs,
+    options.signal,
+    nativeTools,
+    taskIntakeCall ? "required" : nativeToolChoice,
+    nativeToolConversation
+  );
   const pendingDeltas = [];
   while (!streamingCall.done() || streamingCall.hasDeltas()) {
     const delta = await streamingCall.nextDelta();

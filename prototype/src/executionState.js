@@ -2,6 +2,7 @@ import { isReviewerLike } from "./objectionLedger.js";
 import { hasMaterialWorkspaceChange } from "./observationCache.js";
 import { verifyRequestedArtifactProgress } from "./deliverableVerification.js";
 import { hasNativeModelSource } from "./nativeToolProvenance.js";
+import path from "node:path";
 
 export function createExecutionState({ question, agents = [], workspaceGroup, previousState } = {}) {
   if (previousState?.active && previousState.phase !== "complete") {
@@ -696,6 +697,7 @@ export function normalizeTaskContract(value) {
   if (mode !== "delivery" && mode !== "discussion") return undefined;
   const objective = String(value.objective || "").trim().slice(0, 1200);
   const deliverables = normalizeContractTextList(value.deliverables);
+  const artifacts = normalizeTaskContractArtifacts(value.artifacts);
   const completionCriteria = normalizeContractTextList(value.completion_criteria ?? value.completionCriteria);
   const nextAction = String(value.next_action ?? value.nextAction ?? "").trim().slice(0, 1200);
   const hasWorkspaceRequirement = Object.hasOwn(value, "requires_workspace") || Object.hasOwn(value, "requiresWorkspace");
@@ -709,11 +711,36 @@ export function normalizeTaskContract(value) {
     requiresWorkspace: Boolean(value.requires_workspace ?? value.requiresWorkspace),
     requiresVerification: Boolean(value.requires_verification ?? value.requiresVerification),
     deliverables,
+    artifacts,
     completionCriteria,
     nextAction,
     collaboration: normalizeCollaborationRequirement(value.collaboration, value),
     source: String(value.source || "model_task_contract")
   };
+}
+
+function normalizeTaskContractArtifacts(value) {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set();
+  const artifacts = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const artifactPath = String(item.path || item.file || "").trim().slice(0, 1200);
+    const rawExtension = String(item.extension || path.extname(artifactPath) || "").trim().toLowerCase();
+    const extension = rawExtension ? (rawExtension.startsWith(".") ? rawExtension : `.${rawExtension}`) : "";
+    if (!extension) continue;
+    const minimumPages = Math.max(0, Math.floor(Number(item.minimumPages ?? item.minimum_pages) || 0));
+    const key = `${artifactPath.toLowerCase()}:${extension}:${Boolean(item.requiresImages ?? item.requires_images)}:${minimumPages}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    artifacts.push({
+      ...(artifactPath ? { path: artifactPath } : {}),
+      extension,
+      requiresImages: Boolean(item.requiresImages ?? item.requires_images),
+      minimumPages
+    });
+  }
+  return artifacts.slice(0, 20);
 }
 
 function normalizeCollaborationRequirement(value, contract = {}) {

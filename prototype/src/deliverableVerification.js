@@ -168,7 +168,9 @@ export function normalizeRequestedArtifactRequirements(value) {
 }
 
 function requestedArtifactRequirements(question, session = {}) {
-  const contractRequirements = normalizeRequestedArtifactRequirements(session?.taskContract?.artifacts);
+  const contractRequirements = normalizeRequestedArtifactRequirements(
+    session?.taskContract?.artifacts || session?.executionState?.taskContract?.artifacts
+  );
   if (contractRequirements.length) return contractRequirements;
   return requestedArtifactExtensions(question).map((extension) => ({
     extension,
@@ -199,9 +201,35 @@ function requestedArtifactExtensions(question) {
     [".html", /\bhtml\b|网页文件|網頁檔/i]
   ];
   for (const [extension, pattern] of formats) {
-    if (pattern.test(text)) requested.push(extension);
+    if (hasRequestedFormatMention(text, pattern)) requested.push(extension);
   }
   return [...new Set(requested)];
+}
+
+function hasRequestedFormatMention(text, pattern) {
+  const flags = pattern.flags.includes("g") ? pattern.flags : `${pattern.flags}g`;
+  const matcher = new RegExp(pattern.source, flags);
+  let match;
+  while ((match = matcher.exec(text))) {
+    const start = match.index;
+    const sentenceStart = Math.max(
+      text.lastIndexOf("!", start),
+      text.lastIndexOf("?", start),
+      text.lastIndexOf("。", start),
+      text.lastIndexOf("！", start),
+      text.lastIndexOf("？", start),
+      text.lastIndexOf("\n", start)
+    ) + 1;
+    const before = text.slice(Math.max(sentenceStart, start - 120), start);
+    if (formatMentionIsForbidden(before)) continue;
+    return true;
+  }
+  return false;
+}
+
+function formatMentionIsForbidden(before) {
+  const negativePrefix = /(?:\b(?:do\s+not|don't|without|instead\s+of|rather\s+than|not)\b|不要|不准|禁止|勿|不可|不能|而非|不是)[\s\S]{0,120}$/iu;
+  return negativePrefix.test(before);
 }
 
 function normalizeArtifactExtension(value) {

@@ -4973,6 +4973,24 @@ test("provider-native tool calls execute through the council permission and veri
     }
     if (executorStep === 0) {
       executorStep += 1;
+      writeOpenAiDirectNativeToolStream(res, [{
+        tool: "record_task_contract",
+        reason: "Record the requested project before writing it.",
+        taskContract: {
+          mode: "delivery",
+          objective: "Create and test a small project.",
+          requiresWorkspace: true,
+          requiresVerification: true,
+          deliverables: ["A tested small project"],
+          artifacts: [],
+          completionCriteria: ["The project test command passes."],
+          nextAction: "Write the project files."
+        }
+      }], "contract");
+      return;
+    }
+    if (executorStep === 1) {
+      executorStep += 1;
       writeOpenAiDirectNativeToolStream(res, [
         { tool: "workspace_edit", action: "write", path: "shared/native/package.json", code: "{\"type\":\"module\",\"scripts\":{\"test\":\"node --test\"}}\n", reason: "Create package" },
         { tool: "workspace_edit", action: "write", path: "shared/native/app.js", code: "export const value = 42;\n", reason: "Create source" },
@@ -4980,7 +4998,7 @@ test("provider-native tool calls execute through the council permission and veri
       ], "write");
       return;
     }
-    if (executorStep === 1) {
+    if (executorStep === 2) {
       executorStep += 1;
       writeOpenAiDirectNativeToolStream(res, [{ tool: "run_tests", runner: "custom", cwd: "shared/native", command: "node --test", reason: "Verify project" }], "verify");
       return;
@@ -5015,14 +5033,16 @@ test("provider-native tool calls execute through the council permission and veri
     const testResult = session.toolExecutionResults.find((item) => item.tool === "run_tests");
     assert.equal(testResult.result.passed, true);
     assert.equal(session.executionState.phase, "complete");
-    assert.equal(requestBodies[0].tools.some((item) => item.function.name === "workspace_edit"), true);
-    assert.equal(requestBodies[0].tools.find((item) => item.function.name === "workspace_edit").function.parameters.additionalProperties, false);
+    assert.deepEqual(requestBodies[0].tools.map((item) => item.function.name), ["record_task_contract"]);
+    assert.equal(requestBodies[0].tool_choice, "required");
+    assert.equal(requestBodies[0].tools[0].function.parameters.additionalProperties, false);
+    assert.equal(session.executionState.taskContract.objective, "Create and test a small project.");
     const nativeFollowup = requestBodies.find((body) => body.messages?.some((item) => item.role === "tool"));
     assert.ok(nativeFollowup);
-    assert.equal(nativeFollowup.messages.some((item) => item.role === "assistant" && item.tool_calls?.some((call) => call.function.name === "workspace_edit")), true);
-    assert.equal(nativeFollowup.messages.filter((item) => item.role === "tool").length, 3);
+    assert.equal(nativeFollowup.messages.some((item) => item.role === "assistant" && item.tool_calls?.some((call) => call.function.name === "record_task_contract")), true);
+    assert.equal(nativeFollowup.messages.filter((item) => item.role === "tool").length, 1);
     assert.equal(session.toolRequests.filter((item) => item.tool === "workspace_edit").length, 3);
-    assert.equal(session.interimMessages.length, 2);
+    assert.equal(session.interimMessages.length, 3);
     assert.equal(session.interimMessages.every((item) => item.interim === true), true);
   } finally {
     await close(server);

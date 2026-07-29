@@ -146,6 +146,30 @@ test("requested artifact verification rejects a PDF header stub that cannot desc
   assert.equal(report.requirements[0].status, "missing_or_invalid");
 });
 
+test("artifact inference does not turn a forbidden alternative format into a required deliverable", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-required-negative-format-"));
+  fs.writeFileSync(path.join(root, "report.pdf"), makeMinimalPdf({ includeImage: true }));
+  const session = {
+    finalDecision: { answer: "Created report.pdf.", final_state: "ready_to_execute", blocking_issues: [], risks: [] },
+    toolExecutionResults: [{
+      id: "pdf-build",
+      tool: "execute_command",
+      status: "completed",
+      result: { ok: true, exitCode: 0, workspaceChanges: { created: [{ path: "report.pdf" }] } }
+    }],
+    fileOperationExecutionResults: []
+  };
+
+  const report = enforceRequestedArtifactRequirements({
+    groupPath: root,
+    question: "Create report.pdf as an illustrated PDF report. Verify it without replacing it with a text, HTML, or image file.",
+    session
+  });
+
+  assert.equal(report.status, "verified");
+  assert.deepEqual(report.requirements.map((item) => item.extension), [".pdf"]);
+});
+
 test("structured PDF requirements enforce images without relying on the model's completion claim", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-required-pdf-images-"));
   fs.writeFileSync(path.join(root, "report.pdf"), makeMinimalPdf());

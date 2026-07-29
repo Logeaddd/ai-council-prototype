@@ -6,7 +6,7 @@ test("native tool definitions expose only tools allowed by the permission tier",
   const text = nativeToolDefinitions("text").map((item) => item.name);
   const tool = nativeToolDefinitions("tool").map((item) => item.name);
   const full = nativeToolDefinitions("full").map((item) => item.name);
-  assert.deepEqual(text, ["search_context", "load_context"]);
+  assert.deepEqual(text, ["record_task_contract", "search_context", "load_context"]);
   assert.equal(tool.includes("read_file"), true);
   assert.equal(tool.includes("workspace_edit"), false);
   assert.equal(full.includes("workspace_edit"), true);
@@ -72,6 +72,33 @@ test("native delegation schema carries a bounded contributor handoff request", (
   assert.equal(request.assigneeId, "researcher");
   assert.equal(request.delegationTask, "Read the source fact only.");
   assert.deepEqual(request.expectedEvidence, ["Source file and extracted fact"]);
+});
+
+test("native task contract schema carries semantic artifact requirements", () => {
+  const contract = nativeToolDefinitions("full", { tools: ["record_task_contract"] })[0];
+  assert.equal(contract.name, "record_task_contract");
+  assert.deepEqual(contract.inputSchema.required, ["reason", "taskContract"]);
+  assert.equal(contract.inputSchema.properties.taskContract.additionalProperties, false);
+
+  const [request] = normalizeNativeToolCalls([{
+    id: "call_contract",
+    name: "record_task_contract",
+    input: {
+      reason: "Persist the requested document before creating it.",
+      taskContract: {
+        mode: "delivery",
+        objective: "Create the requested illustrated report.",
+        requiresWorkspace: true,
+        requiresVerification: true,
+        deliverables: ["One illustrated PDF report"],
+        artifacts: [{ path: "deliverables/report.pdf", extension: ".pdf", requiresImages: true, minimumPages: 2 }],
+        completionCriteria: ["The PDF exists and is structurally valid."],
+        nextAction: "Inspect the requested source material."
+      }
+    }
+  }]);
+  assert.equal(request.tool, "record_task_contract");
+  assert.equal(request.taskContract.artifacts[0].extension, ".pdf");
 });
 
 test("native provider calls normalize into the existing tool request protocol", () => {

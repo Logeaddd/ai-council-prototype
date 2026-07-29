@@ -1,6 +1,6 @@
 import { normalizeToolRequests } from "./toolRequests.js";
 
-const CONTEXT_TOOLS = ["search_context", "load_context"];
+const CONTEXT_TOOLS = ["record_task_contract", "search_context", "load_context"];
 const TOOL_TIER_TOOLS = [
   "web_search", "fetch_url", "api_request", "list_directory", "read_file", "search_files", "grep_content",
   ...CONTEXT_TOOLS, "skill_read", "database_query"
@@ -21,6 +21,44 @@ const OBJECT = { type: "object", additionalProperties: true };
 const STRING_LIST = { type: "array", items: STRING };
 const PRIMITIVE_LIST = { type: "array", items: { type: ["string", "number", "boolean", "null"] } };
 const OBJECT_LIST = { type: "array", items: OBJECT };
+const TASK_ARTIFACT = {
+  type: "object",
+  properties: {
+    path: STRING,
+    extension: STRING,
+    requiresImages: BOOLEAN,
+    minimumPages: { type: "integer", minimum: 0 }
+  },
+  additionalProperties: false,
+  anyOf: [{ required: ["path"] }, { required: ["extension"] }]
+};
+const TASK_COLLABORATION = {
+  type: "object",
+  properties: {
+    required: BOOLEAN,
+    beforeFirstMutation: BOOLEAN,
+    minimumDelegations: { type: "integer", minimum: 1, maximum: 8 },
+    types: STRING_LIST,
+    reason: STRING
+  },
+  additionalProperties: false
+};
+const TASK_CONTRACT = {
+  type: "object",
+  properties: {
+    mode: { type: "string", enum: ["delivery", "discussion"] },
+    objective: NON_EMPTY_STRING,
+    requiresWorkspace: BOOLEAN,
+    requiresVerification: BOOLEAN,
+    deliverables: { type: "array", items: NON_EMPTY_STRING },
+    artifacts: { type: "array", items: TASK_ARTIFACT },
+    completionCriteria: { type: "array", minItems: 1, items: NON_EMPTY_STRING },
+    nextAction: NON_EMPTY_STRING,
+    collaboration: TASK_COLLABORATION
+  },
+  required: ["mode", "objective", "requiresWorkspace", "requiresVerification", "deliverables", "completionCriteria", "nextAction"],
+  additionalProperties: false
+};
 
 // These names mirror normalizeToolRequest. Keeping the source of truth here
 // prevents a provider from inventing fields for an unrelated tool family.
@@ -121,7 +159,8 @@ const PROPERTY_DEFINITIONS = {
   expectedEvidence: { type: "array", minItems: 1, items: NON_EMPTY_STRING, description: "Concrete evidence the contributor must hand back." },
   allowedTools: STRING_LIST,
   allowWorkspaceMutation: BOOLEAN,
-  allowedPaths: STRING_LIST
+  allowedPaths: STRING_LIST,
+  taskContract: TASK_CONTRACT
 };
 
 const TOOL_SPECS = {
@@ -162,6 +201,7 @@ const TOOL_SPECS = {
   skill_enable: spec("Enable an installed skill for this group.", ["skillId"], ["skillId"]),
   skill_disable: spec("Disable a skill for this group.", ["skillId"], ["skillId"]),
   skill_remove: spec("Remove an installed skill.", ["skillId"], ["skillId"]),
+  record_task_contract: spec("Record the semantic task contract before any task action. This persists requested outcomes and completion checks; it does not itself create a deliverable.", ["taskContract"], ["taskContract"]),
   delegate_task: spec("Create one bounded contributor handoff. Only the delivery owner may use it; it never transfers final ownership.", ["delegationType", "assigneeId", "task", "expectedEvidence", "allowedTools", "allowWorkspaceMutation", "allowedPaths"], ["delegationType", "assigneeId", "task", "expectedEvidence"])
 };
 
