@@ -74,6 +74,60 @@ test("real server HTTP/SSE flow exposes durable TaskRun evidence from real local
   }
 });
 
+test("real HTTP/SSE rejects an unconfigured UI seat before it can call a provider", async () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-server-unconfigured-"));
+  const groupPath = path.join(sandbox, "group");
+  fs.mkdirSync(groupPath, { recursive: true });
+  const provider = await startCountingProvider();
+  const port = await availablePort();
+  const child = spawn(process.execPath, [path.join(root, "src", "server.js")], {
+    cwd: root,
+    env: {
+      ...process.env,
+      AI_COUNCIL_DATA_DIR: path.join(sandbox, "data"),
+      AI_COUNCIL_WORKSPACE_ROOT: sandbox,
+      AI_COUNCIL_UI_PORT: String(port),
+      AI_COUNCIL_UI_HOST: "127.0.0.1",
+      AI_COUNCIL_LOCAL_API_TOKEN: localApiToken
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+    windowsHide: true
+  });
+  let output = "";
+  child.stdout.on("data", (chunk) => { output += chunk; });
+  child.stderr.on("data", (chunk) => { output += chunk; });
+
+  try {
+    await waitForServer(port, child, () => output);
+    const response = await requestJson(port, "/api/council/events", {
+      question: "Create a local result.",
+      workspaceGroupPath: groupPath,
+      runtimeGroup: {
+        id: "unconfigured-ui-runtime",
+        name: "Unconfigured UI Runtime",
+        agents: [{
+          id: "builder",
+          name: "Builder",
+          role: "builder",
+          provider: "unconfigured",
+          apiBaseUrl: provider.apiBaseUrl,
+          model: "would-be-model",
+          weight: 1,
+          enabled: true
+        }]
+      }
+    });
+    assert.equal(response.status, 500, JSON.stringify(response.body));
+    assert.match(response.body.error, /Missing model provider configuration for: builder/);
+    assert.equal(provider.calls, 0, "an unconfigured UI seat must not reach a provider");
+  } finally {
+    child.kill();
+    await waitForExit(child);
+    await provider.close();
+    await removeDirectoryWithRetry(sandbox);
+  }
+});
+
 test("a malformed intake reply stays with its owner and becomes an honest incomplete run", async () => {
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-server-intake-contract-"));
   const groupPath = path.join(sandbox, "group");
@@ -453,6 +507,26 @@ function runtimeGroupWithResearcher(apiBaseUrl) {
       { ...base, id: "researcher", name: "Researcher", role: "Researcher" },
       { ...base, id: "finalizer", name: "Finalizer", role: "Finalizer", judge: true }
     ]
+  };
+}
+
+async function startCountingProvider() {
+  let calls = 0;
+  const server = http.createServer((req, res) => {
+    calls += 1;
+    req.resume();
+    res.writeHead(500, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "provider_must_not_be_called" }));
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  return {
+    apiBaseUrl: `http://127.0.0.1:${address.port}/v1`,
+    get calls() { return calls; },
+    close: () => new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))
   };
 }
 

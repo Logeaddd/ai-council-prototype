@@ -17,6 +17,7 @@ export function workspaceGroupToRuntimeGroup(group = {}, maxRounds, mutedSeatIds
       const id = seat.seatId || seat.id || "seat_" + String(index + 1).padStart(2, "0")
       const baseUrl = seat.apiUrl || seat.apiBaseUrl || ""
       const apiKey = seat.apiKey || ""
+      const provider = providerForSeat(seat.providerPreset, baseUrl, apiKey)
       const reviewer = Boolean(seat.reviewer || seat.mandatoryRedTeam)
       const judge = Boolean(seat.judge)
       return {
@@ -24,11 +25,11 @@ export function workspaceGroupToRuntimeGroup(group = {}, maxRounds, mutedSeatIds
         name: seat.displayName || seat.name || (judge ? "summarizer" : reviewer ? "reviewer" : id),
         role: reviewer ? "reviewer" : judge ? "summarizer" : runtimeRole(seat, id),
         team: seat.team || "",
-        provider: providerForSeat(seat.providerPreset, baseUrl, apiKey),
-        providerPreset: seat.providerPreset || inferProviderPreset(baseUrl),
-        apiBaseUrl: baseUrl || "mock://local",
+        provider,
+        providerPreset: seat.providerPreset || (baseUrl ? inferProviderPreset(baseUrl) : "unconfigured"),
+        apiBaseUrl: baseUrl,
         apiKey,
-        model: seat.model || seat.currentModel || "mock-builder",
+        model: seat.model || seat.currentModel || "",
         reasoningEffort: seat.reasoningEffort || "",
         weight: Number(seat.weight || 1),
         enabled: seat.enabled !== false && !muted.has(id),
@@ -59,8 +60,9 @@ function inferProviderPreset(baseUrl = "") {
 }
 
 function providerForSeat(providerPreset = "", baseUrl = "", apiKey = "") {
-  if (!baseUrl) return "mock"
-  const preset = providerPreset || inferProviderPreset(baseUrl)
-  if (!apiKey && !["ollama", "lmstudio", "vllm-local"].includes(preset)) return "mock"
+  const preset = String(providerPreset || inferProviderPreset(baseUrl)).trim().toLowerCase()
+  if (preset === "mock" || baseUrl === "mock://local") return "mock"
+  if (!baseUrl) return "unconfigured"
+  if (!apiKey && !["ollama", "lmstudio", "vllm-local"].includes(preset)) return "unconfigured"
   return preset === "anthropic" ? "anthropic-messages" : "openai-compatible"
 }

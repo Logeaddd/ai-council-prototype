@@ -341,9 +341,9 @@ export function CouncilApp() {
         root: rootPath,
         groupFolderName: name,
         members: [
-          { displayName: "成员 1", model: "mock-builder", role: "builder" },
-          { displayName: "审查者", model: "mock-reviewer", role: "reviewer", reviewer: true },
-          { displayName: "总结者", model: "mock-judge", role: "judge", judge: true },
+          { displayName: "成员 1", model: "", role: "builder" },
+          { displayName: "审查者", model: "", role: "reviewer", reviewer: true },
+          { displayName: "总结者", model: "", role: "judge", judge: true },
         ],
       })
       const index = await api<GroupIndexResponse>("/api/groups-index")

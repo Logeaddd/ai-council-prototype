@@ -302,7 +302,8 @@ async function runComposerDropProbe(window, filePath) {
 }
 
 async function runPrivateDraftProbe(window) {
-  await createGroupThroughUi(window, "private_probe_group_not_ready");
+  const created = await createGroupThroughUi(window, "private_probe_group_not_ready");
+  const unconfiguredSeatCount = await assertNewProbeGroupIsUnconfigured(window, created.groupPath);
   const groupDraft = "group draft stays in the group composer";
   const privateDraft = "private draft stays with the selected member";
   await window.webContents.executeJavaScript(`
@@ -351,7 +352,7 @@ async function runPrivateDraftProbe(window) {
 
   await focusProbeElement(window, "[data-testid='private-chat-draft']", "private_composer_missing");
   await typeProbeText(window, "[data-testid='private-chat-draft']", privateDraft, "private_composer_text_input_failed");
-  return window.webContents.executeJavaScript(`
+  const result = await window.webContents.executeJavaScript(`
     (async () => {
       async function waitFor(getValue, reason, timeoutMs = 10000) {
         const deadline = Date.now() + timeoutMs;
@@ -408,10 +409,12 @@ async function runPrivateDraftProbe(window) {
       };
     })()
   `, true);
+  return { ...result, unconfiguredSeatCount };
 }
 
 async function runTranscriptFollowProbe(window) {
   await createGroupThroughUi(window, "transcript_probe_group_not_ready");
+  await configureExplicitMockForDesktopProbe(window, "transcript_probe_mock_configuration_failed");
   await focusProbeElement(window, "[data-testid='group-chat-draft']", "transcript_probe_composer_missing");
   const question = `Transcript follow probe. ${"This deliberately creates visible transcript height. ".repeat(420)}`;
   await typeProbeText(window, "[data-testid='group-chat-draft']", question, "transcript_probe_text_input_failed");
@@ -504,6 +507,7 @@ async function runTranscriptFollowProbe(window) {
 
 async function runHistorySeedProbe(window) {
   await createGroupThroughUi(window, "history_seed_group_not_ready");
+  await configureExplicitMockForDesktopProbe(window, "history_seed_mock_configuration_failed");
   const marker = historyProbeMarker || `history-recovery-${Date.now()}`;
   const question = `Persist this history recovery marker exactly: ${marker}`;
   await typeProbeText(window, "[data-testid='group-chat-draft']", question, "history_seed_composer_text_input_failed");
@@ -600,7 +604,10 @@ async function createGroupThroughUi(window, reason) {
         const composer = document.querySelector("[data-testid='group-chat-draft']");
         const privateButton = document.querySelector("[data-testid='open-private-chat']");
         if (composer?.dataset.draftReady === "true" && privateButton && !privateButton.disabled) {
-          return { ok: true };
+          const indexResponse = await fetch("/api/groups-index");
+          const index = await indexResponse.json();
+          const group = (index.groups || []).find((item) => item.id === index.lastGroupId) || index.groups?.[0];
+          if (group?.path) return { ok: true, groupPath: group.path };
         }
         await sleep(50);
       }
@@ -618,6 +625,83 @@ async function createGroupThroughUi(window, reason) {
       }));
     })()
   `, true);
+}
+
+async function assertNewProbeGroupIsUnconfigured(window, groupPath) {
+  const result = await window.webContents.executeJavaScript(`
+    (async () => {
+      const groupPath = ${JSON.stringify(groupPath || "")};
+      if (!groupPath) throw new Error("probe_group_path_missing");
+      const response = await fetch("/api/group?groupPath=" + encodeURIComponent(groupPath));
+      const group = await response.json();
+      const seats = group.seats || group.agents || [];
+      const badSeats = seats.filter((seat) => (
+        String(seat.apiBaseUrl || seat.apiUrl || "") === "mock://local"
+        || String(seat.providerPreset || "").toLowerCase() === "mock"
+        || /^mock-/i.test(String(seat.model || seat.currentModel || ""))
+      ));
+      if (!seats.length || badSeats.length) {
+        throw new Error("new_group_has_fabricated_mock_provider:" + JSON.stringify({
+          seatCount: seats.length,
+          badSeats: badSeats.map((seat) => seat.seatId || seat.id),
+        }));
+      }
+      return { ok: true, unconfiguredSeatCount: seats.length };
+    })()
+  `, true);
+  return Number(result?.unconfiguredSeatCount || 0);
+}
+
+// Desktop probes need deterministic local output to exercise persistence and
+// streaming. They opt into the mock provider here; normal group creation never
+// receives this configuration.
+async function configureExplicitMockForDesktopProbe(window, reason) {
+  const configured = await window.webContents.executeJavaScript(`
+    (async () => {
+      const indexResponse = await fetch("/api/groups-index");
+      const index = await indexResponse.json();
+      const groupRecord = (index.groups || []).find((item) => item.id === index.lastGroupId) || index.groups?.[0];
+      if (!groupRecord?.path) throw new Error("probe_group_path_missing");
+      const groupResponse = await fetch("/api/group?groupPath=" + encodeURIComponent(groupRecord.path));
+      const group = await groupResponse.json();
+      const seats = group.seats || group.agents || [];
+      if (!seats.length) throw new Error("probe_group_has_no_seats");
+      for (let index = 0; index < seats.length; index += 1) {
+        const seat = seats[index];
+        const response = await fetch("/api/group/seat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            groupPath: groupRecord.path,
+            seatId: seat.seatId || seat.id,
+            providerPreset: "mock",
+            apiBaseUrl: "mock://local",
+            model: "probe-mock-" + (index + 1),
+          }),
+        });
+        if (!response.ok) {
+          const error = await response.json().catch(() => ({}));
+          throw new Error("probe_mock_configuration_request_failed:" + String(error.error || response.status));
+        }
+      }
+      return { ok: true, groupPath: groupRecord.path, seatCount: seats.length };
+    })()
+  `, true);
+  if (!configured?.ok) throw new Error(reason);
+  await reloadProbeWindow(window, reason);
+  return configured;
+}
+
+async function reloadProbeWindow(window, reason) {
+  const loaded = new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${reason}:reload_timeout`)), 10000);
+    window.webContents.once("did-finish-load", () => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+  window.webContents.reloadIgnoringCache();
+  await loaded;
 }
 
 async function focusProbeElement(window, selector, reason) {

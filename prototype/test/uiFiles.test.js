@@ -589,6 +589,11 @@ test("renderer keeps per-group drafts and opens real chat history", () => {
   assert.match(data, /完全允许就是自主执行/);
 });
 
+test("new UI groups do not ship hidden mock model defaults", () => {
+  const app = read("renderer/components/council/council-app.tsx");
+  assert.doesNotMatch(app, /mock-builder|mock-reviewer|mock-judge/);
+});
+
 test("renderer data layer exposes real public memory APIs for the future settings UI", () => {
   const live = read("renderer/lib/council-live.ts");
   assert.match(live, /PublicMemoryRecord/);

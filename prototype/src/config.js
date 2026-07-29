@@ -30,7 +30,10 @@ export function validateGroupConfig(group) {
   const enabled = group.agents.filter((agent) => agent.enabled);
   if (!enabled.length) throw new Error("Group needs at least one enabled agent");
   for (const agent of enabled) {
-    for (const key of ["id", "name", "role", "provider", "apiBaseUrl", "model"]) {
+    const requiredKeys = agent.provider === "unconfigured"
+      ? ["id", "name", "role", "provider"]
+      : ["id", "name", "role", "provider", "apiBaseUrl", "model"];
+    for (const key of requiredKeys) {
       if (!agent[key]) throw new Error(`Agent ${agent.id ?? "(unknown)"} missing ${key}`);
     }
     if (typeof agent.weight !== "number" || agent.weight <= 0) {
@@ -83,7 +86,12 @@ export function validateGroupConfig(group) {
 
 export function validateRuntimeEnv(group) {
   const missing = new Set();
+  const unconfigured = [];
   for (const agent of group.agents.filter((item) => item.enabled)) {
+    if (agent.provider === "unconfigured") {
+      unconfigured.push(agent.id || agent.name || "unknown");
+      continue;
+    }
     if (!["openai-compatible", "anthropic-messages"].includes(agent.provider)) continue;
     if (!agent.apiKey && agent.apiKeyEnv && !process.env[agent.apiKeyEnv]) missing.add(agent.apiKeyEnv);
     if (!agent.apiKey && !agent.apiKeyEnv) missing.add(`${agent.id}.apiKey`);
@@ -91,6 +99,9 @@ export function validateRuntimeEnv(group) {
     collectEnvReference(agent.model, missing);
   }
 
+  if (unconfigured.length) {
+    throw new Error(`Missing model provider configuration for: ${[...new Set(unconfigured)].sort().join(", ")}. Configure an endpoint, model, and API key before starting the council.`);
+  }
   if (missing.size) {
     throw new Error(`Missing required environment variables: ${[...missing].sort().join(", ")}`);
   }

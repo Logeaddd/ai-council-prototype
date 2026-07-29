@@ -324,13 +324,13 @@ export function workspaceGroupToMembers(
     const usage = usageMembers.find((item) => item.seatId === id)
     const totals = usage?.totals || {}
     const baseUrl = seat.apiUrl || seat.apiBaseUrl || ""
-    const provider = inferProviderName(baseUrl, seat.providerPreset)
+    const provider = inferProviderName(baseUrl, seat.providerPreset, seat.apiKey)
     return {
       id,
       name: seat.displayName || seat.name || seat.role || id,
       role,
       provider,
-      model: seat.model || seat.currentModel || "未配置模型",
+      model: provider === "未配置" ? "未配置模型" : seat.model || seat.currentModel || "未配置模型",
       baseUrl,
       apiKey: seat.apiKey ? "set" : provider === "Mock" ? "local" : "unset",
       permission: permissions.seatTiers?.[id] || defaultTier,
@@ -1047,8 +1047,11 @@ function inferProviderPreset(baseUrl = "") {
   return "custom"
 }
 
-function inferProviderName(baseUrl = "", preset = "") {
-  if (!baseUrl || baseUrl === "mock://local") return "Mock"
+function inferProviderName(baseUrl = "", preset = "", apiKey = "") {
+  const selected = String(preset || "").trim().toLowerCase()
+  if (baseUrl === "mock://local" || selected === "mock") return "Mock"
+  const inferred = selected || inferProviderPreset(baseUrl)
+  if (!baseUrl || (!apiKey && !["ollama", "lmstudio", "vllm-local"].includes(inferred))) return "未配置"
   if (preset) return preset
   return inferProviderPreset(baseUrl)
 }

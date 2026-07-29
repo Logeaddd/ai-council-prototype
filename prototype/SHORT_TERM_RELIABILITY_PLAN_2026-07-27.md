@@ -379,6 +379,18 @@ Completed on 2026-07-27:
   the no-side-effect CLI help guard passed 770 tests with the same zero
   failures and one Windows-only skip. This is desktop UI and local API
   evidence only, not a Provider capability claim.
+* UI-created groups no longer fabricate `mock://local` endpoints or
+  `mock-*` model names when the user has not configured a provider
+  (`a0432a0`). The runtime carries those seats as `unconfigured`, rejects
+  them at the real `/api/council/events` boundary before any Provider call,
+  and presents the same state in the renderer. Electron probes configure mock
+  only inside their isolated test setup, never through normal group creation.
+  The regression covers the renderer conversion, the real HTTP/SSE route with
+  a counting Provider fixture, group creation in Electron, transcript follow,
+  and restart history recovery. The full local suite passed 785 tests with 0
+  failures and 1 Windows platform skip; the optimized renderer build passed.
+  This eliminates a false-success path but does not claim real-provider task
+  completion.
 
 Still open before the real-provider release gate:
 

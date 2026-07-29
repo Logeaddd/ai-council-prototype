@@ -139,6 +139,9 @@ test("desktop history recovery probe restarts the app before checking the persis
   assert.match(main, /AI_COUNCIL_E2E_HISTORY_REOPEN_PROBE/);
   assert.match(main, /runHistorySeedProbe/);
   assert.match(main, /runHistoryReopenProbe/);
+  assert.match(main, /assertNewProbeGroupIsUnconfigured/);
+  assert.match(main, /configureExplicitMockForDesktopProbe/);
+  assert.match(main, /new_group_has_fabricated_mock_provider/);
   assert.match(main, /session\.status !== "running"/);
   assert.match(main, /Number\(session\.messageCount \|\| 0\) >= 2/);
   assert.match(topBar, /data-testid="open-chat-history"/);

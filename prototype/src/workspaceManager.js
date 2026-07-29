@@ -35,7 +35,7 @@ export function initGroupWorkspace(options) {
     return {
       seatId,
       displayName,
-      currentModel: member.model || displayName,
+      currentModel: member.model || "",
       privateFolder: path.relative(groupPath, privateFolder).replaceAll("\\", "/"),
       role: member.role || "",
       team: member.team || "",
@@ -126,8 +126,8 @@ export function addMember(options) {
   const seat = {
     seatId,
     displayName,
-    currentModel: options.model || displayName,
-    model: options.model || displayName,
+    currentModel: options.model || "",
+    model: options.model || "",
     privateFolder: path.relative(groupPath, privateFolder).replaceAll("\\", "/"),
     role,
     team: options.team || "",
