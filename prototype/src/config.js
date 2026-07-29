@@ -93,8 +93,9 @@ export function validateRuntimeEnv(group) {
       continue;
     }
     if (!["openai-compatible", "anthropic-messages"].includes(agent.provider)) continue;
+    const credentialPoolId = String(agent.credentialPoolId || agent.credentialPool || "").trim();
     if (!agent.apiKey && agent.apiKeyEnv && !process.env[agent.apiKeyEnv]) missing.add(agent.apiKeyEnv);
-    if (!agent.apiKey && !agent.apiKeyEnv) missing.add(`${agent.id}.apiKey`);
+    if (!agent.apiKey && !agent.apiKeyEnv && !credentialPoolId) missing.add(`${agent.id}.apiKey`);
     collectEnvReference(agent.apiBaseUrl, missing);
     collectEnvReference(agent.model, missing);
   }

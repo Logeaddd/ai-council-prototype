@@ -102,6 +102,7 @@ test("adding a member stores full configuration, role flags, and permission tier
     providerPreset: "deepseek",
     apiBaseUrl: "https://api.deepseek.com/v1",
     apiKey: "sk-test",
+    credentialPoolId: "deepseek-primary",
     permission: "tool",
     role: "reviewer",
     reviewIntensity: 3
@@ -116,6 +117,7 @@ test("adding a member stores full configuration, role flags, and permission tier
   assert.equal(savedSeat.apiBaseUrl, "https://api.deepseek.com/v1");
   assert.equal(savedSeat.apiUrl, "https://api.deepseek.com/v1");
   assert.equal(savedSeat.apiKey, "sk-test");
+  assert.equal(savedSeat.credentialPoolId, "deepseek-primary");
   assert.equal(savedSeat.role, "reviewer");
   assert.equal(savedSeat.reviewer, true);
   assert.equal(savedSeat.mandatoryRedTeam, true);

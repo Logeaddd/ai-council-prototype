@@ -213,3 +213,19 @@ test("allows direct runtime API keys without env vars", () => {
 
   assert.doesNotThrow(() => validateRuntimeEnv(group));
 });
+
+test("allows a local credential-pool reference without requiring a plaintext env key", () => {
+  const group = validateGroupConfig(baseGroup([{
+    id: "builder",
+    name: "Builder",
+    role: "Build",
+    provider: "openai-compatible",
+    apiBaseUrl: "https://api.deepseek.com/v1",
+    credentialPoolId: "deepseek-primary",
+    model: "deepseek-chat",
+    weight: 1,
+    enabled: true
+  }]));
+
+  assert.doesNotThrow(() => validateRuntimeEnv(group));
+});

@@ -1100,6 +1100,9 @@ function updateGroupSeat(groupPath, body = {}) {
     const apiKey = cleanOptionalString(patch.apiKey);
     if (apiKey && !apiKey.includes("***")) seat.apiKey = apiKey;
   }
+  if (patch.credentialPoolId !== undefined || patch.credentialPool !== undefined) {
+    seat.credentialPoolId = cleanOptionalString(patch.credentialPoolId ?? patch.credentialPool);
+  }
   if (patch.enabled !== undefined) {
     seat.enabled = Boolean(patch.enabled);
   }

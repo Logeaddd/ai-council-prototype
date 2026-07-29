@@ -1,6 +1,7 @@
 import { scheduleProviderCall } from "./rateLimiter.js";
 import { assertSafeApiBaseUrl } from "./apiBaseUrlGuard.js";
 import { anthropicToolDefinitions, openAiToolDefinitions } from "./nativeToolProtocol.js";
+import { recordCredentialPoolOutcome, resolveCredentialCandidates } from "./credentialVault.js";
 
 export async function callAgent(agent, messages, options = {}) {
   const result = await callAgentResult(agent, messages, options);
@@ -15,8 +16,7 @@ export async function callAgentResult(agent, messages, options = {}) {
 }
 
 async function callOpenAiCompatible(agent, messages, options) {
-  const apiKey = agent.apiKey || (agent.apiKeyEnv ? process.env[agent.apiKeyEnv] : "");
-  if (!apiKey) throw new Error(`Missing API key for agent: ${agent.id}`);
+  const credentials = resolveAgentCredentials(agent);
   const apiBaseUrl = await assertSafeApiBaseUrl(resolveMaybeEnv(agent.apiBaseUrl), {
     allowUnsafePrivateNetwork: Boolean(options.allowUnsafePrivateNetwork || agent.allowUnsafePrivateNetwork)
   });
@@ -24,33 +24,18 @@ async function callOpenAiCompatible(agent, messages, options) {
   const maxRetries = normalizeRetryCount(agent.retry?.maxRetries ?? agent.rateLimit?.maxRetries ?? options.maxRetries ?? 1);
   const backoffMs = normalizeBackoffMs(agent.retry?.backoffMs ?? agent.rateLimit?.backoffMs ?? options.backoffMs ?? 250);
 
-  return await scheduleProviderCall(agent, messages, async () => {
-    for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
-      try {
-        return await callOpenAiCompatibleOnce({
-          agent,
-          apiBaseUrl,
-          apiKey,
-          model,
-          messages,
-          options
-        });
-      } catch (error) {
-        if (options.nativeTools?.length && isNativeToolUnsupported(error)) {
-          return await callOpenAiCompatibleOnce({ agent, apiBaseUrl, apiKey, model, messages, options: { ...options, nativeTools: [] } });
-        }
-        if (error.name === "AbortError" || attempt >= maxRetries || !isRetryableError(error)) {
-          throw error;
-        }
-        await sleep(backoffMs * (2 ** attempt), options.signal);
-      }
-    }
-  }, options);
+  return await scheduleProviderCall(agent, messages, () => callWithCredentialCandidates({
+    agent,
+    credentials,
+    options,
+    call: (apiKey, callOptions) => callOpenAiCompatibleOnce({ agent, apiBaseUrl, apiKey, model, messages, options: callOptions }),
+    maxRetries,
+    backoffMs
+  }), options);
 }
 
 async function callAnthropicMessages(agent, messages, options) {
-  const apiKey = agent.apiKey || (agent.apiKeyEnv ? process.env[agent.apiKeyEnv] : "");
-  if (!apiKey) throw new Error(`Missing API key for agent: ${agent.id}`);
+  const credentials = resolveAgentCredentials(agent);
   const apiBaseUrl = await assertSafeApiBaseUrl(resolveMaybeEnv(agent.apiBaseUrl), {
     allowUnsafePrivateNetwork: Boolean(options.allowUnsafePrivateNetwork || agent.allowUnsafePrivateNetwork)
   });
@@ -59,28 +44,95 @@ async function callAnthropicMessages(agent, messages, options) {
   const maxRetries = normalizeRetryCount(agent.retry?.maxRetries ?? agent.rateLimit?.maxRetries ?? options.maxRetries ?? 1);
   const backoffMs = normalizeBackoffMs(agent.retry?.backoffMs ?? agent.rateLimit?.backoffMs ?? options.backoffMs ?? 250);
 
-  return await scheduleProviderCall(agent, messages, async () => {
-    for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
-      try {
-        return await callAnthropicMessagesOnce({
-          agent,
-          apiBaseUrl,
-          apiKey,
-          model,
-          messages,
-          options
-        });
-      } catch (error) {
-        if (options.nativeTools?.length && isNativeToolUnsupported(error)) {
-          return await callAnthropicMessagesOnce({ agent, apiBaseUrl, apiKey, model, messages, options: { ...options, nativeTools: [] } });
-        }
-        if (error.name === "AbortError" || attempt >= maxRetries || !isRetryableError(error)) {
-          throw error;
-        }
-        await sleep(backoffMs * (2 ** attempt), options.signal);
-      }
+  return await scheduleProviderCall(agent, messages, () => callWithCredentialCandidates({
+    agent,
+    credentials,
+    options,
+    call: (apiKey, callOptions) => callAnthropicMessagesOnce({ agent, apiBaseUrl, apiKey, model, messages, options: callOptions }),
+    maxRetries,
+    backoffMs
+  }), options);
+}
+
+async function callWithCredentialCandidates({ agent, credentials, options, call, maxRetries, backoffMs }) {
+  let lastFailoverError;
+  for (const credential of credentials) {
+    try {
+      const result = await callWithRetries({ credential, options, call, maxRetries, backoffMs });
+      recordCredentialOutcome(credential, { status: "success" }, options);
+      return {
+        ...result,
+        credential: publicCredentialEvent(credential, "success")
+      };
+    } catch (error) {
+      const category = credentialFailureCategory(error);
+      if (!credential.poolId || !category) throw error;
+      recordCredentialOutcome(credential, { status: "failed", category }, options);
+      lastFailoverError = error;
     }
-  }, options);
+  }
+  const error = new Error(`All credential-pool keys are temporarily unavailable for agent: ${agent.id || "unknown"}.`);
+  error.code = "credential_pool_exhausted";
+  error.cause = lastFailoverError;
+  throw error;
+}
+
+async function callWithRetries({ credential, options, call, maxRetries, backoffMs }) {
+  for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+    try {
+      return await call(credential.apiKey, options);
+    } catch (error) {
+      if (options.nativeTools?.length && isNativeToolUnsupported(error)) {
+        return await call(credential.apiKey, { ...options, nativeTools: [] });
+      }
+      if (error.name === "AbortError" || attempt >= maxRetries || !isRetryableError(error)) throw error;
+      await sleep(backoffMs * (2 ** attempt), options.signal);
+    }
+  }
+  throw new Error("Provider retry loop ended unexpectedly.");
+}
+
+function resolveAgentCredentials(agent = {}) {
+  const poolId = String(agent.credentialPoolId || agent.credentialPool || "").trim();
+  if (poolId) return resolveCredentialCandidates(poolId).candidates;
+  const apiKey = agent.apiKey || (agent.apiKeyEnv ? process.env[agent.apiKeyEnv] : "");
+  if (!apiKey) throw new Error(`Missing API key for agent: ${agent.id}`);
+  return [{ apiKey, fingerprint: "inline", source: "agent", poolId: "" }];
+}
+
+function recordCredentialOutcome(credential, outcome, options = {}) {
+  if (!credential.poolId) return;
+  try {
+    recordCredentialPoolOutcome(credential.poolId, credential.fingerprint, outcome);
+  } catch {
+    // The provider call succeeded or already failed independently. Vault audit
+    // persistence must not convert that fact into a false task failure.
+  }
+  try {
+    options.onCredentialEvent?.(publicCredentialEvent(credential, outcome.status, outcome.category));
+  } catch {
+    // Observability callbacks are intentionally best-effort.
+  }
+}
+
+function publicCredentialEvent(credential = {}, status = "", category = "") {
+  return {
+    source: credential.source || "",
+    poolId: credential.poolId || "",
+    fingerprint: credential.fingerprint || "",
+    status,
+    category: category || ""
+  };
+}
+
+function credentialFailureCategory(error) {
+  const status = Number(error?.status);
+  const message = String(error?.message || "").toLowerCase();
+  if ([401, 403].includes(status)) return "authentication";
+  if (status === 402 || /insufficient[_ ]?(balance|quota)|quota[_ ]?exceeded|billing/.test(message)) return "quota";
+  if (status === 429) return "rate_limit";
+  if ([500, 502, 503, 504].includes(status) || error?.code === "stream_idle_timeout" || error?.name === "TypeError") return "transient";
+  return "";
 }
 
 async function callAnthropicMessagesOnce({ agent, apiBaseUrl, apiKey, model, messages, options }) {

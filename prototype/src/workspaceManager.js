@@ -48,6 +48,7 @@ export function initGroupWorkspace(options) {
       apiBaseUrl: member.apiBaseUrl || member.apiUrl || "",
       apiUrl: member.apiUrl || member.apiBaseUrl || "",
       apiKey: member.apiKey || "",
+      credentialPoolId: member.credentialPoolId || member.credentialPool || "",
       reasoningEffort: normalizeReasoningEffort(member.reasoningEffort)
     };
   });
@@ -141,7 +142,8 @@ export function addMember(options) {
     providerPreset: options.providerPreset || "",
     apiBaseUrl: options.apiBaseUrl || options.apiUrl || "",
     apiUrl: options.apiUrl || options.apiBaseUrl || "",
-    apiKey: options.apiKey || ""
+    apiKey: options.apiKey || "",
+    credentialPoolId: options.credentialPoolId || options.credentialPool || ""
   };
 
   if (group.seats) group.seats.push(seat);
