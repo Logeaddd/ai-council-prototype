@@ -54,6 +54,7 @@ test("native delegation schema carries a bounded contributor handoff request", (
   const delegation = nativeToolDefinitions("full", { tools: ["delegate_task"] })[0];
   assert.equal(delegation.name, "delegate_task");
   assert.deepEqual(delegation.inputSchema.required, ["reason", "delegationType", "assigneeId", "task", "expectedEvidence"]);
+  assert.equal("allowRuntimeMutation" in delegation.inputSchema.properties, true);
 
   const [request] = normalizeNativeToolCalls([{
     id: "call_delegate",
@@ -72,6 +73,22 @@ test("native delegation schema carries a bounded contributor handoff request", (
   assert.equal(request.assigneeId, "researcher");
   assert.equal(request.delegationTask, "Read the source fact only.");
   assert.deepEqual(request.expectedEvidence, ["Source file and extracted fact"]);
+
+  const [unblocker] = normalizeNativeToolCalls([{
+    id: "call_unblocker",
+    name: "delegate_task",
+    input: {
+      delegationType: "unblocker",
+      assigneeId: "runtime-helper",
+      task: "Acquire one missing managed runtime.",
+      expectedEvidence: ["Verified runtime command"],
+      allowedTools: ["provision_tool"],
+      allowWorkspaceMutation: false,
+      allowRuntimeMutation: true,
+      reason: "Delegate bounded runtime acquisition."
+    }
+  }]);
+  assert.equal(unblocker.allowRuntimeMutation, true);
 });
 
 test("native task contract schema carries semantic artifact requirements", () => {

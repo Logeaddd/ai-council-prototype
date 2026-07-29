@@ -224,7 +224,7 @@ const TOOL_SPECS = {
   skill_disable: spec("Disable a skill for this group.", ["skillId"], ["skillId"]),
   skill_remove: spec("Remove an installed skill.", ["skillId"], ["skillId"]),
   record_task_contract: spec("Record the semantic task contract before any task action. This persists requested outcomes and completion checks; it does not itself create a deliverable.", ["taskContract"], ["taskContract"]),
-  delegate_task: spec("Create one bounded contributor handoff. Only the delivery owner may use it; it never transfers final ownership.", ["delegationType", "assigneeId", "task", "expectedEvidence", "allowedTools", "allowWorkspaceMutation", "allowedPaths"], ["delegationType", "assigneeId", "task", "expectedEvidence"])
+  delegate_task: spec("Create one bounded contributor handoff. Only the delivery owner may use it; it never transfers final ownership.", ["delegationType", "assigneeId", "task", "expectedEvidence", "allowedTools", "allowWorkspaceMutation", "allowRuntimeMutation", "allowedPaths"], ["delegationType", "assigneeId", "task", "expectedEvidence"])
 };
 
 export function nativeToolDefinitions(permissionTier = "text", options = {}) {
