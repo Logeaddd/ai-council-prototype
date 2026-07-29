@@ -5,7 +5,19 @@ import path from "node:path";
 import zlib from "node:zlib";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { campaignProviderFailureReason, classifyCampaignDelivery, isStreamingActivityEvent, postCouncilEvents, prepareCampaignFixtures, prepareGroupWorkspace, providerCallMetrics, runSeededRealUserBaseline, runSeededRealUserCampaign, seedCampaignHistory, verifyCampaignCollaboration, verifyCampaignDeliverable, verifyCampaignPersistence, verifyCampaignResumption, verifyCampaignToolEvidence, verifyNoDuplicateVerifiedWork, waitForHarnessHealth } from "../src/realUserHarness.js";
+import { assertCampaignInterruptionStopped, campaignProviderFailureReason, classifyCampaignDelivery, isStreamingActivityEvent, postCouncilEvents, prepareCampaignFixtures, prepareGroupWorkspace, providerCallMetrics, runSeededRealUserBaseline, runSeededRealUserCampaign, seedCampaignHistory, verifyCampaignCollaboration, verifyCampaignDeliverable, verifyCampaignPersistence, verifyCampaignResumption, verifyCampaignToolEvidence, verifyNoDuplicateVerifiedWork, waitForHarnessHealth } from "../src/realUserHarness.js";
+
+test("campaign interruption reports an exhausted payment guard rather than a false stop endpoint failure", () => {
+  assert.throws(
+    () => assertCampaignInterruptionStopped({ stopped: false }, "model_call_budget_exhausted"),
+    (error) => error?.code === "campaign_budget_exhausted_before_interrupt"
+  );
+  assert.throws(
+    () => assertCampaignInterruptionStopped({ stopped: false }, ""),
+    (error) => error?.code === "campaign_stop_failed"
+  );
+  assert.doesNotThrow(() => assertCampaignInterruptionStopped({ stopped: true }, "model_call_budget_exhausted"));
+});
 import { createSeededCampaignScenario, EXTERNAL_ROOT_TOKEN, publicCampaignScenario } from "../src/realUserCampaign.js";
 import { queryPublicEventPage } from "../src/publicEventJournal.js";
 
