@@ -34,6 +34,7 @@ const DELIVERABLE_EXTENSION_PATTERN = [...DELIVERABLE_EXTENSIONS]
   .map((extension) => extension.slice(1).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
   .sort((a, b) => b.length - a.length)
   .join("|");
+const ARTIFACT_EXTENSION_PATTERN = "[A-Za-z0-9][A-Za-z0-9._-]{0,15}";
 const EVIDENCE_TIME_TOLERANCE_MS = 5000;
 const MAX_PDF_INSPECTION_BYTES = 64 * 1024 * 1024;
 
@@ -152,12 +153,14 @@ export function normalizeRequestedArtifactRequirements(value) {
   const requirements = [];
   for (const item of value) {
     if (!item || typeof item !== "object" || Array.isArray(item)) continue;
-    const extension = normalizeArtifactExtension(item.extension || path.extname(String(item.path || item.file || "")));
-    if (!extension || !DELIVERABLE_EXTENSIONS.has(extension)) continue;
-    const key = `${extension}:${Boolean(item.requiresImages)}:${Math.max(0, Number(item.minimumPages || 0))}`;
+    const artifactPath = String(item.path || item.file || "").trim();
+    const extension = normalizeContractArtifactExtension(item.extension, artifactPath);
+    if (!extension) continue;
+    const key = `${normalizedArtifactRequirementPath(artifactPath) || extension}:${extension}:${Boolean(item.requiresImages)}:${Math.max(0, Number(item.minimumPages || 0))}`;
     if (seen.has(key)) continue;
     seen.add(key);
     requirements.push({
+      ...(artifactPath ? { path: artifactPath } : {}),
       extension,
       source: "task_contract",
       requiresImages: Boolean(item.requiresImages),
@@ -168,8 +171,10 @@ export function normalizeRequestedArtifactRequirements(value) {
 }
 
 function requestedArtifactRequirements(question, session = {}) {
-  const contractRequirements = normalizeRequestedArtifactRequirements(
-    session?.taskContract?.artifacts || session?.executionState?.taskContract?.artifacts
+  const contract = session?.taskContract || session?.executionState?.taskContract || {};
+  const contractRequirements = mergeArtifactRequirements(
+    normalizeRequestedArtifactRequirements(contract.artifacts),
+    deriveDeliverableArtifactRequirements(contract.deliverables)
   );
   if (contractRequirements.length) return contractRequirements;
   return requestedArtifactExtensions(question).map((extension) => ({
@@ -178,6 +183,46 @@ function requestedArtifactRequirements(question, session = {}) {
     requiresImages: extension === ".pdf" && requestRequiresIllustrations(question),
     minimumPages: 0
   }));
+}
+
+// A provider may list the requested output in `deliverables` but omit it from
+// the narrower `artifacts` array. Treat both fields as parts of one contract:
+// otherwise an input file can accidentally stand in for the actual output.
+function deriveDeliverableArtifactRequirements(value) {
+  const items = Array.isArray(value) ? value : value == null ? [] : [value];
+  const candidates = [];
+  for (const item of items) {
+    const text = typeof item === "string"
+      ? item
+      : item && typeof item === "object" && !Array.isArray(item)
+        ? [item.path, item.file, item.name, item.title, item.description, item.requirements].filter(Boolean).join(" ")
+        : "";
+    if (!text) continue;
+    const paths = String(text).split(/\s+/)
+      .map((token) => token.replace(/^[`'\"([{<]+|[`'\")\]}>.,;:!?]+$/g, ""))
+      .filter((token) => isConcreteArtifactPath(token));
+    candidates.push(...paths.map((artifactPath) => ({ path: artifactPath, extension: path.extname(artifactPath) })));
+    const pathExtensions = new Set(paths.map((artifactPath) => normalizeArtifactExtension(path.extname(artifactPath))));
+    for (const extension of requestedArtifactExtensions(text)) {
+      if (!pathExtensions.has(extension)) candidates.push({ extension });
+    }
+  }
+  return normalizeRequestedArtifactRequirements(candidates).map((item) => ({
+    ...item,
+    source: "task_contract_deliverable"
+  }));
+}
+
+function mergeArtifactRequirements(...lists) {
+  const seen = new Set();
+  const merged = [];
+  for (const item of lists.flat()) {
+    const key = `${normalizedArtifactRequirementPath(item.path) || item.extension}:${item.extension}:${Boolean(item.requiresImages)}:${Math.max(0, Number(item.minimumPages || 0))}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(item);
+  }
+  return merged.slice(0, 20);
 }
 
 function requestedArtifactExtensions(question) {
@@ -235,6 +280,27 @@ function formatMentionIsForbidden(before) {
 function normalizeArtifactExtension(value) {
   const extension = String(value || "").trim().toLowerCase();
   return extension.startsWith(".") ? extension : extension ? `.${extension}` : "";
+}
+
+function normalizeContractArtifactExtension(value, artifactPath) {
+  const fromPath = normalizeArtifactExtension(path.extname(String(artifactPath || "")));
+  const explicit = String(value || "").trim();
+  const extension = explicit.startsWith(".")
+    ? normalizeArtifactExtension(explicit)
+    : fromPath || (DELIVERABLE_EXTENSIONS.has(normalizeArtifactExtension(explicit)) ? normalizeArtifactExtension(explicit) : "");
+  return new RegExp(`^\\.${ARTIFACT_EXTENSION_PATTERN}$`, "i").test(extension) ? extension : "";
+}
+
+function normalizedArtifactRequirementPath(value) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  return text.replaceAll("\\", "/").replace(/^\.\//, "").toLowerCase();
+}
+
+function isConcreteArtifactPath(value) {
+  const text = String(value || "").trim();
+  const extension = path.extname(text);
+  return Boolean(text) && /[\\/]/.test(text) && new RegExp(`^\\.${ARTIFACT_EXTENSION_PATTERN}$`, "i").test(extension);
 }
 
 function requestRequiresIllustrations(question) {

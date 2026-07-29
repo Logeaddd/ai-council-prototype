@@ -194,6 +194,60 @@ test("structured PDF requirements enforce images without relying on the model's 
   assert.equal(accepted.requirements[0].format.imageCount, 1);
 });
 
+test("task-contract deliverables add their concrete output artifact when artifacts list only an input", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-contract-deliverable-output-"));
+  const inputPath = "inputs/report-spec-10.json";
+  const outputPath = "deliverables/illustrated-report-10.pdf";
+  fs.mkdirSync(path.join(root, "inputs"), { recursive: true });
+  fs.mkdirSync(path.join(root, "deliverables"), { recursive: true });
+  fs.writeFileSync(path.join(root, inputPath), '{"topic":"rabbits"}', "utf8");
+  fs.writeFileSync(path.join(root, outputPath), makeMinimalPdf({ includeImage: true }));
+  const session = {
+    taskContract: {
+      artifacts: [{ path: inputPath, extension: ".json" }],
+      deliverables: [outputPath]
+    },
+    finalDecision: { answer: "Created the requested report.", final_state: "ready_to_execute", blocking_issues: [], risks: [] },
+    toolExecutionResults: [{
+      id: "report-build",
+      tool: "execute_command",
+      status: "completed",
+      result: { ok: true, exitCode: 0, workspaceChanges: { created: [{ path: inputPath }, { path: outputPath }] } }
+    }],
+    fileOperationExecutionResults: []
+  };
+
+  const report = enforceRequestedArtifactRequirements({ groupPath: root, question: "Create the report.", session });
+
+  assert.equal(report.status, "verified");
+  assert.deepEqual(report.requirements.map((item) => item.extension).sort(), [".json", ".pdf"]);
+  assert.equal(report.requirements.find((item) => item.extension === ".pdf")?.path, outputPath);
+});
+
+test("task-contract deliverables preserve a concrete extension outside the built-in format list", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-contract-custom-output-"));
+  const outputPath = "deliverables/rabbit-model.bbmodel";
+  fs.mkdirSync(path.join(root, "deliverables"), { recursive: true });
+  fs.writeFileSync(path.join(root, outputPath), '{"model":"rabbit"}', "utf8");
+  const session = {
+    taskContract: { artifacts: [], deliverables: [outputPath] },
+    finalDecision: { answer: "Created the requested model.", final_state: "ready_to_execute", blocking_issues: [], risks: [] },
+    toolExecutionResults: [{
+      id: "model-build",
+      tool: "workspace_edit",
+      status: "completed",
+      result: { ok: true, workspaceChanges: { created: [{ path: outputPath }] } }
+    }],
+    fileOperationExecutionResults: []
+  };
+
+  const report = enforceRequestedArtifactRequirements({ groupPath: root, question: "Create the model.", session });
+
+  assert.equal(report.status, "verified");
+  assert.equal(report.requirements[0].extension, ".bbmodel");
+  assert.equal(report.requirements[0].path, outputPath);
+});
+
 test("requested artifact verification accepts output in a retained user-authorized project root", () => {
   const groupPath = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-required-group-"));
   const project = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-required-project-"));

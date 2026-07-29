@@ -65,6 +65,7 @@ const allowedWorkspaceRoot = path.resolve(process.env.AI_COUNCIL_WORKSPACE_ROOT 
 const defaultGroupsRoot = path.join(allowedWorkspaceRoot, "workspace-ui");
 const harnessAllowsLocalHttp = process.env.AI_COUNCIL_HARNESS_ALLOW_LOCAL_HTTP === "1";
 const harnessCampaignBudget = readHarnessCampaignBudget(process.env);
+const sseHeartbeatMs = readSseHeartbeatMs(process.env);
 const execFileAsync = promisify(execFile);
 const activeCouncilRuns = createCouncilRunRegistry();
 const localApiToken = resolveLocalApiToken(process.env);
@@ -1367,7 +1368,10 @@ function startCouncilRun(question, group, options = {}) {
   const budgetGuard = options.harnessCampaignBudget
     ? createPersistentCampaignBudgetGuard({ ...options.harnessCampaignBudget, group, groupPath: options.groupPath, controller: run.controller })
     : undefined;
-  void executeCouncilRun(question, group, options, run, budgetGuard);
+  // Let the HTTP/SSE observer attach before an executor can enter a long
+  // synchronous setup or tool path. Otherwise the first useful heartbeat can
+  // be delayed until after the very work it is meant to keep observable.
+  void Promise.resolve().then(() => executeCouncilRun(question, group, options, run, budgetGuard));
   return run;
 }
 
@@ -1428,20 +1432,36 @@ async function streamCouncilRunEvents(req, res, groupPath, runId, after = 0) {
     "Cache-Control": "no-cache, no-transform",
     "Connection": "keep-alive"
   });
+  res.flushHeaders?.();
   for (const event of replay) writeSse(res, event.type, event);
   if (!run || run.state !== "running") {
     res.end();
     return;
   }
+  let heartbeat;
+  const clearHeartbeat = () => {
+    if (heartbeat) clearInterval(heartbeat);
+    heartbeat = undefined;
+  };
   let unsubscribe = activeCouncilRuns.subscribe(normalizedRunId, {
     event: (event) => {
       if (!res.destroyed && !res.writableEnded) writeSse(res, event.type, event);
     },
     finish: () => {
+      clearHeartbeat();
       if (!res.destroyed && !res.writableEnded) res.end();
     }
   });
+  heartbeat = setInterval(() => {
+    if (res.destroyed || res.writableEnded) return;
+    writeSse(res, "heartbeat", {
+      type: "heartbeat",
+      runId: normalizedRunId,
+      createdAt: new Date().toISOString()
+    });
+  }, sseHeartbeatMs);
   const detachObserver = () => {
+    clearHeartbeat();
     unsubscribe?.();
     unsubscribe = undefined;
   };
@@ -1519,6 +1539,12 @@ function writeSse(res, eventName, data) {
   if (Number(data?.eventSequence || 0) > 0) res.write(`id: ${data.eventSequence}\n`);
   res.write(`event: ${eventName}\n`);
   res.write(`data: ${JSON.stringify(data)}\n\n`);
+}
+
+function readSseHeartbeatMs(env = process.env) {
+  const value = Number(env.AI_COUNCIL_SSE_HEARTBEAT_MS);
+  if (!Number.isFinite(value)) return 15_000;
+  return Math.min(60_000, Math.max(250, Math.floor(value)));
 }
 
 function sendText(res, status, text) {
