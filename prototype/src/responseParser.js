@@ -42,6 +42,9 @@ export function parseRoundResponse(rawText) {
       reason: String(parsed.reason || "No new objection."),
       resolved_ids: normalizeResolvedIds(parsed.resolved_ids),
       task_contract: normalizeTaskContract(parsed.task_contract),
+      // A delegated contributor may correctly use skip after a tool follow-up.
+      // Keep its durable handoff so executionState can acknowledge the work.
+      delegation_handoff: normalizeDelegationHandoff(parsed.delegation_handoff ?? parsed.handoff),
       memory_candidates: normalizeStringArray(parsed.memory_candidates),
       context_invalidations: normalizeContextInvalidationCandidates(parsed.context_invalidations)
     };

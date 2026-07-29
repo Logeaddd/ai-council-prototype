@@ -140,7 +140,7 @@ test("a malformed intake reply stays with its owner and becomes an honest incomp
   }
 });
 
-test("real server HTTP/SSE preserves a bounded contributor handoff and lets only the owner deliver", async () => {
+test("real server HTTP/SSE preserves a skip-status bounded contributor handoff and lets only the owner deliver", async () => {
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-server-delegation-"));
   const groupPath = path.join(sandbox, "group");
   fs.mkdirSync(groupPath, { recursive: true });
@@ -626,7 +626,8 @@ async function startDelegatingProvider() {
     } else if (prompt.includes("[Delegated research work]")) {
       const delegationId = prompt.match(/Delegation:\s*([^\.\n]+)/)?.[1]?.trim() || "delegation:0:1:researcher";
       payload = {
-        status: "speak",
+        // A completed contributor may use skip after its tool follow-up.
+        status: "skip",
         argument: "The bounded research task is complete.",
         delegation_handoff: {
           delegation_id: delegationId,

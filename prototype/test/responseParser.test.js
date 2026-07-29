@@ -185,6 +185,39 @@ test("a skip response retains its semantic intake contract", () => {
   assert.equal(parsed.task_contract.next_action, "Allow the group discussion to continue.");
 });
 
+test("a skip response retains a fenced structured delegation handoff after tool use", () => {
+  const parsed = parseRoundResponse(`Critic: source read complete.\n\n\`\`\`json
+{
+  "status": "skip",
+  "reason": "Handing off extracted research facts to the delivery owner.",
+  "delegation_handoff": {
+    "delegation_id": "delegation:1:1:critic",
+    "summary": "Read inputs/release-research-8.txt and extracted the release facts as requested.",
+    "evidence": {
+      "source_file": "inputs/release-research-8.txt",
+      "release_name": "orion-8",
+      "window_quarter": "2026-Q1",
+      "status_field": "absent - no status line present in the file"
+    }
+  },
+  "memory_candidates": [],
+  "context_invalidations": []
+}
+\`\`\``);
+
+  assert.equal(parsed.status, "skip");
+  assert.deepEqual(parsed.delegation_handoff, {
+    delegation_id: "delegation:1:1:critic",
+    summary: "Read inputs/release-research-8.txt and extracted the release facts as requested.",
+    evidence: [
+      "source_file: inputs/release-research-8.txt",
+      "release_name: orion-8",
+      "window_quarter: 2026-Q1",
+      "status_field: absent - no status line present in the file"
+    ]
+  });
+});
+
 test("round response parser preserves unavailable status", () => {
   const parsed = parseRoundResponse(JSON.stringify({
     status: "unavailable",
