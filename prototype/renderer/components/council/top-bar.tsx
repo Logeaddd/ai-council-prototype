@@ -168,6 +168,7 @@ export function TopBar({
           <IconButton
             label="聊天记录"
             onClick={onOpenHistory}
+            data-testid="open-chat-history"
           >
             <History className="size-4" />
           </IconButton>

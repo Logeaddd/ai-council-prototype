@@ -11,6 +11,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const composerDropProbePath = String(process.env.AI_COUNCIL_E2E_COMPOSER_DROP_FILE || "").trim();
 const privateDraftProbeEnabled = process.env.AI_COUNCIL_E2E_PRIVATE_DRAFT_PROBE === "1";
 const transcriptFollowProbeEnabled = process.env.AI_COUNCIL_E2E_TRANSCRIPT_FOLLOW_PROBE === "1";
+const historySeedProbeEnabled = process.env.AI_COUNCIL_E2E_HISTORY_SEED_PROBE === "1";
+const historyReopenProbeEnabled = process.env.AI_COUNCIL_E2E_HISTORY_REOPEN_PROBE === "1";
+const historyProbeMarker = String(process.env.AI_COUNCIL_E2E_HISTORY_MARKER || "").trim();
 const packagedPtyProbeEnabled = process.env.AI_COUNCIL_E2E_PTY_PROBE === "1";
 
 let mainWindow;
@@ -105,7 +108,7 @@ async function startDesktop() {
   });
 
   mainWindow.once("ready-to-show", () => {
-    if (!composerDropProbePath && !privateDraftProbeEnabled && !transcriptFollowProbeEnabled) mainWindow.show();
+    if (!composerDropProbePath && !privateDraftProbeEnabled && !transcriptFollowProbeEnabled && !historySeedProbeEnabled && !historyReopenProbeEnabled) mainWindow.show();
   });
   mainWindow.on("closed", () => {
     mainWindow = null;
@@ -145,6 +148,32 @@ async function startDesktop() {
     } catch (error) {
       process.exitCode = 1;
       console.error("AI_COUNCIL_E2E_TRANSCRIPT_FOLLOW_FAILED", error);
+    } finally {
+      setTimeout(() => app.quit(), 50);
+    }
+  } else if (historySeedProbeEnabled) {
+    try {
+      mainWindow.show();
+      mainWindow.focus();
+      const result = await runHistorySeedProbe(mainWindow);
+      console.log(`AI_COUNCIL_E2E_HISTORY_SEED=${JSON.stringify(result)}`);
+      if (!result.ok) process.exitCode = 1;
+    } catch (error) {
+      process.exitCode = 1;
+      console.error("AI_COUNCIL_E2E_HISTORY_SEED_FAILED", error);
+    } finally {
+      setTimeout(() => app.quit(), 50);
+    }
+  } else if (historyReopenProbeEnabled) {
+    try {
+      mainWindow.show();
+      mainWindow.focus();
+      const result = await runHistoryReopenProbe(mainWindow, historyProbeMarker);
+      console.log(`AI_COUNCIL_E2E_HISTORY_REOPEN=${JSON.stringify(result)}`);
+      if (!result.ok) process.exitCode = 1;
+    } catch (error) {
+      process.exitCode = 1;
+      console.error("AI_COUNCIL_E2E_HISTORY_REOPEN_FAILED", error);
     } finally {
       setTimeout(() => app.quit(), 50);
     }
@@ -471,6 +500,86 @@ async function runTranscriptFollowProbe(window) {
     atBottomDuringLiveUpdates,
     afterManualScroll,
   };
+}
+
+async function runHistorySeedProbe(window) {
+  await createGroupThroughUi(window, "history_seed_group_not_ready");
+  const marker = historyProbeMarker || `history-recovery-${Date.now()}`;
+  const question = `Persist this history recovery marker exactly: ${marker}`;
+  await typeProbeText(window, "[data-testid='group-chat-draft']", question, "history_seed_composer_text_input_failed");
+  window.webContents.sendInputEvent({ type: "keyDown", keyCode: "ENTER" });
+  window.webContents.sendInputEvent({ type: "keyUp", keyCode: "ENTER" });
+
+  const saved = await window.webContents.executeJavaScript(`
+    (async () => {
+      const marker = ${JSON.stringify(marker)};
+      const question = ${JSON.stringify(question)};
+      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const deadline = Date.now() + 15000;
+      while (Date.now() < deadline) {
+        const indexResponse = await fetch("/api/groups-index");
+        const index = await indexResponse.json();
+        const group = (index.groups || []).find((item) => item.id === index.lastGroupId) || index.groups?.[0];
+        if (group?.path) {
+          const sessionsResponse = await fetch("/api/sessions?groupPath=" + encodeURIComponent(group.path));
+          const sessions = await sessionsResponse.json();
+          const session = (sessions.sessions || []).find((item) => item.question === question);
+          if (session?.id && session.status !== "running" && Number(session.messageCount || 0) >= 2) return {
+            ok: true,
+            marker,
+            groupPath: group.path,
+            sessionId: session.id,
+            messageCount: session.messageCount,
+            status: session.status,
+          };
+        }
+        await sleep(50);
+      }
+      throw new Error("history_seed_session_not_persisted:" + JSON.stringify({
+        marker,
+        visibleText: document.body.innerText.slice(0, 1200),
+      }));
+    })()
+  `, true);
+  if (!saved?.ok || !saved.groupPath || !saved.sessionId || saved.status === "running" || Number(saved.messageCount || 0) < 2) {
+    throw new Error("history_seed_missing_completed_message_evidence");
+  }
+  return saved;
+}
+
+async function runHistoryReopenProbe(window, marker) {
+  if (!marker) throw new Error("history_reopen_marker_missing");
+  return window.webContents.executeJavaScript(`
+    (async () => {
+      const marker = ${JSON.stringify(marker)};
+      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const deadline = Date.now() + 15000;
+      while (Date.now() < deadline) {
+        const composer = document.querySelector("[data-testid='group-chat-draft']");
+        const privateButton = document.querySelector("[data-testid='open-private-chat']");
+        if (composer?.dataset.draftReady === "true" && privateButton && !privateButton.disabled) break;
+        await sleep(50);
+      }
+      const historyButton = document.querySelector("[data-testid='open-chat-history']");
+      if (!historyButton) throw new Error("history_reopen_button_missing");
+      historyButton.click();
+
+      while (Date.now() < deadline) {
+        const dialog = document.querySelector("[role='dialog']");
+        const content = dialog?.textContent || "";
+        if (content.includes(marker) && content.includes("CLI-first prototype")) {
+          return { ok: true, marker, visibleHistory: true };
+        }
+        await sleep(50);
+      }
+      const dialog = document.querySelector("[role='dialog']");
+      throw new Error("history_reopen_session_not_visible:" + JSON.stringify({
+        marker,
+        dialogText: dialog?.textContent?.slice(0, 1600),
+        visibleText: document.body.innerText.slice(0, 1600),
+      }));
+    })()
+  `, true);
 }
 
 async function createGroupThroughUi(window, reason) {

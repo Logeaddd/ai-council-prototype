@@ -127,3 +127,22 @@ test("Electron runs the detached supervisor as Node and retains a packaged PTY p
   assert.match(main, /processControlTool/);
   assert.match(main, /pty_input_echo_was_not_redacted/);
 });
+
+test("desktop history recovery probe restarts the app before checking the persisted UI history", () => {
+  const pkg = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
+  const main = fs.readFileSync(path.join(root, "desktop", "main.mjs"), "utf8");
+  const probe = fs.readFileSync(path.join(root, "scripts", "probe-electron-history-recovery.mjs"), "utf8");
+  const topBar = fs.readFileSync(path.join(root, "renderer", "components", "council", "top-bar.tsx"), "utf8");
+
+  assert.equal(pkg.scripts["probe:electron-history-recovery"], "node ./scripts/probe-electron-history-recovery.mjs");
+  assert.match(main, /AI_COUNCIL_E2E_HISTORY_SEED_PROBE/);
+  assert.match(main, /AI_COUNCIL_E2E_HISTORY_REOPEN_PROBE/);
+  assert.match(main, /runHistorySeedProbe/);
+  assert.match(main, /runHistoryReopenProbe/);
+  assert.match(main, /session\.status !== "running"/);
+  assert.match(main, /Number\(session\.messageCount \|\| 0\) >= 2/);
+  assert.match(topBar, /data-testid="open-chat-history"/);
+  assert.match(probe, /AI_COUNCIL_E2E_HISTORY_SEED/);
+  assert.match(probe, /AI_COUNCIL_E2E_HISTORY_REOPEN/);
+  assert.match(probe, /await runProbe/);
+});
