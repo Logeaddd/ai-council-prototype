@@ -29,7 +29,7 @@ async function receiveConfig() {
 
 async function supervise(config = {}) {
   validateConfig(config);
-  const ptyModule = await import("@homebridge/node-pty-prebuilt-multiarch");
+  const ptyModule = await import("node-pty");
   const pty = ptyModule.default || ptyModule;
   if (typeof pty.spawn !== "function") throw new Error("The installed PTY runtime does not export spawn().");
 

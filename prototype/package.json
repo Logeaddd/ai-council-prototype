@@ -36,6 +36,7 @@
     "appId": "com.ai-council.app",
     "productName": "AI Council",
     "asar": false,
+    "npmRebuild": false,
     "directories": {
       "output": "dist-installer"
     },
@@ -70,6 +71,6 @@
     }
   },
   "dependencies": {
-    "@homebridge/node-pty-prebuilt-multiarch": "0.14.1"
+    "node-pty": "1.1.0"
   }
 }
