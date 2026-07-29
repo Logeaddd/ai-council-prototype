@@ -39,6 +39,7 @@ export function createSeededCampaignScenario(options = {}) {
     stages: stages.map((stage, index) => ({ id: `stage_${String(index + 1).padStart(2, "0")}`, ...stage })),
     fixtures: task.fixtures || [],
     apiFixture: task.apiFixture,
+    historyFixture: task.historyFixture,
     hiddenVerifier: task.hiddenVerifier
   };
 }
@@ -340,7 +341,55 @@ function delegatedBriefTemplate(seed, random) {
   };
 }
 
-const TASK_TEMPLATES = [nodeCliTemplate, pythonCliTemplate, jsonDocumentTemplate, externalNodeCliTemplate, jsonToCsvTemplate, zipArchiveTemplate, apiCollectionTemplate, imageToolAcquisitionTemplate, delegatedBriefTemplate];
+function contextHistoryRetrievalTemplate(seed, random) {
+  const file = `deliverables/history-lookup-${seed}.json`;
+  const marker = `retained-record-${seed}-${randomInteger(random, 1000, 9999)}`;
+  const historicalValue = `archive-value-${seed}-${randomInteger(random, 100000, 999999)}`;
+  const sessionId = `retained-history-${seed}`;
+  const targetMessageIndex = 36;
+  return {
+    id: "context-history-retrieval",
+    domain: "retained_group_history_retrieval_and_delivery",
+    deliverable: file,
+    initialQuestion: `Use the search_context tool, rather than directly reading journal files, to retrieve the retained historical record with lookup marker ${JSON.stringify(marker)}. Do not guess its value. Then create ${file} as valid JSON with marker, historicalValue, retrievalMethod set to search_context, and status set to retrieved. Validate the current JSON after writing it.`,
+    edits: [
+      { prompt: "Update the existing lookup JSON to add recordType set to retained_lookup. Preserve the retrieved marker and historicalValue, keep valid JSON, and validate it." },
+      { prompt: "Update the same lookup JSON to add retrievedBy set to context_search. Preserve the retrieved history value and validate the current artifact." },
+      { prompt: "Use only the newest requirements: retain the retrieved marker and historicalValue, retrievalMethod search_context, status retrieved, recordType retained_lookup, and retrievedBy context_search. Do not replace the lookup with a guessed value. Validate it." },
+      { prompt: "Make the final requested history-lookup update in the same artifact. Keep every current required field, use the retrieved historical value, and validate the finished JSON." }
+    ],
+    reversalPrompt: "Use the current retained-history requirements only. Do not restore an obsolete field layout or substitute an unverified value.",
+    recallPrompt: `Retrieve the current retained-history context for ${JSON.stringify(marker)} when needed, then continue the existing ${file} from the latest requirements without creating a replacement project.`,
+    finalPrompt: "Apply the final history-lookup requirement and validate the current artifact one more time.",
+    recoveryVerificationPrompt: `After recovery, inspect ${file}, retain the historical value previously obtained through search_context, and run a real JSON validation without guessing or recreating the lookup.`,
+    historyFixture: {
+      sessionId,
+      marker,
+      historicalValue,
+      targetMessageIndex,
+      targetEventId: `${sessionId}:message:${targetMessageIndex}`,
+      distractorCount: 72
+    },
+    hiddenVerifier: {
+      kind: "json",
+      file,
+      expected: {
+        marker,
+        historicalValue
+      },
+      advisoryExpected: {
+        retrievalMethod: "search_context",
+        status: "retrieved",
+        recordType: "retained_lookup",
+        retrievedBy: "context_search"
+      },
+      requiresContextRetrieval: true,
+      contextEventId: `${sessionId}:message:${targetMessageIndex}`
+    }
+  };
+}
+
+const TASK_TEMPLATES = [nodeCliTemplate, pythonCliTemplate, jsonDocumentTemplate, externalNodeCliTemplate, jsonToCsvTemplate, zipArchiveTemplate, apiCollectionTemplate, imageToolAcquisitionTemplate, delegatedBriefTemplate, contextHistoryRetrievalTemplate];
 
 function expectedImagePixels(spec) {
   const background = hexRgba(spec.background);

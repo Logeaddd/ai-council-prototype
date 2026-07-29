@@ -90,6 +90,20 @@ test("delegated brief campaign requires an owner-integrated read-only research h
   assert.equal(JSON.stringify(publicScenario).includes(campaign.fixtures[0].content), false);
 });
 
+test("context-history campaigns expose a lookup marker but keep the retained answer and verifier private", () => {
+  const campaign = createSeededCampaignScenario({ seed: 9 });
+  const publicScenario = publicCampaignScenario(campaign);
+
+  assert.equal(campaign.task.id, "context-history-retrieval");
+  assert.equal(campaign.hiddenVerifier.requiresContextRetrieval, true);
+  assert.equal(campaign.historyFixture.targetEventId, campaign.hiddenVerifier.contextEventId);
+  assert.match(campaign.task.initialQuestion, /search_context/i);
+  assert.equal(JSON.stringify(publicScenario).includes(campaign.historyFixture.marker), true);
+  assert.equal(JSON.stringify(publicScenario).includes(campaign.historyFixture.historicalValue), false);
+  assert.equal(JSON.stringify(publicScenario).includes("historyFixture"), false);
+  assert.equal(JSON.stringify(publicScenario).includes("hiddenVerifier"), false);
+});
+
 test("different seeds select deterministic task variants while preserving the campaign contract", () => {
   const campaigns = [1, 2, 3, 4, 5, 6, 7].map((seed) => createSeededCampaignScenario({ seed }));
   assert.equal(new Set(campaigns.map((campaign) => campaign.task.id)).size >= 2, true);

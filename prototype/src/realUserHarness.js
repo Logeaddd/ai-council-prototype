@@ -9,6 +9,7 @@ import zlib from "node:zlib";
 import { readZipArchiveEntries } from "./archiveTools.js";
 import { CAMPAIGN_API_URL_TOKEN, createSeededCampaignScenario, EXTERNAL_ROOT_TOKEN, publicCampaignScenario } from "./realUserCampaign.js";
 import { assertHardCampaignBudgetGroup, readCampaignBudgetLedger } from "./harnessCostGuard.js";
+import { syncPublicEventJournal } from "./publicEventJournal.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const prototypeRoot = path.resolve(__dirname, "..");
@@ -161,12 +162,14 @@ export async function runSeededRealUserCampaign(options = {}) {
   let failure;
   let failureKind = "failed";
   let runtimePreconditions = { cleanPythonEnvironment: { required: false, status: "not_required" } };
+  let historySeed = { required: false, status: "not_required" };
 
   fs.mkdirSync(runDir, { recursive: true });
   try {
     if (campaignNeedsApiFixture(sourceCampaign)) apiFixture = await startCampaignApiFixture(sourceCampaign.apiFixture);
     campaign = materializeCampaignPaths(sourceCampaign, runDir, options.externalWorkspaceRoot, apiFixture?.url);
     prepareGroupWorkspace(groupPath, group);
+    historySeed = seedCampaignHistory(groupPath, campaign);
     prepareCampaignFixtures(groupPath, campaign.fixtures);
     runtimePreconditions = await prepareCampaignRuntimePreconditions(groupPath, campaign);
     if (campaign.externalWorkspaceRoot) prepareCampaignFixtures(campaign.externalWorkspaceRoot, campaign.externalFixtures);
@@ -245,6 +248,14 @@ export async function runSeededRealUserCampaign(options = {}) {
       ...verifyCampaignCollaboration(campaign.hiddenVerifier, sessions),
       executionReceipt: createCollaborationExecutionReceipt(groupPath, sessionEntries)
     };
+    const contextArtifact = verifyContextRetrievedArtifact(campaign.hiddenVerifier, artifactDelivery);
+    const contextRetrieval = {
+      ...toolEvidence.contextRetrieval,
+      passed: toolEvidence.contextRetrieval.passed && contextArtifact.passed,
+      checks: [...toolEvidence.contextRetrieval.checks, ...contextArtifact.checks],
+      artifact: contextArtifact,
+      executionReceipt: createContextRetrievalExecutionReceipt(groupPath, sessionEntries, toolEvidence.contextRetrieval.evidence)
+    };
     const deliveryLayers = classifyCampaignDelivery(artifactDelivery);
     const attemptedModelCalls = sessions.reduce((total, session) => total + Number(session.modelCallCount || 0), 0);
     const budgetLedger = readCampaignBudgetLedger(groupPath);
@@ -265,6 +276,7 @@ export async function runSeededRealUserCampaign(options = {}) {
       && deliveryLayers.minimumUsableDelivery.passed
       && toolEvidence.passed
       && collaboration.passed
+      && contextRetrieval.passed
       && interruptedSessions.length === 2
       && resumed
       && persistence.passed
@@ -287,6 +299,7 @@ export async function runSeededRealUserCampaign(options = {}) {
         budgetLedger: budgetLedger || null
       },
       runtimePreconditions,
+      contextHistory: historySeed,
       scenario: publicCampaignScenario(campaign),
       group: redactGroup(group),
       workspacePath: groupPath,
@@ -301,6 +314,7 @@ export async function runSeededRealUserCampaign(options = {}) {
         : { mode: "not_required" },
       capabilityAcquisition,
       collaboration,
+      contextRetrieval,
       autonomousExecution: {
         campaignStagesExecuted: timeline.filter((item) => item.result === "completed").length,
         materialActionsObserved: timeline.filter((item) => isMaterialActionType(item.type)).length,
@@ -310,6 +324,7 @@ export async function runSeededRealUserCampaign(options = {}) {
       },
       minimumUsableDelivery: deliveryLayers.minimumUsableDelivery,
       outcomeConformance: deliveryLayers.outcomeConformance,
+      deliveryAdvisories: artifactDelivery.advisoryChecks || [],
       subjectiveQuality: { status: "not_scored" },
       sessions: { interrupted: interruptedSessions.map(summarizeSession), total: sessions.length, modelCalls: attemptedModelCalls },
       persistence,
@@ -742,6 +757,48 @@ export function verifyCampaignToolEvidence(verifier = {}, sessions = []) {
       check("required_api_endpoint_requested", Boolean(expectedUrl) && matched.length > 0, `${matched.length}/${apiResults.length} successful requests matched the required endpoint`)
     );
   }
+  const contextResults = results.map((item, index) => ({ item, index })).filter(({ item }) => (
+    item.tool === "search_context" && item.status === "completed" && item.result?.ok
+  ));
+  const matchingContextResults = contextResults.filter(({ item }) => (
+    Array.isArray(item.result?.results) && item.result.results.some((result) => result?.eventId === verifier.contextEventId)
+  ));
+  const contextWrites = matchingContextResults.flatMap(({ item, index }) => results.slice(index + 1)
+    .filter((later) => (
+      later.tool === "workspace_edit"
+      && later.status === "completed"
+      && later.result?.ok
+      && later.path === verifier.file
+      && String(later.source_agent_id || "") === String(item.source_agent_id || "")
+    )).map((later) => ({ retrieval: item, write: later })));
+  const contextChecks = verifier.requiresContextRetrieval === true
+    ? [
+      check("context_search_recorded", contextResults.length > 0, `${contextResults.length} successful context searches persisted`),
+      check("required_historical_event_retrieved", matchingContextResults.length > 0, `${matchingContextResults.length}/${contextResults.length} successful searches returned the seeded event`),
+      check("retriever_wrote_target_after_context_result", contextWrites.length > 0, `${contextWrites.length} target writes by the retrieving agent after context results`)
+    ]
+    : [check("context_retrieval_not_required", true, "not_required")];
+  const contextRetrieval = {
+    required: verifier.requiresContextRetrieval === true,
+    passed: contextChecks.every((item) => item.passed),
+    checks: contextChecks,
+    evidence: {
+      schema: "ai-council.context-retrieval-evidence.v1",
+      targetEventId: String(verifier.contextEventId || ""),
+      searches: matchingContextResults.map(({ item }) => ({
+        retrievalResultId: String(item.id || ""),
+        agentId: String(item.source_agent_id || ""),
+        eventId: String(verifier.contextEventId || "")
+      })),
+      targetWrites: contextWrites.map(({ retrieval, write }) => ({
+        retrievalResultId: String(retrieval.id || ""),
+        writeResultId: String(write.id || ""),
+        agentId: String(write.source_agent_id || ""),
+        path: String(write.path || "")
+      }))
+    }
+  };
+  if (contextRetrieval.required) checks.push(...contextChecks);
   const acquisitionTools = new Set(["install_package", "provision_tool", "skill_install", "mcp_install_npm"]);
   const acquisitionResults = results.map((item, index) => {
     if (acquisitionTools.has(item.tool) && item.status === "completed" && item.result?.ok !== false) return { item, index, kind: item.tool };
@@ -774,7 +831,7 @@ export function verifyCampaignToolEvidence(verifier = {}, sessions = []) {
     checks.push(check("acquired_capability_used_by_later_work", acquisition.passed, acquisition.tools.join(", ") || "no later successful tool referenced the acquired package, environment, skill, server or command"));
   }
   if (!checks.length) checks.push(check("required_tool_evidence", true, "not_required"));
-  return { passed: checks.every((item) => item.passed), checks, acquisition };
+  return { passed: checks.every((item) => item.passed), checks, acquisition, contextRetrieval };
 }
 
 function createCapabilityExecutionReceipt(groupPath, sessionEntries = [], evidence = {}) {
@@ -792,6 +849,24 @@ function createCapabilityExecutionReceipt(groupPath, sessionEntries = [], eviden
   return {
     schema: "ai-council.capability-execution-receipt.v1",
     sessionFiles
+  };
+}
+
+function createContextRetrievalExecutionReceipt(groupPath, sessionEntries = [], evidence = {}) {
+  const resultIds = new Set([
+    ...(Array.isArray(evidence?.searches) ? evidence.searches : []).map((item) => item?.retrievalResultId),
+    ...(Array.isArray(evidence?.targetWrites) ? evidence.targetWrites : []).map((item) => item?.writeResultId)
+  ].map((value) => String(value || "")).filter(Boolean));
+  const runDir = path.resolve(groupPath, "..", "..", "..");
+  return {
+    schema: "ai-council.context-retrieval-execution-receipt.v1",
+    sessionFiles: (sessionEntries || []).filter(({ session }) => (
+      (session?.toolExecutionResults || []).some((item) => resultIds.has(String(item?.id || "")))
+    )).map(({ session, filePath }) => ({
+      path: path.relative(runDir, filePath).replaceAll("\\", "/"),
+      sessionId: String(session?.id || ""),
+      sha256: createHash("sha256").update(fs.readFileSync(filePath)).digest("hex")
+    }))
   };
 }
 
@@ -1071,11 +1146,15 @@ function readJsonIfExists(filePath) {
 export async function verifyCampaignDeliverable(verifier = {}, groupPath) {
   const filePath = path.resolve(groupPath, String(verifier.file || ""));
   const checks = [check("file_exists", fs.existsSync(filePath), verifier.file || "")];
+  const advisoryChecks = [];
   if (verifier.kind === "json" && fs.existsSync(filePath)) {
     try {
       const value = JSON.parse(fs.readFileSync(filePath, "utf8"));
       checks.push(check("json_parses", true, "valid JSON"));
       checks.push(check("json_expected", Object.entries(verifier.expected || {}).every(([key, expected]) => value[key] === expected), JSON.stringify(value)));
+      for (const [key, expected] of Object.entries(verifier.advisoryExpected || {})) {
+        advisoryChecks.push(check(`json_advisory_${key}`, value[key] === expected, `field=${key}`));
+      }
     } catch (error) { checks.push(check("json_parses", false, error.message)); }
   } else if (verifier.kind === "api_collection" && fs.existsSync(filePath)) {
     try {
@@ -1114,7 +1193,21 @@ export async function verifyCampaignDeliverable(verifier = {}, groupPath) {
     checks.push(check("command_exit", result.exitCode === 0, `exit=${result.exitCode}`));
     checks.push(check("final_requirement", result.stdout.trim() === verifier.expectedOutput, result.stdout.trim()));
   }
-  return { passed: checks.every((item) => item.passed), checks };
+  return { passed: checks.every((item) => item.passed), checks, advisoryChecks };
+}
+
+function verifyContextRetrievedArtifact(verifier = {}, artifactDelivery = {}) {
+  if (verifier.requiresContextRetrieval !== true) {
+    return { required: false, passed: true, checks: [check("context_retrieved_artifact_not_required", true, "not_required")] };
+  }
+  const required = new Set(["file_exists", "json_parses", "json_expected"]);
+  const relevant = (artifactDelivery.checks || []).filter((item) => required.has(item.id));
+  const passed = relevant.length === required.size && relevant.every((item) => item.passed);
+  return {
+    required: true,
+    passed,
+    checks: [check("retrieved_history_materialized_in_json", passed, `${relevant.filter((item) => item.passed).length}/${required.size} required JSON checks passed`)]
+  };
 }
 
 export function classifyCampaignDelivery(artifactDelivery = {}) {
@@ -1289,6 +1382,56 @@ export function prepareGroupWorkspace(groupPath, group) {
     permissions: { defaultTier: "full", seatTiers: {} },
     seats
   }, null, 2), "utf8");
+}
+
+export function seedCampaignHistory(groupPath, campaign = {}) {
+  const fixture = campaign?.historyFixture;
+  if (!fixture?.sessionId || !fixture?.marker || !fixture?.historicalValue) {
+    return { required: false, status: "not_required" };
+  }
+  const targetIndex = Math.max(0, Number(fixture.targetMessageIndex || 0));
+  const distractorCount = Math.max(targetIndex + 1, Number(fixture.distractorCount || 0));
+  const sessionId = String(fixture.sessionId);
+  const baseTime = Date.parse("2025-01-01T00:00:00.000Z");
+  const messages = Array.from({ length: distractorCount }, (_, index) => ({
+    agentId: `archive-member-${index % 4}`,
+    agentName: `Archive Member ${index % 4}`,
+    round: Math.floor(index / 3) + 1,
+    createdAt: new Date(baseTime + (index + 1) * 1000).toISOString(),
+    response: {
+      status: "completed",
+      argument: index === targetIndex
+        ? `Retained lookup marker ${fixture.marker}: the verified historical value is ${fixture.historicalValue}.`
+        : `Archived discussion ${index + 1}: ${historyDistractorText(index)}`
+    }
+  }));
+  const session = {
+    id: sessionId,
+    question: "Retained historical discussion archive used for context retrieval evaluation.",
+    createdAt: new Date(baseTime).toISOString(),
+    completedAt: new Date(baseTime + (distractorCount + 2) * 1000).toISOString(),
+    status: "completed",
+    messages
+  };
+  const sync = syncPublicEventJournal(session, groupPath);
+  const expectedEventId = String(fixture.targetEventId || `${sessionId}:message:${targetIndex}`);
+  if (expectedEventId !== `${sessionId}:message:${targetIndex}`) {
+    throw harnessFailure("campaign_history_fixture_mismatch", "The history fixture target event ID does not match its retained message index.", true);
+  }
+  return {
+    required: true,
+    status: "seeded",
+    sessionId,
+    targetEventId: expectedEventId,
+    marker: String(fixture.marker),
+    seededEvents: Number(sync.appended || 0),
+    totalRetainedEvents: Number(sync.total || 0)
+  };
+}
+
+function historyDistractorText(index) {
+  const topic = ["handoff status", "draft notes", "review summary", "build observation"][index % 4];
+  return `${topic}; this is unrelated retained material ${index + 1}. `.repeat(22).trim();
 }
 
 function campaignNeedsApiFixture(campaign = {}) {

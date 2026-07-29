@@ -5,8 +5,9 @@ import path from "node:path";
 import zlib from "node:zlib";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { campaignProviderFailureReason, classifyCampaignDelivery, isStreamingActivityEvent, postCouncilEvents, prepareCampaignFixtures, prepareGroupWorkspace, providerCallMetrics, runSeededRealUserBaseline, runSeededRealUserCampaign, verifyCampaignCollaboration, verifyCampaignDeliverable, verifyCampaignPersistence, verifyCampaignResumption, verifyCampaignToolEvidence, verifyNoDuplicateVerifiedWork, waitForHarnessHealth } from "../src/realUserHarness.js";
-import { createSeededCampaignScenario, EXTERNAL_ROOT_TOKEN } from "../src/realUserCampaign.js";
+import { campaignProviderFailureReason, classifyCampaignDelivery, isStreamingActivityEvent, postCouncilEvents, prepareCampaignFixtures, prepareGroupWorkspace, providerCallMetrics, runSeededRealUserBaseline, runSeededRealUserCampaign, seedCampaignHistory, verifyCampaignCollaboration, verifyCampaignDeliverable, verifyCampaignPersistence, verifyCampaignResumption, verifyCampaignToolEvidence, verifyNoDuplicateVerifiedWork, waitForHarnessHealth } from "../src/realUserHarness.js";
+import { createSeededCampaignScenario, EXTERNAL_ROOT_TOKEN, publicCampaignScenario } from "../src/realUserCampaign.js";
+import { queryPublicEventPage } from "../src/publicEventJournal.js";
 
 test("seeded real-user baseline uses the HTTP/SSE route, persists interruption, continues after restart, and verifies an edited artifact", async () => {
   const provider = http.createServer(async (req, res) => {
@@ -433,6 +434,79 @@ test("capability acquisition evidence must come from a successful current-campai
     { tool: "execute_command", status: "completed", command: "node render-image.js", result: { ok: true, exitCode: 0 } }
   ] }]);
   assert.equal(maskedFailure.passed, false);
+});
+
+test("context retrieval evidence requires the seeded event and a later target write by the retrieving agent", () => {
+  const verifier = {
+    kind: "json",
+    file: "deliverables/history.json",
+    requiresContextRetrieval: true,
+    contextEventId: "retained-history-9:message:36"
+  };
+  const retrieved = {
+    id: "context-lookup",
+    tool: "search_context",
+    status: "completed",
+    source_agent_id: "builder",
+    result: { ok: true, results: [{ eventId: verifier.contextEventId, snippet: "retained answer" }] }
+  };
+  const write = {
+    id: "context-write",
+    tool: "workspace_edit",
+    status: "completed",
+    source_agent_id: "builder",
+    path: verifier.file,
+    result: { ok: true }
+  };
+  const passed = verifyCampaignToolEvidence(verifier, [{ toolExecutionResults: [retrieved, write] }]);
+  assert.equal(passed.passed, true);
+  assert.equal(passed.contextRetrieval.passed, true);
+  assert.equal(passed.contextRetrieval.evidence.searches[0].eventId, verifier.contextEventId);
+
+  const wrongAgent = verifyCampaignToolEvidence(verifier, [{
+    toolExecutionResults: [retrieved, { ...write, source_agent_id: "reviewer" }]
+  }]);
+  assert.equal(wrongAgent.passed, false);
+  assert.equal(wrongAgent.contextRetrieval.passed, false);
+});
+
+test("context history seeding creates a long retained journal without leaking the answer to the public campaign script", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-campaign-history-"));
+  const campaign = createSeededCampaignScenario({ seed: 9 });
+  try {
+    prepareGroupWorkspace(root, { agents: [] });
+    const seeded = seedCampaignHistory(root, campaign);
+    const page = queryPublicEventPage(root, { query: campaign.historyFixture.marker, limit: 5 });
+    assert.equal(seeded.status, "seeded");
+    assert.equal(seeded.seededEvents >= 70, true);
+    assert.equal(page.events.some((item) => item.id === campaign.hiddenVerifier.contextEventId), true);
+    assert.equal(JSON.stringify(publicCampaignScenario(campaign)).includes(campaign.historyFixture.historicalValue), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("context retrieval gates the hidden historical value while reporting ordinary document fields as advisories", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-context-advisory-"));
+  const campaign = createSeededCampaignScenario({ seed: 9 });
+  try {
+    const artifact = {
+      ...campaign.hiddenVerifier.expected,
+      retrievalMethod: "search_context",
+      status: "complete",
+      recordType: "retained_lookup",
+      retrievedBy: "context_search"
+    };
+    const target = path.join(root, campaign.hiddenVerifier.file);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, JSON.stringify(artifact, null, 2), "utf8");
+    const verification = await verifyCampaignDeliverable(campaign.hiddenVerifier, root);
+    assert.equal(verification.passed, true);
+    assert.equal(verification.advisoryChecks.find((item) => item.id === "json_advisory_status")?.passed, false);
+    assert.equal(classifyCampaignDelivery(verification).outcomeConformance.passed, true);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("campaign workspaces create a local npm boundary instead of installing into an ancestor product", () => {
