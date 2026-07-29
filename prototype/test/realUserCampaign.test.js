@@ -104,6 +104,21 @@ test("context-history campaigns expose a lookup marker but keep the retained ans
   assert.equal(JSON.stringify(publicScenario).includes("hiddenVerifier"), false);
 });
 
+test("document campaigns require a self-acquired illustrated multi-page PDF without leaking a preferred generator", () => {
+  const campaign = createSeededCampaignScenario({ seed: 10 });
+  const publicScenario = publicCampaignScenario(campaign);
+
+  assert.equal(campaign.task.id, "pdf-report");
+  assert.equal(campaign.task.capabilityAcquisitionRequired, true);
+  assert.equal(campaign.hiddenVerifier.kind, "pdf_document");
+  assert.equal(campaign.hiddenVerifier.minimumPages, 2);
+  assert.equal(campaign.hiddenVerifier.requiresImages, true);
+  assert.equal(campaign.hiddenVerifier.requiresAcquisition, true);
+  assert.match(campaign.task.initialQuestion, /choose and acquire a suitable third-party package or CLI yourself/i);
+  assert.equal(JSON.stringify(publicScenario).includes(campaign.fixtures[0].content), false);
+  assert.doesNotMatch(JSON.stringify(publicScenario), /reportlab|pdfkit|weasyprint|pandoc/i);
+});
+
 test("different seeds select deterministic task variants while preserving the campaign contract", () => {
   const campaigns = [1, 2, 3, 4, 5, 6, 7].map((seed) => createSeededCampaignScenario({ seed }));
   assert.equal(new Set(campaigns.map((campaign) => campaign.task.id)).size >= 2, true);

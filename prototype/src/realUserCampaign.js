@@ -389,7 +389,41 @@ function contextHistoryRetrievalTemplate(seed, random) {
   };
 }
 
-const TASK_TEMPLATES = [nodeCliTemplate, pythonCliTemplate, jsonDocumentTemplate, externalNodeCliTemplate, jsonToCsvTemplate, zipArchiveTemplate, apiCollectionTemplate, imageToolAcquisitionTemplate, delegatedBriefTemplate, contextHistoryRetrievalTemplate];
+function pdfDocumentTemplate(seed, random) {
+  const file = `deliverables/illustrated-report-${seed}.pdf`;
+  const source = `inputs/report-spec-${seed}.json`;
+  const title = `Field Brief ${seed % 97}`;
+  const sections = ["Context", "Findings", "Recommendation"];
+  const audience = ["project team", "decision makers", "contributors"][Math.floor(random() * 3)];
+  const spec = { title, sections, audience, revision: 1 };
+  return {
+    id: "pdf-report",
+    domain: "document_generation_and_binary_artifact",
+    deliverable: file,
+    capabilityAcquisitionRequired: true,
+    initialQuestion: `Read ${source} and create ${file} as a complete illustrated PDF report. It must be at least two pages, include every requested section, and embed at least one raster illustration. The workspace has no task-specific PDF generator: choose and acquire a suitable third-party package or CLI yourself without asking which product to use. Do not hand-encode PDF bytes. Verify the generated document.`,
+    edits: [
+      { prompt: `Update the existing PDF report using the current spec in ${source}: make its Context section explicit, preserve the existing pages and raster illustration, then verify the same document.` },
+      { prompt: `Update the same PDF report so its Findings section is complete. Keep it an illustrated multi-page PDF, preserve the existing required content, and verify it.` },
+      { prompt: `Use only the newest report requirements: retain every requested section, include the current audience from ${source}, keep at least two pages and a raster illustration, then verify the current PDF.` },
+      { prompt: `Make the final requested PDF update in ${file}. Keep one complete illustrated report, every current requested section and audience, at least two pages, and a raster illustration. Verify the finished PDF without replacing it with a text, HTML, or image file.` }
+    ],
+    reversalPrompt: "Use only the newest PDF report requirements. Do not restore an obsolete audience, omit a current section, or split the requested report into multiple files.",
+    recallPrompt: `Inspect the retained report context, ${source}, and the current ${file}, then continue the existing document from the newest requirements without creating a replacement project.`,
+    finalPrompt: `Apply the final PDF report requirement in ${file} and verify its current document structure, page count, and raster illustration one more time.`,
+    recoveryVerificationPrompt: `After recovery, inspect ${file} with the acquired document capability and run a real verification that it remains a multi-page illustrated PDF.`,
+    fixtures: [{ path: source, content: JSON.stringify(spec, null, 2) + "\n" }],
+    hiddenVerifier: {
+      kind: "pdf_document",
+      file,
+      minimumPages: 2,
+      requiresImages: true,
+      requiresAcquisition: true
+    }
+  };
+}
+
+const TASK_TEMPLATES = [nodeCliTemplate, pythonCliTemplate, jsonDocumentTemplate, externalNodeCliTemplate, jsonToCsvTemplate, zipArchiveTemplate, apiCollectionTemplate, imageToolAcquisitionTemplate, delegatedBriefTemplate, contextHistoryRetrievalTemplate, pdfDocumentTemplate];
 
 function expectedImagePixels(spec) {
   const background = hexRgba(spec.background);

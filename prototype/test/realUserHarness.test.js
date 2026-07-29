@@ -648,6 +648,33 @@ test("capability-acquisition PNG verifier checks the real binary structure, dime
   }
 });
 
+test("document campaign verifier requires a structurally valid illustrated multi-page PDF", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-campaign-pdf-"));
+  const campaign = createSeededCampaignScenario({ seed: 10 });
+  try {
+    const target = path.join(root, campaign.hiddenVerifier.file);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, makeCampaignPdf({ pages: 2, includeImage: true }));
+    const valid = await verifyCampaignDeliverable(campaign.hiddenVerifier, root);
+    assert.equal(valid.passed, true, JSON.stringify(valid));
+    assert.equal(classifyCampaignDelivery(valid).minimumUsableDelivery.passed, true);
+
+    fs.writeFileSync(target, makeCampaignPdf({ pages: 1, includeImage: true }));
+    const tooShort = await verifyCampaignDeliverable(campaign.hiddenVerifier, root);
+    assert.equal(tooShort.passed, false);
+    assert.equal(classifyCampaignDelivery(tooShort).minimumUsableDelivery.passed, true, "a parseable PDF remains visible as delivery physiology even when it misses the requested pages");
+
+    fs.writeFileSync(target, makeCampaignPdf({ pages: 2, includeImage: false }));
+    const unillustrated = await verifyCampaignDeliverable(campaign.hiddenVerifier, root);
+    assert.equal(unillustrated.passed, false);
+
+    fs.writeFileSync(target, "%PDF-1.7\nnot-a-document\n", "ascii");
+    assert.equal(classifyCampaignDelivery(await verifyCampaignDeliverable(campaign.hiddenVerifier, root)).minimumUsableDelivery.passed, false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("campaign ZIP verifier checks extracted entry names and content", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-campaign-zip-"));
   const campaign = createSeededCampaignScenario({ seed: 5 });
@@ -769,6 +796,33 @@ function campaignArtifactResponse(file, artifact, verifyCommand) {
       { tool: "execute_command", command: verifyCommand, shell: "system", reason: "Verify that the current catalog JSON parses." }
     ]
   });
+}
+
+function makeCampaignPdf(options = {}) {
+  const pageCount = Math.max(1, Number(options.pages || 1));
+  const imageObjectNumber = 3 + pageCount * 2;
+  const objects = [
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    `<< /Type /Pages /Kids [${[...Array(pageCount)].map((_, index) => `${3 + index * 2} 0 R`).join(" ")}] /Count ${pageCount} >>`
+  ];
+  for (let index = 0; index < pageCount; index += 1) {
+    const pageNumber = 3 + index * 2;
+    const contentNumber = pageNumber + 1;
+    const imageResource = options.includeImage ? ` /Resources << /XObject << /Im1 ${imageObjectNumber} 0 R >> >>` : "";
+    objects.push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents ${contentNumber} 0 R${imageResource} >>`);
+    objects.push("<< /Length 0 >>\nstream\n\nendstream");
+  }
+  if (options.includeImage) objects.push("<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Length 3 >>\nstream\n\x00\x00\x00\nendstream");
+  const chunks = [Buffer.from("%PDF-1.4\n", "ascii")];
+  const offsets = [0];
+  for (const [index, object] of objects.entries()) {
+    offsets.push(Buffer.concat(chunks).length);
+    chunks.push(Buffer.from(`${index + 1} 0 obj\n${object}\nendobj\n`, "latin1"));
+  }
+  const xrefOffset = Buffer.concat(chunks).length;
+  const xref = ["xref", `0 ${objects.length + 1}`, "0000000000 65535 f ", ...offsets.slice(1).map((offset) => `${String(offset).padStart(10, "0")} 00000 n `)].join("\n");
+  chunks.push(Buffer.from(`${xref}\ntrailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF\n`, "ascii"));
+  return Buffer.concat(chunks);
 }
 
 function makeZip(entries) {

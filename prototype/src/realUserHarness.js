@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { once } from "node:events";
 import zlib from "node:zlib";
 import { readZipArchiveEntries } from "./archiveTools.js";
+import { inspectPdfDocument } from "./deliverableVerification.js";
 import { CAMPAIGN_API_URL_TOKEN, createSeededCampaignScenario, EXTERNAL_ROOT_TOKEN, publicCampaignScenario } from "./realUserCampaign.js";
 import { assertHardCampaignBudgetGroup, readCampaignBudgetLedger } from "./harnessCostGuard.js";
 import { syncPublicEventJournal } from "./publicEventJournal.js";
@@ -1187,6 +1188,16 @@ export async function verifyCampaignDeliverable(verifier = {}, groupPath) {
       checks.push(check("png_dimensions", image.width === verifier.width && image.height === verifier.height, `${image.width}x${image.height}`));
       checks.push(check("png_rgba_pixels", Buffer.from(verifier.pixels || []).equals(image.pixels), `${image.pixels.length} decoded bytes`));
     } catch (error) { checks.push(check("png_rgba_parses", false, error.message)); }
+  } else if (verifier.kind === "pdf_document" && fs.existsSync(filePath)) {
+    const inspection = inspectPdfDocument(filePath, {
+      minimumPages: verifier.minimumPages,
+      requiresImages: verifier.requiresImages
+    });
+    const format = inspection.format || {};
+    checks.push(check("pdf_document_parses", format.baseValid === true, JSON.stringify(format)));
+    checks.push(check("pdf_document_valid", inspection.ok, JSON.stringify(format)));
+    checks.push(check("pdf_minimum_pages", format.pagesValid === true, `${format.pageCount || 0} pages`));
+    checks.push(check("pdf_raster_image", verifier.requiresImages !== true || format.imagesValid === true, `${format.referencedImageCount || 0} referenced images`));
   } else if (["node_cli", "python_cli"].includes(verifier.kind)) {
     const command = verifier.kind === "python_cli" ? "python" : process.execPath;
     const result = await runProcess(command, [filePath, ...(verifier.args || [])]);
@@ -1218,6 +1229,7 @@ export function classifyCampaignDelivery(artifactDelivery = {}) {
     "csv_parses",
     "zip_parses",
     "png_rgba_parses",
+    "pdf_document_parses",
     "command_exit"
   ]);
   const minimumChecks = (artifactDelivery.checks || []).filter((item) => minimumIds.has(item.id));

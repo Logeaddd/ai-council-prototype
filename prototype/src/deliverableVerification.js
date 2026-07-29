@@ -316,7 +316,7 @@ function archiveEntriesByName(absolutePath) {
     .map((entry) => [String(entry.name || "").toLowerCase(), entry.content]));
 }
 
-function inspectPdfDocument(absolutePath, requirement = {}) {
+export function inspectPdfDocument(absolutePath, requirement = {}) {
   try {
     const size = fs.statSync(absolutePath).size;
     if (size > MAX_PDF_INSPECTION_BYTES) return formatResult(false, "pdf", { error: "pdf_too_large_to_inspect" });
@@ -346,6 +346,9 @@ function inspectPdfDocument(absolutePath, requirement = {}) {
       pageCount,
       imageCount,
       referencedImageCount,
+      baseValid,
+      pagesValid,
+      imagesValid,
       requiresImages: Boolean(requirement.requiresImages),
       minimumPages: Number(requirement.minimumPages || 0)
     });

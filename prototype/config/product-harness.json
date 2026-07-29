@@ -16,8 +16,8 @@
           "id": "universal_real_provider_survival_pass",
           "type": "real_user_campaign",
           "reportsRoot": "eval/real-user-campaign",
-          "minimumPassedReports": 5,
-          "minimumDistinctTaskIds": 5,
+          "minimumPassedReports": 6,
+          "minimumDistinctTaskIds": 6,
           "minimumDistinctSeeds": 5,
           "evidenceWindowPerTask": 3,
           "minimumPassRate": 0.75,
@@ -27,7 +27,8 @@
             { "id": "network_collection", "taskIds": ["api-collection"] },
             { "id": "external_workspace", "taskIds": ["external-node-cli"] },
             { "id": "archive_packaging", "taskIds": ["zip-archive"] },
-            { "id": "capability_acquisition", "taskIds": ["image-tool-acquisition"], "requireAcquisitionEvidence": true }
+            { "id": "capability_acquisition", "taskIds": ["image-tool-acquisition"], "requireAcquisitionEvidence": true },
+            { "id": "document_generation", "taskIds": ["pdf-report"], "requireAcquisitionEvidence": true }
           ]
         }
       ]
@@ -73,8 +74,8 @@
           "id": "real_provider_campaign",
           "type": "real_user_campaign",
           "reportsRoot": "eval/real-user-campaign",
-          "minimumPassedReports": 5,
-          "minimumDistinctTaskIds": 5,
+          "minimumPassedReports": 6,
+          "minimumDistinctTaskIds": 6,
           "minimumDistinctSeeds": 5,
           "evidenceWindowPerTask": 3,
           "minimumPassRate": 0.75,
@@ -84,7 +85,8 @@
             { "id": "network_collection", "taskIds": ["api-collection"] },
             { "id": "external_workspace", "taskIds": ["external-node-cli"] },
             { "id": "archive_packaging", "taskIds": ["zip-archive"] },
-            { "id": "capability_acquisition", "taskIds": ["image-tool-acquisition"], "requireAcquisitionEvidence": true }
+            { "id": "capability_acquisition", "taskIds": ["image-tool-acquisition"], "requireAcquisitionEvidence": true },
+            { "id": "document_generation", "taskIds": ["pdf-report"], "requireAcquisitionEvidence": true }
           ]
         }
       ]
