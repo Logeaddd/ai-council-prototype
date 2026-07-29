@@ -354,10 +354,12 @@ test("onModelCall records round and final model payloads", async () => {
 
 test("invalid finalizer output makes the session incomplete instead of completed", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-invalid-finalizer-"));
+  let finalCalls = 0;
   const server = http.createServer(async (req, res) => {
     const body = JSON.parse(await readRequestBody(req));
     const prompt = JSON.stringify(body.messages || []);
     if (prompt.includes("FinalDecision JSON object")) {
+      finalCalls += 1;
       writeOpenAiStream(res, "did not provide a valid final answer");
       return;
     }
@@ -390,6 +392,67 @@ test("invalid finalizer output makes the session incomplete instead of completed
     assert.equal(session.finalDecision.final_state, "needs_revision");
     assert.equal(session.status, "incomplete");
     assert.equal(session.finalDecision.blocking_issues.some((item) => item.id === "finalizer-failed"), true);
+    assert.equal(finalCalls, 2);
+  } finally {
+    await close(server);
+  }
+});
+
+test("invalid finalizer output receives one format repair attempt", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-finalizer-repair-"));
+  let finalCalls = 0;
+  const server = http.createServer(async (req, res) => {
+    const body = JSON.parse(await readRequestBody(req));
+    const prompt = JSON.stringify(body.messages || []);
+    if (prompt.includes("FinalDecision JSON object")) {
+      finalCalls += 1;
+      const response = finalCalls === 1
+        ? "The work is complete."
+        : JSON.stringify({
+          answer: "The analysis is complete.",
+          consensus_score: 1,
+          supporting_agents: ["Member"],
+          dissenting_agents: [],
+          minority_report: "",
+          risks: [],
+          next_actions: [],
+          selected_file_operation_ids: [],
+          memory_candidates: []
+        });
+      writeOpenAiStream(res, response);
+      return;
+    }
+    writeOpenAiStream(res, JSON.stringify({ status: "speak", argument: "Analysis is available.", objections: [], confidence: 1, memory_candidates: [] }));
+  });
+  await listen(server);
+  const address = server.address();
+  try {
+    const group = validateGroupConfig({
+      id: "finalizer-repair",
+      name: "Finalizer Repair",
+      settings: { maxRounds: 1, minConsensusWeight: 1, stopWhenAllSkip: true, agentTimeoutMs: 3000, allowSoloCouncil: true },
+      agents: [{
+        id: "member",
+        name: "Member",
+        role: "Member",
+        provider: "openai-compatible",
+        apiBaseUrl: `http://127.0.0.1:${address.port}/v1`,
+        allowUnsafePrivateNetwork: true,
+        apiKey: "secret-runtime-key",
+        model: "final-repair-model",
+        weight: 1,
+        enabled: true
+      }]
+    });
+
+    const { session } = await runCouncil("Analyze this question.", group, tmp, { groupPath: tmp });
+
+    assert.equal(finalCalls, 2);
+    assert.equal(session.finalizationStatus.status, "completed");
+    assert.equal(session.finalDecision.answer, "The analysis is complete.");
+    // The round itself still has no consensus support, which is independent
+    // from whether the finalizer repair returned a valid machine-readable answer.
+    assert.equal(session.status, "incomplete");
   } finally {
     await close(server);
   }
@@ -2828,7 +2891,7 @@ test("final_state is engine-controlled and unresolved blockers override judge pr
 
     const { session } = await runCouncil("Assess whether the proposed result is executable.", group, tmp);
 
-    assert.equal(requests.length, 3);
+    assert.equal(requests.length, 4);
     assert.equal(session.finalDecision.consensus_score, 1);
     assert.equal(session.finalDecision.final_state, "failed_to_converge");
     assert.equal(session.finalDecision.blocking_issues[0].id, "missing-runtime-check");
@@ -6762,7 +6825,7 @@ test("explicit reviewer skip is forced in round one but ordinary critic may skip
     assert.equal(critic.response.status, "skip");
     assert.equal(reviewer.response.status, "speak");
     assert.equal(reviewer.response.position, "reviewer_required");
-    assert.equal(requests.length, 3);
+    assert.equal(requests.length, 4);
   } finally {
     await close(server);
   }

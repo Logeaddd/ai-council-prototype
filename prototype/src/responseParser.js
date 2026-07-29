@@ -203,7 +203,7 @@ function normalizeTaskContract(value) {
 
 function normalizeCollaborationRequirement(value, contract = {}) {
   const source = value && typeof value === "object" && !Array.isArray(value) ? value : {};
-  const allowedTypes = new Set(["research", "implementation", "unblocker"]);
+  const allowedTypes = new Set(["research", "implementation", "review", "unblocker"]);
   const required = Boolean(source.required ?? contract.requires_collaboration ?? contract.requiresCollaboration);
   const minimum = Number.parseInt(String(source.minimum_delegations ?? source.minimumDelegations ?? 1), 10);
   const types = normalizeStringArray(source.types ?? source.delegation_types ?? source.delegationTypes)
@@ -220,7 +220,7 @@ function normalizeCollaborationRequirement(value, contract = {}) {
 
 function normalizeTaskDelegations(value) {
   if (!Array.isArray(value)) return [];
-  const allowedTypes = new Set(["research", "implementation", "unblocker"]);
+  const allowedTypes = new Set(["research", "implementation", "review", "unblocker"]);
   return value
     .filter((item) => item && typeof item === "object" && !Array.isArray(item))
     .map((item) => {

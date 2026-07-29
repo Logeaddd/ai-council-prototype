@@ -698,6 +698,19 @@ function matchEvidence(evidence, resolved, stat) {
       match: "workspace_observed_after_successful_build"
     };
   }
+  // A successful verification command can inspect an existing artifact without
+  // changing it. Its post-command workspace snapshot is current-session
+  // evidence of that exact file, so it is sufficient for an `existing` claim
+  // but deliberately remains insufficient for `created` or `built` claims.
+  if (exactObservedArtifactMatch(item, resolved.relativePath)) {
+    return {
+      id: evidence.id,
+      kind: evidence.kind,
+      tool: evidence.tool,
+      strength: "inspection",
+      match: "workspace_observed_after_successful_execution"
+    };
+  }
   if (resolved.scope === "project"
     && MUTATING_TOOL_NAMES.has(evidence.tool)
     && exactAuthorizedArtifactEvidenceMatch(item, resolved)) {

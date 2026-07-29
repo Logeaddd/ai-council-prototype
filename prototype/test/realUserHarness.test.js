@@ -557,6 +557,48 @@ test("campaign collaboration verifier requires an acknowledged read-only handoff
   assert.equal(verifyCampaignCollaboration(verifier, sessions.slice(0, 1)).passed, false);
 });
 
+test("campaign collaboration verifier applies distinct implementation, review, and unblocker evidence contracts", () => {
+  const at = (seconds) => `2026-07-27T00:00:${String(seconds).padStart(2, "0")}.000Z`;
+  const sessionFor = (delegation, results) => ({
+    createdAt: at(0),
+    executionState: { ownership: { delegations: [delegation] } },
+    toolExecutionResults: results
+  });
+  const implementation = {
+    id: "delegation:2:1:implementer", type: "implementation", assignedBy: "owner", assigneeId: "implementer",
+    allowWorkspaceMutation: true, allowedPaths: ["shared/component"], native: true, createdAt: at(1), status: "completed", ownerAcknowledged: true,
+    handoffEvidence: [{ kind: "tool", detail: "workspace_edit#implementation-write completed" }]
+  };
+  const implementationSession = sessionFor(implementation, [
+    { id: "implementation-write", tool: "workspace_edit", path: "shared/component/feature.txt", status: "completed", createdAt: at(2), source_agent_id: "implementer", result: { ok: true } },
+    { id: "owner-verify", tool: "run_code", status: "completed", createdAt: at(3), source_agent_id: "owner", result: { ok: true, exitCode: 0 } }
+  ]);
+  assert.equal(verifyCampaignCollaboration({ requiresDelegation: true, delegationTypes: ["implementation"] }, [implementationSession]).passed, true);
+  assert.equal(verifyCampaignCollaboration({ requiresDelegation: true, delegationTypes: ["implementation"] }, [{ ...implementationSession, toolExecutionResults: implementationSession.toolExecutionResults.slice(0, 1) }]).passed, false);
+
+  const review = {
+    id: "delegation:2:2:reviewer", type: "review", assignedBy: "owner", assigneeId: "reviewer",
+    allowWorkspaceMutation: false, native: true, createdAt: at(4), status: "completed", ownerAcknowledged: true,
+    handoffEvidence: [{ kind: "tool", detail: "read_file#review-read completed" }]
+  };
+  const reviewSession = sessionFor(review, [
+    { id: "review-read", tool: "read_file", path: "inputs/draft.txt", status: "completed", createdAt: at(5), source_agent_id: "reviewer", result: { ok: true } },
+    { id: "owner-repair", tool: "workspace_edit", path: "deliverables/release.txt", status: "completed", createdAt: at(6), source_agent_id: "owner", result: { ok: true } }
+  ]);
+  assert.equal(verifyCampaignCollaboration({ requiresDelegation: true, delegationTypes: ["review"], file: "deliverables/release.txt" }, [reviewSession]).passed, true);
+
+  const unblocker = {
+    id: "delegation:2:3:unblocker", type: "unblocker", assignedBy: "owner", assigneeId: "unblocker",
+    allowWorkspaceMutation: false, native: true, createdAt: at(7), status: "completed", ownerAcknowledged: true,
+    handoffEvidence: [{ kind: "tool", detail: "read_process_status#process-ready completed" }]
+  };
+  const unblockerSession = sessionFor(unblocker, [
+    { id: "process-ready", tool: "read_process_status", status: "completed", createdAt: at(8), source_agent_id: "unblocker", result: { ok: true } },
+    { id: "owner-continue", tool: "workspace_edit", path: "deliverables/release.txt", status: "completed", createdAt: at(9), source_agent_id: "owner", result: { ok: true } }
+  ]);
+  assert.equal(verifyCampaignCollaboration({ requiresDelegation: true, delegationTypes: ["unblocker"], file: "deliverables/release.txt" }, [unblockerSession]).passed, true);
+});
+
 test("campaign collaboration verifier accepts durable TaskRun-only delegation evidence and rejects a write that predates it", () => {
   const verifier = { requiresDelegation: true, file: "deliverables/release-brief.json" };
   const delegation = {

@@ -900,33 +900,19 @@ export function verifyCampaignCollaboration(verifier = {}, sessions = []) {
     }
   }
 
-  const completedResearch = [...delegationSnapshots.values()].filter((snapshot) => {
-    const { delegation } = snapshot;
-    return (
-    delegation.type === "research"
-    && isNativeTimestampedCampaignDelegation(delegation)
-    && delegation.status === "completed"
-    && delegation.allowWorkspaceMutation !== true
-    && delegation.assignedBy
-    && delegation.assigneeId
-    && delegation.assignedBy !== delegation.assigneeId
-    && delegation.ownerAcknowledged === true
-    && Array.isArray(delegation.handoffEvidence)
-    && delegation.handoffEvidence.length > 0
-    );
-  });
-  const evidencedResearch = completedResearch.filter((snapshot) => campaignResearchEvidence(snapshot));
-  const integrated = evidencedResearch.filter((snapshot) => campaignOwnerIntegratedHandoff(snapshot, ordered, verifier.file));
-  const checks = [
-    check("native_timestamped_research_handoff_completed", completedResearch.length > 0, `${completedResearch.length} completed acknowledged native, timestamped read-only research handoffs`),
-    check("handoff_has_current_read_only_evidence", evidencedResearch.length > 0, `${evidencedResearch.length} handoffs were backed by the assignee's completed read-only tool evidence created after delegation`),
-    check("owner_integrated_handoff_into_target", integrated.length > 0, `${integrated.length} owner writes to ${verifier.file || "target"} after a handoff`)
-  ];
+  const requiredTypes = normalizeCampaignDelegationTypes(verifier);
+  const completed = [...delegationSnapshots.values()].filter((snapshot) => isCompletedCampaignDelegation(snapshot, requiredTypes));
+  const checks = requiredTypes.flatMap((type) => collaborationChecksForType({
+    type,
+    completed: completed.filter((snapshot) => snapshot.delegation.type === type),
+    ordered,
+    verifier
+  }));
   return {
     required: true,
     passed: checks.every((item) => item.passed),
     checks,
-    delegations: completedResearch.map(({ delegation }) => ({
+    delegations: completed.map(({ delegation }) => ({
       id: delegation.id,
       type: delegation.type,
       ownerId: delegation.assignedBy,
@@ -935,6 +921,53 @@ export function verifyCampaignCollaboration(verifier = {}, sessions = []) {
       ownerAcknowledged: delegation.ownerAcknowledged === true
     }))
   };
+}
+
+function normalizeCampaignDelegationTypes(verifier = {}) {
+  const requested = Array.isArray(verifier.delegationTypes)
+    ? verifier.delegationTypes
+    : Array.isArray(verifier.delegation_types)
+      ? verifier.delegation_types
+      : ["research"];
+  const allowed = new Set(["research", "implementation", "review", "unblocker"]);
+  const types = requested.map((item) => String(item || "").toLowerCase()).filter((item) => allowed.has(item));
+  return [...new Set(types)].length ? [...new Set(types)] : ["research"];
+}
+
+function isCompletedCampaignDelegation(snapshot, allowedTypes) {
+  const { delegation } = snapshot;
+  return allowedTypes.includes(delegation.type)
+    && isNativeTimestampedCampaignDelegation(delegation)
+    && delegation.status === "completed"
+    && delegation.assignedBy
+    && delegation.assigneeId
+    && delegation.assignedBy !== delegation.assigneeId
+    && delegation.ownerAcknowledged === true
+    && Array.isArray(delegation.handoffEvidence)
+    && delegation.handoffEvidence.length > 0;
+}
+
+function collaborationChecksForType({ type, completed, ordered, verifier }) {
+  const evidence = completed.filter((snapshot) => campaignDelegationEvidenceForType(type, snapshot));
+  const integrated = evidence.filter((snapshot) => campaignOwnerIntegrationForType(type, snapshot, ordered, verifier.file));
+  const count = `${completed.length} completed acknowledged native, timestamped ${type} handoffs`;
+  if (type === "research") {
+    return [
+      check("native_timestamped_research_handoff_completed", completed.length > 0, count),
+      check("handoff_has_current_read_only_evidence", evidence.length > 0, `${evidence.length} handoffs were backed by the assignee's completed read-only tool evidence created after delegation`),
+      check("owner_integrated_handoff_into_target", integrated.length > 0, `${integrated.length} owner writes to ${verifier.file || "target"} after a handoff`)
+    ];
+  }
+  const integrationLabel = type === "implementation"
+    ? "owner_verified_implemented_scope"
+    : type === "unblocker"
+      ? "owner_continued_after_unblocker"
+      : "owner_integrated_review_into_target";
+  return [
+    check(`native_timestamped_${type}_handoff_completed`, completed.length > 0, count),
+    check(`handoff_has_current_${type}_evidence`, evidence.length > 0, `${evidence.length} ${type} handoffs had current, concrete tool evidence`),
+    check(integrationLabel, integrated.length > 0, `${integrated.length} owner actions advanced after a ${type} handoff`)
+  ];
 }
 
 function campaignDelegationSnapshots(session, sessionIndex) {
@@ -961,12 +994,23 @@ function isNewerCampaignDelegationSnapshot(next, current) {
 }
 
 function campaignResearchEvidence(snapshot) {
-  return campaignResearchEvidenceItems(snapshot).length > 0;
+  return campaignReadOnlyEvidenceItems(snapshot).length > 0;
 }
 
 function campaignResearchEvidenceItems(snapshot) {
+  return campaignReadOnlyEvidenceItems(snapshot);
+}
+
+function campaignDelegationEvidenceForType(type, snapshot) {
+  if (type === "research" || type === "review") return campaignReadOnlyEvidenceItems(snapshot).length > 0;
+  if (type === "implementation") return campaignImplementationEvidenceItems(snapshot).length > 0;
+  if (type === "unblocker") return campaignUnblockerEvidenceItems(snapshot).length > 0;
+  return false;
+}
+
+function campaignReadOnlyEvidenceItems(snapshot) {
   const { delegation, session } = snapshot;
-  if (!isNativeTimestampedCampaignDelegation(delegation)) return [];
+  if (!isNativeTimestampedCampaignDelegation(delegation) || delegation.allowWorkspaceMutation === true) return [];
   const toolIds = campaignHandoffToolIds(delegation);
   if (!toolIds.size) return [];
 
@@ -980,6 +1024,43 @@ function campaignResearchEvidenceItems(snapshot) {
     && (!allowedTools.size || allowedTools.has(item?.tool))
     && occurredAtOrAfter(item?.createdAt, delegation.createdAt)
   ));
+}
+
+function campaignImplementationEvidenceItems(snapshot) {
+  const { delegation } = snapshot;
+  if (!isNativeTimestampedCampaignDelegation(delegation) || delegation.allowWorkspaceMutation !== true) return [];
+  const allowedPaths = Array.isArray(delegation.allowedPaths) ? delegation.allowedPaths : [];
+  const toolIds = campaignHandoffToolIds(delegation);
+  if (!allowedPaths.length || !toolIds.size) return [];
+  return campaignSessionActionResults(snapshot.session).filter((item) => (
+    toolIds.has(item?.id)
+    && item?.source_agent_id === delegation.assigneeId
+    && item?.tool === "workspace_edit"
+    && item?.status === "completed"
+    && item?.result?.ok !== false
+    && campaignDelegatedPathAllowed(item?.path || item?.result?.path, allowedPaths)
+    && occurredAtOrAfter(item?.createdAt, delegation.createdAt)
+  ));
+}
+
+function campaignUnblockerEvidenceItems(snapshot) {
+  const { delegation } = snapshot;
+  if (!isNativeTimestampedCampaignDelegation(delegation)) return [];
+  const toolIds = campaignHandoffToolIds(delegation);
+  if (!toolIds.size) return [];
+  const unblockerTools = new Set(["read_process_status", "process_control", "provision_tool", "install_package", "mcp_list_tools", "mcp_call", "mcp_install_npm"]);
+  return campaignSessionActionResults(snapshot.session).filter((item) => (
+    toolIds.has(item?.id)
+    && item?.source_agent_id === delegation.assigneeId
+    && item?.status === "completed"
+    && item?.result?.ok !== false
+    && unblockerTools.has(item?.tool)
+    && occurredAtOrAfter(item?.createdAt, delegation.createdAt)
+  ));
+}
+
+function campaignSessionActionResults(session = {}) {
+  return [...(session?.toolExecutionResults || []), ...(session?.fileOperationExecutionResults || [])];
 }
 
 function campaignHandoffToolIds(delegation = {}) {
@@ -1003,9 +1084,16 @@ function isReadOnlyResearchTool(tool) {
   return new Set(["read_file", "list_directory", "search_files", "web_search", "fetch_url", "api_request", "search_context", "read_process_status"]).has(tool);
 }
 
+function campaignOwnerIntegrationForType(type, snapshot, ordered, targetFile) {
+  if (type === "research" || type === "review") return campaignOwnerIntegratedHandoff(snapshot, ordered, targetFile);
+  if (type === "implementation") return campaignOwnerVerificationAfter(snapshot, ordered);
+  if (type === "unblocker") return campaignOwnerContinuationAfter(snapshot, ordered, targetFile);
+  return false;
+}
+
 function campaignOwnerIntegratedHandoff(snapshot, ordered, targetFile) {
   const delegation = snapshot.delegation;
-  const evidenceIndexes = new Set(campaignResearchEvidenceItems(snapshot).map((item) => item.id));
+  const evidenceIndexes = new Set(campaignReadOnlyEvidenceItems(snapshot).map((item) => item.id));
   if (!evidenceIndexes.size) return false;
   const sourceEvidenceIndex = (snapshot.session?.toolExecutionResults || []).reduce((latest, item, index) => (
     evidenceIndexes.has(item?.id) ? index : latest
@@ -1022,6 +1110,49 @@ function campaignOwnerIntegratedHandoff(snapshot, ordered, targetFile) {
        && (relativeIndex > 0 || toolIndex > sourceEvidenceIndex)
     ))
   ));
+}
+
+function campaignOwnerVerificationAfter(snapshot, ordered) {
+  return campaignOwnerActionAfter(snapshot, ordered, campaignImplementationEvidenceItems(snapshot), (item) => (
+    ["run_tests", "run_code", "execute_command"].includes(item?.tool)
+      && item?.status === "completed"
+      && item?.result?.ok !== false
+      && (item?.tool !== "execute_command" || Number(item?.result?.exitCode) === 0)
+      && (item?.tool !== "run_tests" || item?.result?.passed !== false)
+  ));
+}
+
+function campaignOwnerContinuationAfter(snapshot, ordered, targetFile) {
+  return campaignOwnerActionAfter(snapshot, ordered, campaignUnblockerEvidenceItems(snapshot), (item) => (
+    (item?.tool === "workspace_edit"
+      && item?.status === "completed"
+      && item?.result?.ok !== false
+      && normalizeCampaignPath(item?.path || item?.result?.path) === normalizeCampaignPath(targetFile))
+      || (["run_tests", "run_code", "execute_command"].includes(item?.tool)
+        && item?.status === "completed"
+        && item?.result?.ok !== false
+        && (item?.tool !== "execute_command" || Number(item?.result?.exitCode) === 0))
+  ));
+}
+
+function campaignOwnerActionAfter(snapshot, ordered, evidence, predicate) {
+  if (!evidence.length) return false;
+  const delegation = snapshot.delegation;
+  const latestEvidenceAt = Math.max(...evidence.map((item) => Date.parse(String(item?.createdAt || ""))).filter(Number.isFinite));
+  if (!Number.isFinite(latestEvidenceAt)) return false;
+  return ordered.slice(snapshot.sessionIndex).some((session) => campaignSessionActionResults(session).some((item) => (
+    item?.source_agent_id === delegation.assignedBy
+      && Date.parse(String(item?.createdAt || "")) > latestEvidenceAt
+      && predicate(item)
+  )));
+}
+
+function campaignDelegatedPathAllowed(value, allowedPaths = []) {
+  const candidate = normalizeCampaignPath(value);
+  return allowedPaths.some((allowed) => {
+    const root = normalizeCampaignPath(allowed).replace(/\/+$/, "");
+    return root && (candidate === root || candidate.startsWith(`${root}/`));
+  });
 }
 
 function normalizeCampaignPath(value) {

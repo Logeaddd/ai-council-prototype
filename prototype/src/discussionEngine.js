@@ -1169,9 +1169,54 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
     if (finalRaw.error) {
       finalizationFailure = finalRaw.error;
       session.finalDecision = { ...fallback, risks: [...fallback.risks, finalRaw.error] };
-    } else {
-      if (!hasValidFinalDecision(finalRaw.text)) finalizationFailure = "invalid_finalizer_response";
+    } else if (hasValidFinalDecision(finalRaw.text)) {
       session.finalDecision = parseFinalDecision(finalRaw.text, fallback);
+    } else if (!reserveModelCall(session)) {
+      finalizationFailure = "invalid_finalizer_response_repair_budget_exhausted";
+      session.finalDecision = { ...fallback, risks: [...fallback.risks, finalizationFailure] };
+    } else {
+      // A provider occasionally returns usable prose instead of the strict
+      // final JSON contract. Ask the same judge once to repair that format;
+      // never infer a final decision from the malformed response ourselves.
+      const repairMessages = buildFinalRepairPrompt(finalMessages, finalRaw.text);
+      const repairReceipt = recordContextReceipt(session, finalContext, {
+        groupPath: options.groupPath,
+        sessionId: session.id,
+        modelCallIndex: session.modelCallCount,
+        phase: "final_repair",
+        agentId: judge.id,
+        round: 0,
+        toolIteration: 0,
+        inputMessages: repairMessages
+      });
+      const repairRecord = notifyModelCall(options, {
+        sessionId: session.id,
+        phase: "final_repair",
+        agentId: judge.id,
+        agentName: judge.name,
+        model: judge.model || "",
+        provider: judge.provider || "",
+        inputMessages: repairMessages,
+        contextReceipt: repairReceipt
+      });
+      yield {
+        type: "final_repair_start",
+        agentId: judge.id,
+        agentName: judge.name,
+        reason: "invalid_finalizer_response",
+        createdAt: nowIso()
+      };
+      const repairedFinalRaw = await safeCall(judge, repairMessages, group.settings.agentTimeoutMs, options.signal);
+      completeModelCall(repairRecord, repairedFinalRaw);
+      if (repairedFinalRaw.error) {
+        finalizationFailure = `invalid_finalizer_response_repair_failed:${repairedFinalRaw.error}`;
+        session.finalDecision = { ...fallback, risks: [...fallback.risks, finalizationFailure] };
+      } else if (!hasValidFinalDecision(repairedFinalRaw.text)) {
+        finalizationFailure = "invalid_finalizer_response";
+        session.finalDecision = parseFinalDecision(repairedFinalRaw.text, fallback);
+      } else {
+        session.finalDecision = parseFinalDecision(repairedFinalRaw.text, fallback);
+      }
     }
   }
   session.finalSemanticMemoryUpdate = Array.isArray(session.finalDecision.memory_candidates) && session.finalDecision.memory_candidates.length
@@ -1967,6 +2012,22 @@ function appendModelCallTrace(record, { event, raw } = {}) {
   if (raw?.usage) payload.usage = raw.usage;
   if (record.usageCalibrationError) payload.usageCalibrationError = record.usageCalibrationError;
   fs.appendFileSync(filePath, `${JSON.stringify(payload)}\n`, "utf8");
+}
+
+function buildFinalRepairPrompt(finalMessages = [], invalidOutput = "") {
+  const previous = String(invalidOutput || "").trim().slice(0, 4000);
+  return [
+    ...finalMessages,
+    {
+      role: "user",
+      content: [
+        "Your immediately preceding final response could not be parsed as a FinalDecision JSON object.",
+        "Repair the response format now. Return only one valid JSON object with a non-empty answer and the required final-decision fields.",
+        "Do not add Markdown, explanation, or a round-style status object. Do not invent tool execution or delivery evidence.",
+        previous ? `Previous invalid response, for reference only:\n${previous}` : ""
+      ].filter(Boolean).join("\n\n")
+    }
+  ];
 }
 
 function summarizePromptMessages(messages = []) {

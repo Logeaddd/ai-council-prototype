@@ -946,8 +946,9 @@ function normalizeOwnership(value, state = {}) {
   };
 }
 
-const WORK_DELEGATION_TYPES = new Set(["research", "implementation", "unblocker"]);
+const WORK_DELEGATION_TYPES = new Set(["research", "implementation", "review", "unblocker"]);
 const DEFAULT_RESEARCH_TOOLS = ["web_search", "fetch_url", "api_request", "list_directory", "read_file", "search_files", "grep_content", "search_context", "load_context"];
+const DEFAULT_UNBLOCKER_TOOLS = [...DEFAULT_RESEARCH_TOOLS, "read_process_status", "mcp_list_tools"];
 
 export function collaborationRequirementStatus(state = {}) {
   const requirement = state?.taskContract?.collaboration || {};
@@ -1198,7 +1199,8 @@ function uniqueDelegationEvidence(items = []) {
 function normalizeDelegationTools(value, type, allowWorkspaceMutation) {
   const supplied = normalizeContractTextList(value).map((item) => item.toLowerCase().replace(/-/g, "_")).slice(0, 24);
   if (supplied.length) return supplied;
-  if (type === "research") return DEFAULT_RESEARCH_TOOLS;
+  if (type === "research" || type === "review") return DEFAULT_RESEARCH_TOOLS;
+  if (type === "unblocker") return DEFAULT_UNBLOCKER_TOOLS;
   return allowWorkspaceMutation ? ["workspace_edit", "read_file", "list_directory", "search_files", "grep_content", "run_code", "run_tests"] : DEFAULT_RESEARCH_TOOLS;
 }
 

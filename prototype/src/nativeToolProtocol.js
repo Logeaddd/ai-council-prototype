@@ -174,7 +174,7 @@ const PROPERTY_DEFINITIONS = {
   force: BOOLEAN,
   create: BOOLEAN,
   mode: STRING,
-  delegationType: { ...NON_EMPTY_STRING, description: "Bounded delegation type: research, implementation, or unblocker." },
+  delegationType: { ...NON_EMPTY_STRING, description: "Bounded delegation type: research, implementation, review, or unblocker." },
   assigneeId: { ...NON_EMPTY_STRING, description: "Stable ID of the specific contributor." },
   task: { ...NON_EMPTY_STRING, description: "Narrow delegated slice, never the full user request." },
   expectedEvidence: { type: "array", minItems: 1, items: NON_EMPTY_STRING, description: "Concrete evidence the contributor must hand back." },

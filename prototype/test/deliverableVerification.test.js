@@ -403,6 +403,47 @@ test("existing file without successful current-session evidence lowers final sta
   assert.match(session.finalDecision.risks.join("\n"), /exists but is not verified/);
 });
 
+test("successful command observation verifies an existing artifact without claiming it was created", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-deliverable-command-inspection-"));
+  const target = path.join(root, "deliverables", "report.pdf");
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.writeFileSync(target, makeMinimalPdf({ includeImage: true }));
+  const evidence = {
+    id: "verify-existing-pdf",
+    tool: "execute_command",
+    command: "python deliverables/verify_report.py",
+    status: "completed",
+    result: {
+      ok: true,
+      exitCode: 0,
+      workspaceChanges: {
+        status: "completed",
+        complete: true,
+        created: [],
+        modified: [],
+        observedArtifacts: [{ path: "deliverables/report.pdf", reliable: true }]
+      }
+    }
+  };
+  const session = {
+    finalDecision: {
+      answer: "The existing `deliverables/report.pdf` was verified.",
+      deliverables: [{ path: "deliverables/report.pdf", claim: "existing", evidence_ids: [evidence.id] }]
+    },
+    toolExecutionResults: [evidence],
+    fileOperationExecutionResults: []
+  };
+
+  const existingReport = verifyFinalDeliverables({ groupPath: root, session });
+  assert.equal(existingReport.status, "verified");
+  assert.equal(existingReport.claims[0].status, "verified_existing");
+  assert.equal(existingReport.claims[0].evidence_matches[0].match, "workspace_observed_after_successful_execution");
+
+  session.finalDecision.deliverables[0].claim = "created";
+  const createdReport = verifyFinalDeliverables({ groupPath: root, session });
+  assert.equal(createdReport.claims[0].status, "exists_unverified");
+});
+
 test("a successful generic command cannot prove a built claim", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-deliverable-not-build-"));
   const target = path.join(root, "dist", "app.bin");

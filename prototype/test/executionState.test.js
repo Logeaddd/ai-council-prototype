@@ -162,6 +162,67 @@ test("a required collaboration contract blocks material work until a real handof
   assert.equal(gateDeliveryRecoveryToolRequests(state, owner, [{ tool: "workspace_edit", action: "write", path: "shared/result.txt", code: "FACT" }]).accepted.length, 1);
 });
 
+test("a bounded review delegation is scheduled as durable work before ordinary checkpoint review", () => {
+  const owner = { id: "owner", name: "Owner", enabled: true };
+  const reviewer = { id: "reviewer", name: "Reviewer", role: "Reviewer", enabled: true };
+  const state = createExecutionState({
+    question: "Create a release note after another member reviews the source.",
+    agents: [owner, reviewer],
+    workspaceGroup: { permissions: { defaultTier: "text", seatTiers: { owner: "full", reviewer: "tool" } } }
+  });
+  const session = { toolExecutionResults: [], fileOperationExecutionResults: [], groupSnapshot: { agents: [owner, reviewer] } };
+  advanceExecutionState({
+    state,
+    session,
+    agent: owner,
+    response: {
+      status: "speak",
+      task_contract: {
+        mode: "delivery",
+        objective: "Create a reviewed release note.",
+        requires_workspace: true,
+        requires_verification: true,
+        deliverables: ["shared/release.txt"],
+        completion_criteria: ["Use the review findings.", "Validate the release note."],
+        next_action: "Delegate the source review.",
+        collaboration: { required: true, before_first_mutation: true, minimum_delegations: 1, types: ["review"], reason: "A review handoff is required." }
+      },
+      task_delegations: [markNativeModelSource({
+        type: "review",
+        assignee_id: "reviewer",
+        task: "Inspect shared/source.txt and report unsupported release claims.",
+        expected_evidence: ["Read source evidence", "Review finding"],
+        allowed_tools: ["read_file"],
+        allow_workspace_mutation: false
+      })]
+    }
+  });
+
+  const delegation = state.ownership.delegations.find((item) => item.type === "review");
+  assert.ok(delegation);
+  assert.deepEqual(selectExecutionAgents(state, [owner, reviewer]).map((agent) => agent.id), ["reviewer"]);
+  assert.match(executionInstruction(state, reviewer), /Delegated review work/);
+  session.toolExecutionResults.push({
+    id: "review-source",
+    tool: "read_file",
+    source_agent_id: "reviewer",
+    status: "completed",
+    createdAt: new Date(Date.parse(delegation.createdAt) + 1_000).toISOString(),
+    result: { ok: true, content: "release=1.2" }
+  });
+  advanceExecutionState({
+    state,
+    session,
+    agent: reviewer,
+    response: { status: "speak", delegation_handoff: { delegation_id: delegation.id, summary: "One claim needs removal.", evidence: ["read_file#review-source"] } }
+  });
+  advanceExecutionState({ state, session, agent: owner, response: { status: "speak", argument: "I will correct the release note from the review." } });
+
+  assert.equal(delegation.status, "completed");
+  assert.equal(delegation.ownerAcknowledged, true);
+  assert.equal(collaborationRequirementStatus(state).pending, false);
+});
+
 test("a delegation handoff cannot reuse evidence from before that delegation existed", () => {
   const owner = { id: "owner", name: "Owner", enabled: true };
   const researcher = { id: "researcher", name: "Researcher", enabled: true };

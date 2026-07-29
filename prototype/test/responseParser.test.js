@@ -139,6 +139,24 @@ test("round response parser keeps bounded owner delegations and contributor hand
   });
 });
 
+test("round response parser accepts a bounded review delegation without turning it into a checkpoint-only review", () => {
+  const parsed = parseRoundResponse(JSON.stringify({
+    status: "speak",
+    task_delegations: [{
+      type: "review",
+      assignee_id: "reviewer",
+      task: "Inspect the proposed release notes for unsupported claims.",
+      expected_evidence: ["Read evidence", "Concrete findings"],
+      allowed_tools: ["read_file", "search_files"],
+      allow_workspace_mutation: false
+    }]
+  }));
+
+  assert.equal(parsed.task_delegations.length, 1);
+  assert.equal(parsed.task_delegations[0].type, "review");
+  assert.deepEqual(parsed.task_delegations[0].allowed_tools, ["read_file", "search_files"]);
+});
+
 test("round response parser retains structured contributor handoff evidence instead of discarding it", () => {
   const parsed = parseRoundResponse(JSON.stringify({
     status: "speak",
