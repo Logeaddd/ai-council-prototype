@@ -661,7 +661,7 @@ function applyTaskIntake(state, response = {}, session = {}) {
     retainMissingTaskContractForOwner(state, response);
     return { delivery: false, intakeRequired: true };
   }
-  state.taskContract = contract;
+  state.taskContract = enforceExplicitCollaboration(contract, state.taskQuestion);
   if (contract.mode === "discussion") {
     state.active = false;
     state.phase = "discussion";
@@ -678,6 +678,27 @@ function applyTaskIntake(state, response = {}, session = {}) {
       ? "Inspect only the minimum facts required, then perform the first real workspace mutation or command."
       : "Perform the first material action required by the recorded task contract.");
   return { delivery: true };
+}
+
+function enforceExplicitCollaboration(contract, question) {
+  if (contract?.mode !== "delivery" || contract.collaboration?.required || !userExplicitlyRequestsCollaboration(question)) return contract;
+  return {
+    ...contract,
+    collaboration: {
+      ...contract.collaboration,
+      required: true,
+      beforeFirstMutation: true,
+      minimumDelegations: Math.max(1, Number(contract.collaboration?.minimumDelegations || 0)),
+      types: contract.collaboration?.types?.length ? contract.collaboration.types : ["research"],
+      reason: "The user explicitly requested collaborative delivery, so one evidence-backed delegated handoff is required before the owner creates the final artifact."
+    }
+  };
+}
+
+function userExplicitlyRequestsCollaboration(value) {
+  const text = String(value || "").toLowerCase();
+  if (/\b(?:do not|don't|without)\s+(?:collaborat\w*|co[- ]?operat\w*|work(?:ing)? together)\b/.test(text)) return false;
+  return /(?:\b(?:collaborat\w*|co[- ]?operat\w*|work(?:ing)? together|team up)\b|\u5408\u4f5c|\u534f\u4f5c|\u5171\u540c\u5b8c\u6210|\u4e00\u8d77\u5b8c\u6210|\u5171\u540c\u4f5c\u4e1a|\u5171\u540c\u64b0\u5199|\u5408\u4f5c\u5b8c\u6210|\u4e00\u8d77\u505a|\u5408\u4f5c\u5236\u4f5c|\u5354\u529b|\u5171\u540c\u5236\u4f5c|\u5354\u4f5c|\u4e00\u7dd2\u306b|\u5354\u529b\u3057\u3066|\ud568\uaed8\s*(?:\ud574|\uc8fc)|\ucd5c\ub825|\u0441\u043e\u0432\u043c\u0435\u0441\u0442\u043d\u043e|\u0441\u043e\u0442\u0440\u0443\u0434\u043d\u0438\u0447|\u0432\u043c\u0435\u0441\u0442\u0435|\u3053\u308c\u3092\u5408\u4f5c|\u3054\u5354\u529b|\uc11c\ub85c\s*\ud611\ub825|\bzusa?mmen(?:arbeit(?:en)?)?\b|\ben\s+(?:collaboration|equipe)\b|\bcolabor(?:ar|en)\b)/iu.test(text);
 }
 
 function retainMissingTaskContractForOwner(state, response = {}) {

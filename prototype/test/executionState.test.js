@@ -28,6 +28,35 @@ test("every non-empty task starts with one highest-permission intake owner", () 
   assert.match(executionInstruction(state, agents[1]), /Task intake owner/);
 });
 
+test("an explicit collaborative delivery request cannot be downgraded to a single-owner contract", () => {
+  const pair = [
+    { id: "owner", name: "Owner", enabled: true },
+    { id: "contributor", name: "Contributor", enabled: true }
+  ];
+  const state = createExecutionState({
+    question: "\u4f60\u4eec\u5408\u4f5c\u64b0\u5199\u62a5\u544a\u5e76\u5236\u4f5c PDF\u3002",
+    agents: pair,
+    workspaceGroup: { permissions: { defaultTier: "text", seatTiers: { owner: "full", contributor: "text" } } }
+  });
+  advanceExecutionState({
+    state,
+    session: { toolExecutionResults: [], fileOperationExecutionResults: [] },
+    agent: pair[0],
+    response: {
+      status: "speak",
+      task_contract: {
+        mode: "delivery", objective: "Create the requested PDF.", requires_workspace: true, requires_verification: true,
+        deliverables: ["PDF"], completion_criteria: ["PDF exists"], next_action: "Draft the report.",
+        collaboration: { required: false }
+      }
+    }
+  });
+  const collaboration = collaborationRequirementStatus(state);
+  assert.equal(collaboration.required, true);
+  assert.equal(collaboration.pending, true);
+  assert.match(executionInstruction(state, pair[0]), /Collaboration required before completion/);
+});
+
 test("explicit rerun and verification requests remain delivery work after recovery", () => {
   const english = "Run the current deliverable once more to verify its current state after recovery.";
   const chinese = "恢复后请运行当前产物并验证其当前状态。";

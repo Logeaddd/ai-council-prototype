@@ -343,7 +343,7 @@ function verifyRequestedArtifact(requirement, groupPath, evidence, projectRoots 
 }
 
 function normalizeAuthorizedArtifactPath(value, projectRoots = []) {
-  const raw = String(value || "").trim();
+  const raw = expandUserHomePath(value);
   if (!path.isAbsolute(raw)) return raw;
   for (const root of Array.isArray(projectRoots) ? projectRoots : []) {
     try {
@@ -355,6 +355,20 @@ function normalizeAuthorizedArtifactPath(value, projectRoots = []) {
     } catch {}
   }
   return raw;
+}
+
+// Models often preserve a Windows shell path from the task contract. Only
+// expand home-directory aliases; the resolved path must still be authorized.
+export function expandUserHomePath(value, environment = process.env) {
+  const raw = String(value || "").trim();
+  const home = String(environment.USERPROFILE || environment.HOME || "").trim();
+  if (!raw || !home) return raw;
+  return raw
+    .replace(/^~(?=[\\/]|$)/, home)
+    .replace(/%USERPROFILE%/gi, home)
+    .replace(/%HOME%/gi, home)
+    .replace(/^\$env:USERPROFILE(?=[\\/]|$)/i, home)
+    .replace(/^\$HOME(?=[\\/]|$)/i, home);
 }
 
 function inspectArtifactFormat(extension, absolutePath, requirement = {}) {
@@ -798,7 +812,7 @@ function modifiedDuringEvidenceWindow(stat, item) {
 }
 
 function resolveDeliverablePath(groupPath, value, projectRoots = []) {
-  const raw = String(value || "").trim();
+  const raw = expandUserHomePath(value);
   if (path.isAbsolute(raw)) {
     const normalized = normalizeAuthorizedArtifactPath(raw, projectRoots);
     if (normalized !== raw) return resolveDeliverablePath(groupPath, normalized, projectRoots);
@@ -820,7 +834,7 @@ function resolveDeliverablePath(groupPath, value, projectRoots = []) {
     }
     throw new Error("Deliverable project path is outside retained user-authorized roots or does not exist.");
   }
-  const alias = normalizeWorkspacePathAlias(value, { name: "deliverable path" });
+  const alias = normalizeWorkspacePathAlias(raw, { name: "deliverable path" });
   const absolutePath = resolveInside(groupPath, alias.path, { name: "deliverable path" });
   const relativePath = path.relative(groupPath, absolutePath).replaceAll("\\", "/") || ".";
   assertSafeDeliverablePath(relativePath);

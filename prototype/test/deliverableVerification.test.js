@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import {
   applyDeliverableVerification,
   enforceRequestedArtifactRequirements,
+  expandUserHomePath,
   normalizeDeliverableClaims,
   verifyFinalDeliverables
 } from "../src/deliverableVerification.js";
@@ -665,6 +666,37 @@ test("final deliverable claims accept absolute paths inside retained user-author
   assert.equal(report.status, "verified");
   assert.equal(report.claims[0].status, "verified_created");
   assert.equal(report.claims[0].normalized_path, "project:report.pdf");
+});
+
+test("final deliverable claims expand a user-home alias before checking an authorized external output root", () => {
+  const groupPath = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-final-home-group-"));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-final-home-"));
+  const desktop = path.join(home, "Desktop");
+  fs.mkdirSync(desktop);
+  const pdfPath = path.join(desktop, "report.pdf");
+  fs.writeFileSync(pdfPath, makeMinimalPdf());
+  assert.equal(expandUserHomePath("%USERPROFILE%\\Desktop\\report.pdf", { USERPROFILE: home }), pdfPath);
+  const priorHome = process.env.USERPROFILE;
+  process.env.USERPROFILE = home;
+  try {
+    const report = verifyFinalDeliverables({
+      groupPath,
+      session: {
+        authorizedProjectRoots: [desktop],
+        finalDecision: { answer: "Created report.pdf.", deliverables: [{ path: "%USERPROFILE%\\Desktop\\report.pdf", claim: "created", evidence_ids: ["home-build"] }] },
+        toolExecutionResults: [{
+          id: "home-build", tool: "execute_command", command: "python generate_report.py", status: "completed", createdAt: new Date().toISOString(),
+          result: { ok: true, exitCode: 0, durationMs: 100, stdout: pdfPath, workspaceChanges: { status: "completed", created: [], modified: [], observedArtifacts: [] } }
+        }],
+        fileOperationExecutionResults: []
+      }
+    });
+    assert.equal(report.status, "verified");
+    assert.equal(report.claims[0].normalized_path, "project:report.pdf");
+  } finally {
+    if (priorHome == null) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = priorHome;
+  }
 });
 
 test("final deliverable claims reject absolute paths outside retained user-authorized roots", () => {
