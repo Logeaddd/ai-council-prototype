@@ -1,57 +1,50 @@
 # AI Council
 
-AI Council 是一个本地 AI 议会工具。
+AI Council is a local desktop workspace for coordinating configurable AI members on real project work. It keeps task runs, tool evidence, file changes, checkpoints, and retrievable group history on the local machine.
 
-你可以建一个小组，把不同模型放进去，让它们围绕同一个问题讨论、互相补充、互相审查。也可以只放一个模型，当普通助手用。
+## 0.2.2
 
-当前版本：`v0.2.0`
+This release packages the current reliability work:
 
-## Windows 安装包
+- a durable delivery owner and bounded contributor handoffs;
+- resumable TaskRun checkpoints and honest incomplete/failed states;
+- persistent group history with searchable context, source invalidation, and context receipts;
+- controlled file, command, network, MCP, package, and managed-tool workflows;
+- managed interactive PTY sessions on Windows;
+- independent private and group drafts, retained streaming output, follow-at-bottom behavior, and file attachments;
+- format-aware artifact verification instead of treating a model claim as proof.
 
-去 GitHub Releases 下载：
+The app is designed to make tool use and project execution observable. A successful result still depends on the configured model, provider availability, permissions, and the task itself; failed or incomplete work must remain visible as such.
 
-```text
-AI-Council-Setup-0.2.0.exe
-```
+## Windows Installer
 
-安装时可以选择软件安装位置，也可以选择数据保存位置。
+Download the `AI-Council-Setup-0.2.2.exe` asset from the matching GitHub release once it is published. The NSIS installer allows choosing both the application and data directories.
 
-## 基本用法
+For a locally built release candidate, the installer is written to `dist-installer/AI-Council-Setup-0.2.2.exe`.
 
-1. 新建议会组。
-2. 添加成员。
-3. 给成员填模型供应商、API 地址、API Key 和模型名。
-4. 在底部输入问题，点开始。
+## Quick Start
 
-API Key 是模型平台给你的密钥。不要发给别人。
+1. Create a council group.
+2. Add one or more members and configure each provider, API base URL, key, and model.
+3. Send a task in the group composer or import files by dropping them into the chat area.
+4. Watch the persisted task run for tool activity, artifacts, checkpoints, and completion evidence.
 
-如果你用中转站，供应商选“自定义/中转”，把对方给你的 API 地址填进去。很多地址需要带 `/v1`，这里容易填错。
+Provider keys stay local and are redacted from client-visible task evidence. Use a test workspace for important projects until you have verified the providers, permissions, and output requirements you intend to use.
 
-## 主要功能
-
-- 多个 AI 一起讨论一个问题。
-- 每个成员可以单独设置模型、角色和权限。
-- 可以设置审查者，让它专门挑问题。
-- 支持私聊单个成员。
-- 支持模型检测；检测失败时也可以手动填模型名。
-- 支持会议决议、待处理问题、文件操作提案。
-- 文件写入走本地审批和权限，不会把电脑文件权限直接交给模型。
-
-## 现在还没重点做的
-
-- 上下文压缩和长期记忆还比较早期。
-- 成本统计只在有真实用量或用户配置价格时才可靠。
-- 这是早期版本，重要项目请先用测试文件夹试。
-
-## 开发者运行
+## Development
 
 ```bash
 npm install
+npm test
 npm run desktop
 ```
 
-打安装包：
+Build a Windows installer:
 
 ```bash
 npm run desktop:installer
 ```
+
+## Verification
+
+The repository contains fast regression tests and a separate product harness. The product harness replays retained real-provider evidence across coding, API collection, external-workspace, archive, capability-acquisition, collaboration, recovery, and context-retrieval scenarios. It does not treat mocked tests as real-provider acceptance.
