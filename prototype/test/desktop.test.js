@@ -89,13 +89,14 @@ test("desktop shell reads packaged data directory selection", () => {
   assert.match(main, /process\.resourcesPath/);
 });
 
-test("installer build produces a normal NSIS setup with configurable install and data paths", () => {
+test("installer build keeps application source in ASAR with native PTY unpacked", () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
   const installer = fs.readFileSync(path.join(root, "build", "installer.nsh"), "utf8");
   assert.equal(pkg.scripts["desktop:installer"], "npm run renderer:build && electron-builder --win nsis");
   assert.equal(pkg.scripts["desktop:dist"], "npm run renderer:build && npm run desktop:portable && electron-builder --win nsis");
   assert.equal(pkg.build.productName, "AI Council");
-  assert.equal(pkg.build.asar, false);
+  assert.equal(pkg.build.asar, true);
+  assert.deepEqual(pkg.build.asarUnpack, ["node_modules/node-pty/**"]);
   assert.equal(pkg.build.directories.output, "dist-installer");
   assert.deepEqual(pkg.build.win.target, ["nsis"]);
   assert.equal(pkg.build.win.artifactName, "AI-Council-Setup-${version}.${ext}");
@@ -114,4 +115,15 @@ test("installer build produces a normal NSIS setup with configurable install and
   assert.match(installer, /CreateDirectory "\$AI_COUNCIL_DATA_DIR"/);
   assert.match(installer, /FileOpen \$0 "\$INSTDIR\\data-path\.txt" w/);
   assert.doesNotMatch(installer, /Codex|harness|prototype|debug/i);
+});
+
+test("Electron runs the detached supervisor as Node and retains a packaged PTY probe", () => {
+  const main = fs.readFileSync(path.join(root, "desktop", "main.mjs"), "utf8");
+  const processTools = fs.readFileSync(path.join(root, "src", "processTools.js"), "utf8");
+  assert.match(processTools, /ELECTRON_RUN_AS_NODE: "1"/);
+  assert.match(main, /AI_COUNCIL_E2E_PTY_PROBE/);
+  assert.match(main, /runPackagedPtyProbe/);
+  assert.match(main, /startManagedInteractiveProcess/);
+  assert.match(main, /processControlTool/);
+  assert.match(main, /pty_input_echo_was_not_redacted/);
 });

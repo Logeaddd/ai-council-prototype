@@ -2,7 +2,7 @@
 
 AI Council is a local desktop workspace for coordinating configurable AI members on real project work. It keeps task runs, tool evidence, file changes, checkpoints, and retrievable group history on the local machine.
 
-## 0.2.2
+## 0.2.3
 
 This release packages the current reliability work:
 
@@ -11,6 +11,7 @@ This release packages the current reliability work:
 - persistent group history with searchable context, source invalidation, and context receipts;
 - controlled file, command, network, MCP, package, and managed-tool workflows;
 - managed interactive PTY sessions on Windows;
+- ASAR-protected application source with the native PTY runtime unpacked only where Electron requires it;
 - independent private and group drafts, retained streaming output, follow-at-bottom behavior, and file attachments;
 - format-aware artifact verification instead of treating a model claim as proof.
 
@@ -18,9 +19,9 @@ The app is designed to make tool use and project execution observable. A success
 
 ## Windows Installer
 
-Download the `AI-Council-Setup-0.2.2.exe` asset from the matching GitHub release once it is published. The NSIS installer allows choosing both the application and data directories.
+Download the `AI-Council-Setup-0.2.3.exe` asset from the matching GitHub release once it is published. The NSIS installer allows choosing both the application and data directories.
 
-For a locally built release candidate, the installer is written to `dist-installer/AI-Council-Setup-0.2.2.exe`.
+For a locally built release candidate, the installer is written to `dist-installer/AI-Council-Setup-0.2.3.exe`.
 
 ## Quick Start
 

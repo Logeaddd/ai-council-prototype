@@ -11,6 +11,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const composerDropProbePath = String(process.env.AI_COUNCIL_E2E_COMPOSER_DROP_FILE || "").trim();
 const privateDraftProbeEnabled = process.env.AI_COUNCIL_E2E_PRIVATE_DRAFT_PROBE === "1";
 const transcriptFollowProbeEnabled = process.env.AI_COUNCIL_E2E_TRANSCRIPT_FOLLOW_PROBE === "1";
+const packagedPtyProbeEnabled = process.env.AI_COUNCIL_E2E_PTY_PROBE === "1";
 
 let mainWindow;
 
@@ -45,8 +46,21 @@ app.on("activate", () => {
 async function startDesktop() {
   if (mainWindow) return;
   Menu.setApplicationMenu(null);
-  const port = await findOpenPort(DEFAULT_PORT);
   configureDataDirectory();
+  if (packagedPtyProbeEnabled) {
+    try {
+      const result = await runPackagedPtyProbe();
+      console.log(`AI_COUNCIL_E2E_PTY=${JSON.stringify(result)}`);
+      if (!result.ok) process.exitCode = 1;
+    } catch (error) {
+      process.exitCode = 1;
+      console.error("AI_COUNCIL_E2E_PTY_FAILED", error);
+    } finally {
+      setTimeout(() => app.quit(), 50);
+    }
+    return;
+  }
+  const port = await findOpenPort(DEFAULT_PORT);
   process.env.AI_COUNCIL_UI_HOST = HOST;
   process.env.AI_COUNCIL_UI_PORT = String(port);
   await import("../src/server.js");
@@ -135,6 +149,84 @@ async function startDesktop() {
       setTimeout(() => app.quit(), 50);
     }
   }
+}
+
+async function runPackagedPtyProbe() {
+  const { startManagedInteractiveProcess, processControlTool } = await import("../src/processTools.js");
+  const probeRoot = path.resolve(process.env.AI_COUNCIL_DATA_DIR || app.getPath("userData"));
+  fs.mkdirSync(probeRoot, { recursive: true });
+  const groupRoot = fs.mkdtempSync(path.join(probeRoot, "e2e-pty-"));
+  const value = "ai-council-pty-probe";
+  try {
+    const started = await startManagedInteractiveProcess({
+      groupRoot,
+      workspaceRoot: groupRoot,
+      workspaceLabel: "e2e-pty",
+      cwd: groupRoot,
+      command: "echo READY & set /p value=INPUT: & echo ECHO:%value%",
+      shell: "cmd",
+      invocation: {
+        file: process.env.ComSpec || "cmd.exe",
+        args: ["/d", "/s", "/c", "echo READY & set /p value=INPUT: & echo ECHO:%value%"]
+      },
+      env: { ...process.env },
+      columns: 80,
+      rows: 24,
+      maxOutputBytes: 32768
+    });
+    if (!started.ok) throw new Error(`pty_start_failed:${started.code || started.error || "unknown"}`);
+    const ready = await waitForPtyOutput(processControlTool, groupRoot, started.processId, "READY");
+    const resized = await processControlTool({ action: "resize", processId: started.processId, columns: 120, rows: 40 }, { groupPath: groupRoot });
+    const input = await processControlTool({ action: "input", processId: started.processId, inputText: `${value}\r` }, { groupPath: groupRoot });
+    if (!resized.acknowledged || !input.acknowledged) throw new Error("pty_controls_not_acknowledged");
+    const completed = await waitForPtyOutput(processControlTool, groupRoot, started.processId, "ECHO:");
+    if (!String(completed.output || "").includes("[terminal-input-redacted]") || String(completed.output || "").includes(value)) {
+      throw new Error("pty_input_echo_was_not_redacted");
+    }
+    const final = await waitForPtyExit(processControlTool, groupRoot, started.processId);
+    if (final.process?.status !== "exited" || final.process?.exitCode !== 0) {
+      throw new Error(`pty_exit_not_clean:${final.process?.status || "unknown"}:${final.process?.exitCode ?? "unknown"}`);
+    }
+    return {
+      ok: true,
+      probe: "packaged_electron_pty",
+      processId: started.processId,
+      supervisorPid: started.supervisorPid,
+      readyBytes: ready.totalBytes,
+      outputBytes: completed.totalBytes,
+      resizedTo: resized.terminal,
+      finalStatus: final.process.status,
+      exitCode: final.process.exitCode
+    };
+  } finally {
+    try { fs.rmSync(groupRoot, { recursive: true, force: true }); } catch {}
+  }
+}
+
+async function waitForPtyOutput(processControlTool, groupRoot, processId, expected) {
+  const deadline = Date.now() + 10000;
+  let latest;
+  while (Date.now() < deadline) {
+    latest = await processControlTool({ action: "output", processId, stream: "terminal", offset: 0, maxBytes: 32768 }, { groupPath: groupRoot });
+    if (String(latest.output || "").includes(expected)) return latest;
+    const status = await processControlTool({ action: "status", processId }, { groupPath: groupRoot });
+    if (["failed", "stopped", "unknown"].includes(status.process?.status)) {
+      throw new Error(`pty_exited_before_output:${status.process.status}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(`pty_output_timeout:${expected}`);
+}
+
+async function waitForPtyExit(processControlTool, groupRoot, processId) {
+  const deadline = Date.now() + 10000;
+  let latest;
+  while (Date.now() < deadline) {
+    latest = await processControlTool({ action: "status", processId }, { groupPath: groupRoot });
+    if (["exited", "failed", "stopped", "unknown"].includes(latest.process?.status)) return latest;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error("pty_exit_timeout");
 }
 
 async function runComposerDropProbe(window, filePath) {

@@ -68,7 +68,11 @@ async function startManagedProcess(options = {}) {
     const supervisor = spawn(process.execPath, [interactive ? PTY_SUPERVISOR_PATH : SUPERVISOR_PATH], {
       detached: true,
       windowsHide: true,
-      stdio: ["pipe", "ignore", "ignore"]
+      stdio: ["pipe", "ignore", "ignore"],
+      // In a packaged desktop build process.execPath is Electron, not node.
+      // This lets the detached supervisor execute its .mjs entrypoint instead
+      // of opening another copy of the application.
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" }
     });
     const finish = (result) => {
       if (settled) return;

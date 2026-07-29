@@ -1,6 +1,6 @@
 {
   "name": "ai-council-prototype",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "type": "module",
   "private": true,
   "main": "./desktop/main.mjs",
@@ -35,7 +35,10 @@
   "build": {
     "appId": "com.ai-council.app",
     "productName": "AI Council",
-    "asar": false,
+    "asar": true,
+    "asarUnpack": [
+      "node_modules/node-pty/**"
+    ],
     "npmRebuild": false,
     "directories": {
       "output": "dist-installer"
