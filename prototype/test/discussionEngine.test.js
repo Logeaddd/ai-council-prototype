@@ -5404,7 +5404,7 @@ test("a same-turn collaboration contract rejects the owner's premature legacy fi
 
     assert.equal(fs.existsSync(path.join(groupPath, "shared", "guarded.txt")), false);
     assert.equal(session.rejectedFileOperationProposals.some((item) => item.code === "collaboration_prerequisite_pending"), true);
-    assert.equal(session.executionState.lastAction, "collaboration_prerequisite_pending");
+    assert.equal(session.executionState.ownership.delegations.some((item) => item.assigneeId === "researcher" && item.status === "pending" && item.native === true), true);
     assert.match(prompts[1], /Do not write the artifact yet/);
   } finally {
     await close(server);

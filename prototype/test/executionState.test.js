@@ -40,7 +40,7 @@ test("an explicit collaborative delivery request cannot be downgraded to a singl
   });
   advanceExecutionState({
     state,
-    session: { toolExecutionResults: [], fileOperationExecutionResults: [] },
+    session: { toolExecutionResults: [], fileOperationExecutionResults: [], groupSnapshot: { agents: pair } },
     agent: pair[0],
     response: {
       status: "speak",
@@ -54,7 +54,41 @@ test("an explicit collaborative delivery request cannot be downgraded to a singl
   const collaboration = collaborationRequirementStatus(state);
   assert.equal(collaboration.required, true);
   assert.equal(collaboration.pending, true);
-  assert.match(executionInstruction(state, pair[0]), /Collaboration required before completion/);
+  assert.equal(state.taskContract.collaboration.beforeFirstMutation, true);
+  assert.equal(state.ownership.delegations.length, 1);
+  assert.equal(state.ownership.delegations[0].assigneeId, "contributor");
+  assert.equal(state.ownership.delegations[0].native, true);
+  assert.deepEqual(selectExecutionAgents(state, pair).map((agent) => agent.id), ["contributor"]);
+  assert.match(executionInstruction(state, pair[1]), /Delegated research work/);
+});
+
+test("system collaboration scheduling prefers an explicitly named enabled member", () => {
+  const pair = [
+    { id: "owner", name: "洪帝", enabled: true },
+    { id: "dog", name: "狗", enabled: true },
+    { id: "other", name: "其他成员", enabled: true }
+  ];
+  const state = createExecutionState({
+    question: "你们合作写论文，狗必须参与讨论，讨论好了再制作 PDF。",
+    agents: pair,
+    workspaceGroup: { permissions: { defaultTier: "text", seatTiers: { owner: "full" } } }
+  });
+  advanceExecutionState({
+    state,
+    session: { toolExecutionResults: [], fileOperationExecutionResults: [], groupSnapshot: { agents: pair } },
+    agent: pair[0],
+    response: {
+      status: "speak",
+      task_contract: {
+        mode: "delivery", objective: "Collaboratively create the requested PDF.", requires_workspace: true, requires_verification: true,
+        deliverables: ["PDF"], completion_criteria: ["PDF exists"], next_action: "Discuss, then create it.",
+        collaboration: { required: true, before_first_mutation: false, minimum_delegations: 1 }
+      }
+    }
+  });
+  assert.equal(state.taskContract.collaboration.beforeFirstMutation, true);
+  assert.equal(state.ownership.delegations[0].assigneeId, "dog");
+  assert.deepEqual(selectExecutionAgents(state, pair).map((agent) => agent.id), ["dog"]);
 });
 
 test("explicit rerun and verification requests remain delivery work after recovery", () => {

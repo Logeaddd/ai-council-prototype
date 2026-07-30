@@ -162,6 +162,7 @@ export function advanceExecutionState({ state, session, agent, groupPath, questi
 
   acknowledgeOwnerDelegations(state, agent);
   registerOwnerDelegations(state, response, session.groupSnapshot?.agents || []);
+  ensureRequiredCollaborationDelegation(state, session.groupSnapshot?.agents || []);
 
   const toolResults = (session.toolExecutionResults || []).slice(state.processedToolResults);
   const fileResults = (session.fileOperationExecutionResults || []).slice(state.processedFileResults);
@@ -681,7 +682,7 @@ function applyTaskIntake(state, response = {}, session = {}) {
 }
 
 function enforceExplicitCollaboration(contract, question) {
-  if (contract?.mode !== "delivery" || contract.collaboration?.required || !userExplicitlyRequestsCollaboration(question)) return contract;
+  if (contract?.mode !== "delivery" || !userExplicitlyRequestsCollaboration(question)) return contract;
   return {
     ...contract,
     collaboration: {
@@ -690,9 +691,52 @@ function enforceExplicitCollaboration(contract, question) {
       beforeFirstMutation: true,
       minimumDelegations: Math.max(1, Number(contract.collaboration?.minimumDelegations || 0)),
       types: contract.collaboration?.types?.length ? contract.collaboration.types : ["research"],
-      reason: "The user explicitly requested collaborative delivery, so one evidence-backed delegated handoff is required before the owner creates the final artifact."
+      reason: contract.collaboration?.reason || "The user explicitly requested collaborative delivery, so one evidence-backed delegated handoff is required before the owner creates the final artifact."
     }
   };
+}
+
+function ensureRequiredCollaborationDelegation(state, agents = []) {
+  const requirement = collaborationRequirementStatus(state);
+  if (!requirement.pending || hasOpenWorkDelegations(state) || hasUnacknowledgedWorkDelegations(state)) return false;
+  const candidates = (agents || []).filter((agent) => agent?.enabled !== false && !agent?.judge && agent.id !== state.executorId);
+  if (!candidates.length) {
+    state.lastAction = "collaboration_member_unavailable";
+    state.lastError = "The task requires collaboration, but no enabled non-owner member is available.";
+    state.nextAction = "Enable or add another ordinary member, then resume this task.";
+    return false;
+  }
+  const question = String(state.taskQuestion || "");
+  const assignee = candidates.find((agent) => agent.name && question.includes(agent.name)) || candidates[0];
+  const type = requirement.types[0] || "research";
+  const ownership = state.ownership = normalizeOwnership(state.ownership, state);
+  const delegation = {
+    id: `delegation:${state.checkpointVersion}:${++state.delegationSequence}:${assignee.id}`,
+    type,
+    checkpointVersion: state.checkpointVersion,
+    createdAt: new Date().toISOString(),
+    assignedBy: ownership.ownerId,
+    assigneeId: assignee.id,
+    assigneeName: assignee.name,
+    task: `Contribute one independently checked, concrete input to this delivery objective: ${state.taskContract?.objective || state.taskQuestion}`.slice(0, 1200),
+    expectedEvidence: ["Use an allowed read or research tool and return the concrete finding for the delivery owner to integrate."],
+    allowedTools: DEFAULT_RESEARCH_TOOLS,
+    allowedPaths: [],
+    allowWorkspaceMutation: false,
+    allowRuntimeMutation: false,
+    native: true,
+    systemCreated: true,
+    status: "pending",
+    result: "",
+    handoffEvidence: [],
+    ownerAcknowledged: false
+  };
+  ownership.delegations.push(delegation);
+  ownership.delegations = ownership.delegations.slice(-40);
+  state.lastAction = `delegated:${delegation.id}`;
+  state.lastError = "";
+  state.nextAction = `Wait for ${assignee.name}'s evidence-backed handoff, then integrate it before continuing delivery.`;
+  return true;
 }
 
 function userExplicitlyRequestsCollaboration(value) {
@@ -1085,6 +1129,25 @@ function registerOwnerDelegations(state, response = {}, agents = []) {
         native,
         ownerAcknowledged: false
       });
+      continue;
+    }
+    const systemPlaceholder = ownership.delegations.find((item) => (
+      item.systemCreated === true
+      && item.type === type
+      && item.assigneeId === assigneeId
+      && ["pending", "in_progress"].includes(item.status)
+    ));
+    if (systemPlaceholder && native) {
+      systemPlaceholder.task = task;
+      systemPlaceholder.expectedEvidence = expectedEvidence;
+      systemPlaceholder.allowedTools = allowedTools;
+      systemPlaceholder.allowedPaths = allowedPaths;
+      systemPlaceholder.allowWorkspaceMutation = allowWorkspaceMutation;
+      systemPlaceholder.allowRuntimeMutation = allowRuntimeMutation;
+      systemPlaceholder.native = true;
+      systemPlaceholder.systemCreated = false;
+      systemPlaceholder.refinedByOwner = true;
+      added.push(systemPlaceholder);
       continue;
     }
     const duplicate = ownership.delegations.some((item) => (
