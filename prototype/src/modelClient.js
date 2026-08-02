@@ -21,8 +21,8 @@ async function callOpenAiCompatible(agent, messages, options) {
     allowUnsafePrivateNetwork: Boolean(options.allowUnsafePrivateNetwork || agent.allowUnsafePrivateNetwork)
   });
   const model = resolveMaybeEnv(agent.model);
-  const maxRetries = normalizeRetryCount(agent.retry?.maxRetries ?? agent.rateLimit?.maxRetries ?? options.maxRetries ?? 1);
-  const backoffMs = normalizeBackoffMs(agent.retry?.backoffMs ?? agent.rateLimit?.backoffMs ?? options.backoffMs ?? 250);
+  const maxRetries = normalizeRetryCount(agent.retry?.maxRetries ?? agent.rateLimit?.maxRetries ?? options.maxRetries ?? 3);
+  const backoffMs = normalizeBackoffMs(agent.retry?.backoffMs ?? agent.rateLimit?.backoffMs ?? options.backoffMs ?? 1000);
 
   return await scheduleProviderCall(agent, messages, () => callWithCredentialCandidates({
     agent,
@@ -41,8 +41,8 @@ async function callAnthropicMessages(agent, messages, options) {
   });
   const model = resolveMaybeEnv(agent.model);
   if (!model) throw new Error(`Missing model for agent: ${agent.id}`);
-  const maxRetries = normalizeRetryCount(agent.retry?.maxRetries ?? agent.rateLimit?.maxRetries ?? options.maxRetries ?? 1);
-  const backoffMs = normalizeBackoffMs(agent.retry?.backoffMs ?? agent.rateLimit?.backoffMs ?? options.backoffMs ?? 250);
+  const maxRetries = normalizeRetryCount(agent.retry?.maxRetries ?? agent.rateLimit?.maxRetries ?? options.maxRetries ?? 3);
+  const backoffMs = normalizeBackoffMs(agent.retry?.backoffMs ?? agent.rateLimit?.backoffMs ?? options.backoffMs ?? 1000);
 
   return await scheduleProviderCall(agent, messages, () => callWithCredentialCandidates({
     agent,
@@ -639,7 +639,20 @@ function resolveMaybeEnv(value) {
 }
 
 function isRetryableError(error) {
-  return error?.code === "stream_idle_timeout" || [429, 500, 502, 503, 504].includes(Number(error.status));
+  if (error?.retryable === true || error?.code === "stream_idle_timeout") return true;
+  if ([408, 425, 429, 500, 502, 503, 504].includes(Number(error?.status))) return true;
+  const codes = [error?.code, error?.cause?.code, error?.cause?.cause?.code]
+    .map((value) => String(value || "").trim().toUpperCase())
+    .filter(Boolean);
+  if (codes.some((code) => /CERT|TLS|SSL|SELF_SIGNED|UNABLE_TO_VERIFY|ERR_INVALID_URL/.test(code))) return false;
+  const transientCodes = new Set([
+    "ECONNRESET", "ECONNREFUSED", "EPIPE", "ETIMEDOUT", "ESOCKETTIMEDOUT",
+    "EAI_AGAIN", "ENETDOWN", "ENETRESET", "ENETUNREACH", "EHOSTDOWN", "EHOSTUNREACH",
+    "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT",
+    "UND_ERR_SOCKET", "UND_ERR_ABORTED"
+  ]);
+  if (codes.some((code) => transientCodes.has(code))) return true;
+  return error instanceof TypeError && /^fetch failed$/i.test(String(error.message || "").trim());
 }
 
 function resolveStreamIdleTimeoutMs(agent = {}, options = {}) {

@@ -131,16 +131,18 @@ test("server exposes guarded group settings and seat config persistence", () => 
   assert.match(serverJs, /normalizeRecentMessageLimit\(settings\.recentMessageLimit\)/);
   assert.match(serverJs, /seat\.role = normalized === "reviewer" \|\| normalized === "summarizer" \? normalized : "ordinary"/);
   assert.match(serverJs, /group\.permissions\.seatTiers\[seatId\] = normalizePermissionTier\(permission\)/);
-  assert.match(serverJs, /Git is required before enabling tool permissions/);
+  assert.match(serverJs, /Git is required before enabling full permissions for this workspace/);
 });
 
-test("server gates tool permission tiers on git", () => {
+test("server gates full permission on the target workspace Git repository", () => {
   const serverJs = fs.readFileSync(path.join(root, "src", "server.js"), "utf8");
   assert.match(serverJs, /\/api\/git\/status/);
   assert.match(serverJs, /\/api\/group\/permissions/);
   assert.match(serverJs, /requiresGit\(body\.defaultTier\)/);
-  assert.match(serverJs, /Git is required before enabling tool permissions/);
+  assert.match(serverJs, /Git is required before enabling full permissions for this workspace/);
   assert.match(serverJs, /git", \["rev-parse", "--is-inside-work-tree"\]/);
+  assert.match(serverJs, /gitStatus\(groupPath\)/);
+  assert.match(serverJs, /return value === "full"/);
 });
 test("server stores app settings under local user-data and guards groups root", () => {
   const serverJs = fs.readFileSync(path.join(root, "src", "server.js"), "utf8");

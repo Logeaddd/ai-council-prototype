@@ -19,14 +19,14 @@ import { listProviderPresets } from "./providerRegistry.js";
 import { discoverProviderModels, checkProviderHealth } from "./modelDiscovery.js";
 import { readUsageSnapshot } from "./usageStats.js";
 import { formatFileAttachmentsForPrompt, normalizeFileAttachments } from "./attachments.js";
-import { addMember, initGroupWorkspace, reorderSeats, replaceMember } from "./workspaceManager.js";
+import { addMember, deleteMember, initGroupWorkspace, reorderSeats, replaceMember } from "./workspaceManager.js";
 import { addReview, createRecorderDraft, finalizeDraft, listApproved, listDrafts } from "./writeFlow.js";
 import { listGroupSessions, readGroupSession, readSessionContextArchive, searchSessionContextArchive } from "./storage.js";
 import { importProjectFolder } from "./projectImporter.js";
 import { deletePublicMemory, listPublicMemories, upsertPublicMemory } from "./publicMemory.js";
 import { readTaskState } from "./taskState.js";
 import { queryPublicEvents, tombstonePublicEvents } from "./publicEventJournal.js";
-import { listCapabilities } from "./capabilityRegistry.js";
+import { listCapabilitiesAsync } from "./capabilityRegistry.js";
 import { listTaskRuns, readTaskRun, readTaskRunEvents } from "./taskRuntime.js";
 import { capabilityEnabled } from "./capabilityPolicy.js";
 import { createCouncilRunRegistry } from "./councilRunRegistry.js";
@@ -143,7 +143,7 @@ async function handleApi(req, res, url) {
       ? resolveWorkspacePath(url.searchParams.get("groupPath"), "groupPath")
       : undefined;
     sendJson(res, 200, {
-      capabilities: listCapabilities({ env: process.env, appSettings, baseDir, groupPath }),
+      capabilities: await listCapabilitiesAsync({ env: process.env, appSettings, baseDir, groupPath }),
       toolAccess: appSettings.capabilities?.toolAccess || {}
     });
     return;
@@ -221,7 +221,10 @@ async function handleApi(req, res, url) {
   }
 
   if (req.method === "GET" && url.pathname === "/api/git/status") {
-    sendJson(res, 200, await gitStatus());
+    const groupPath = url.searchParams.get("groupPath")
+      ? resolveWorkspacePath(url.searchParams.get("groupPath"), "groupPath")
+      : undefined;
+    sendJson(res, 200, await gitStatus(groupPath));
     return;
   }
 
@@ -598,8 +601,20 @@ async function handleApi(req, res, url) {
   if (req.method === "POST" && url.pathname === "/api/workspace/add-member") {
     const body = await readBody(req);
     body.groupPath = resolveWorkspacePath(body.groupPath, "groupPath");
+    if (requiresGit(body.permission || body.tier)) {
+      const status = await gitStatus(body.groupPath);
+      if (!status.ok) throw new Error("Git is required before enabling full permissions for this workspace.");
+    }
     const result = addMember(body);
     sendJson(res, 200, result);
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/workspace/delete-member") {
+    const body = await readBody(req);
+    body.groupPath = resolveWorkspacePath(body.groupPath, "groupPath");
+    assertNoActiveCouncilRun(body.groupPath);
+    sendJson(res, 200, deleteMember(body));
     return;
   }
 
@@ -757,8 +772,8 @@ async function handleApi(req, res, url) {
     const body = await readBody(req);
     const groupPath = resolveWorkspacePath(body.groupPath, "groupPath");
     if (requiresGit(body.defaultTier) || Object.values(body.seatTiers || {}).some(requiresGit)) {
-      const status = await gitStatus();
-      if (!status.ok) throw new Error("Git is required before enabling tool permissions.");
+      const status = await gitStatus(groupPath);
+      if (!status.ok) throw new Error("Git is required before enabling full permissions for this workspace.");
     }
     const group = updateGroupPermissions(groupPath, {
       defaultTier: body.defaultTier,
@@ -780,8 +795,8 @@ async function handleApi(req, res, url) {
     const groupPath = resolveWorkspacePath(body.groupPath, "groupPath");
     const tier = body.permission || body.tier;
     if (requiresGit(tier)) {
-      const status = await gitStatus();
-      if (!status.ok) throw new Error("Git is required before enabling tool permissions.");
+      const status = await gitStatus(groupPath);
+      if (!status.ok) throw new Error("Git is required before enabling full permissions for this workspace.");
     }
     sendJson(res, 200, updateGroupSeat(groupPath, body));
     return;
@@ -1168,10 +1183,10 @@ function cleanOptionalString(value) {
   return String(value || "").trim();
 }
 
-async function gitStatus() {
+async function gitStatus(workspacePath = baseDir) {
   try {
     const { stdout } = await execFileAsync("git", ["rev-parse", "--is-inside-work-tree"], {
-      cwd: baseDir,
+      cwd: workspacePath || baseDir,
       timeout: 5000,
       windowsHide: true
     });
@@ -1187,7 +1202,9 @@ function normalizePermissionTier(value) {
 }
 
 function requiresGit(value) {
-  return value === "tool" || value === "full";
+  // Read-only/approval-gated tool access works in any workspace. Full access
+  // includes autonomous workspace mutations, which require a Git safety net.
+  return value === "full";
 }
 
 async function pickFolder(options = {}) {
@@ -1297,6 +1314,14 @@ function localApiTokenFromCookie(header) {
 
 function readCurrentAppSettings() {
   return readAppSettings(baseDir, { groupsRoot: defaultGroupsRoot });
+}
+
+function assertNoActiveCouncilRun(groupPath) {
+  if (!activeCouncilRuns.get(groupPath)) return;
+  const error = new Error("Cannot delete a member while a council run is active. Stop the run and retry.");
+  error.code = "workspace_run_active";
+  error.statusCode = 409;
+  throw error;
 }
 
 function requireCapability(familyId) {

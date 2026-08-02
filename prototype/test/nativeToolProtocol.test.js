@@ -6,12 +6,21 @@ test("native tool definitions expose only tools allowed by the permission tier",
   const text = nativeToolDefinitions("text").map((item) => item.name);
   const tool = nativeToolDefinitions("tool").map((item) => item.name);
   const full = nativeToolDefinitions("full").map((item) => item.name);
-  assert.deepEqual(text, ["record_task_contract", "search_context", "load_context"]);
+  assert.deepEqual(text, ["record_task_contract", "search_context", "load_context", "tool_search", "tool_inspect", "tool_invoke"]);
   assert.equal(tool.includes("read_file"), true);
   assert.equal(tool.includes("workspace_edit"), false);
   assert.equal(full.includes("workspace_edit"), true);
   assert.equal(full.includes("execute_command"), true);
   assert.equal(full.includes("ai_council_tool"), false);
+});
+
+test("native deferred-tool definitions expose closed search, inspect, and invoke schemas", () => {
+  const definitions = nativeToolDefinitions("full", { tools: ["tool_search", "tool_inspect", "tool_invoke"] });
+  assert.deepEqual(definitions.map((item) => item.name), ["tool_search", "tool_inspect", "tool_invoke"]);
+  assert.deepEqual(definitions[0].inputSchema.required, ["reason", "query"]);
+  assert.deepEqual(definitions[1].inputSchema.required, ["reason", "toolName"]);
+  assert.deepEqual(definitions[2].inputSchema.required, ["reason", "toolName", "arguments"]);
+  assert.equal(definitions[2].inputSchema.additionalProperties, false);
 });
 
 test("native tool definitions are per-tool closed schemas and can be narrowed at runtime", () => {

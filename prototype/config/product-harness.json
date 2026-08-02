@@ -97,22 +97,25 @@
     },
     {
       "id": "T119",
-      "title": "Real-provider bounded collaboration",
+      "title": "Real-provider collaboration runtime matrix",
       "gates": [
         { "id": "full_test_suite", "type": "test_suite" },
         {
-          "id": "owner_research_handoff_campaign",
+          "id": "collaboration_runtime_campaign",
           "type": "real_user_campaign",
           "reportsRoot": "eval/real-user-campaign",
-          "minimumPassedReports": 1,
-          "minimumDistinctTaskIds": 1,
-          "minimumDistinctSeeds": 1,
+          "minimumPassedReports": 8,
+          "minimumDistinctTaskIds": 4,
+          "minimumDistinctSeeds": 2,
           "evidenceWindowPerTask": 3,
           "minimumPassRate": 1,
           "requireLatestPerTaskPass": true,
-          "requireDelegationEvidence": true,
+          "requireParticipationEvidence": true,
           "requiredFamilies": [
-            { "id": "owner_research_integration", "taskIds": ["delegated-brief"], "minimumAttempts": 1, "minimumPassedReports": 1 }
+            { "id": "collaborative_coauthoring", "taskIds": ["collaborative-brief"], "minimumAttempts": 2, "minimumPassedReports": 2 },
+            { "id": "owner_research_integration", "taskIds": ["delegated-brief"], "minimumAttempts": 2, "minimumPassedReports": 2 },
+            { "id": "parallel_implementation", "taskIds": ["collaborative-multifile"], "minimumAttempts": 2, "minimumPassedReports": 2 },
+            { "id": "review_repair", "taskIds": ["collaborative-review-repair"], "minimumAttempts": 2, "minimumPassedReports": 2 }
           ]
         }
       ]

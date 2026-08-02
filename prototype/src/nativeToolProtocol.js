@@ -1,6 +1,7 @@
 import { normalizeToolRequests } from "./toolRequests.js";
 
-const CONTEXT_TOOLS = ["record_task_contract", "search_context", "load_context"];
+const DEFERRED_TOOL_META_TOOLS = ["tool_search", "tool_inspect", "tool_invoke"];
+const CONTEXT_TOOLS = ["record_task_contract", "search_context", "load_context", ...DEFERRED_TOOL_META_TOOLS];
 const TOOL_TIER_TOOLS = [
   "web_search", "fetch_url", "api_request", "list_directory", "read_file", "search_files", "grep_content",
   ...CONTEXT_TOOLS, "skill_read", "database_query"
@@ -186,6 +187,9 @@ const PROPERTY_DEFINITIONS = {
 };
 
 const TOOL_SPECS = {
+  tool_search: spec("Search the tools available to this seat without loading every tool schema into the prompt.", ["query", "count"], ["query"]),
+  tool_inspect: spec("Load the authoritative description and input schema for one available tool.", ["toolName"], ["toolName"]),
+  tool_invoke: spec("Invoke one available deferred tool. The underlying tool still receives all normal permission, capability, delegation, and audit checks.", ["toolName", "arguments"], ["toolName", "arguments"]),
   web_search: spec("Search the public web and return evidence-bearing results.", ["query", "count", "timeoutMs"], ["query"]),
   fetch_url: spec("Fetch readable content from one public URL.", ["url", "timeoutMs"], ["url"]),
   api_request: spec("Make one real HTTP API request.", ["url", "method", "headers", "json", "body", "timeoutMs"], ["url"]),
@@ -223,7 +227,7 @@ const TOOL_SPECS = {
   skill_enable: spec("Enable an installed skill for this group.", ["skillId"], ["skillId"]),
   skill_disable: spec("Disable a skill for this group.", ["skillId"], ["skillId"]),
   skill_remove: spec("Remove an installed skill.", ["skillId"], ["skillId"]),
-  record_task_contract: spec("Record the semantic task contract before any task action. This persists requested outcomes and completion checks; it does not itself create a deliverable.", ["taskContract"], ["taskContract"]),
+  record_task_contract: spec("Optionally refine the runtime's provisional task contract with clearer requested outcomes and completion checks. This is advisory metadata: failure never blocks other authorized tools and never proves delivery.", ["taskContract"], ["taskContract"]),
   delegate_task: spec("Create one bounded contributor handoff. Only the delivery owner may use it; it never transfers final ownership.", ["delegationType", "assigneeId", "task", "expectedEvidence", "allowedTools", "allowWorkspaceMutation", "allowRuntimeMutation", "allowedPaths"], ["delegationType", "assigneeId", "task", "expectedEvidence"])
 };
 

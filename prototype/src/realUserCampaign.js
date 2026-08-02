@@ -5,7 +5,11 @@ export const CAMPAIGN_API_URL_TOKEN = "{{CAMPAIGN_API_URL}}";
 export function createSeededCampaignScenario(options = {}) {
   const seed = normalizeSeed(options.seed);
   const random = seededRandom(seed);
-  const template = TASK_TEMPLATES[seed % TASK_TEMPLATES.length];
+  const requestedTaskId = String(options.taskId || "").trim();
+  const template = requestedTaskId
+    ? TASK_TEMPLATES.find((candidate) => candidate.taskId === requestedTaskId)
+    : TASK_TEMPLATES[seed % TASK_TEMPLATES.length];
+  if (!template) throw new Error(`Unknown real-user campaign task: ${requestedTaskId}`);
   const task = template(seed, random);
   const followupCount = randomInteger(random, 7, 9);
   const stageCount = randomInteger(random, Math.max(17, followupCount + 10), 30);
@@ -34,7 +38,11 @@ export function createSeededCampaignScenario(options = {}) {
       initialQuestion: task.initialQuestion,
       deliverable: task.deliverable,
       capabilityAcquisitionRequired: task.capabilityAcquisitionRequired === true,
-      delegationRequired: task.delegationRequired === true
+      delegationRequired: task.delegationRequired === true,
+      participationRequired: task.participationRequired === true,
+      stableFinalizerRequired: task.stableFinalizerRequired === true,
+      workMode: task.workMode || "",
+      minimumParticipants: Number(task.minimumParticipants || 0)
     },
     stages: stages.map((stage, index) => ({ id: `stage_${String(index + 1).padStart(2, "0")}`, ...stage })),
     fixtures: task.fixtures || [],
@@ -85,7 +93,7 @@ function buildDisturbances(seed, task) {
     { kind: "member_mutation", mutation: { type: "reorder", seatIds: ["seat_02", "seat_01", "seat_03"] } },
     { kind: "member_mutation", mutation: { type: "disable", seatId: "seat_02" } },
     { kind: "member_mutation", mutation: { type: "restore", seatId: "seat_02", role: "summarizer" } },
-    { kind: "interrupt", interruptAt: "during_model_streaming" },
+    { kind: "interrupt", prompt: task.finalPrompt, interruptAt: "during_model_streaming" },
     { kind: "reopen", prompt: "continue" },
     { kind: "interrupt", prompt: task.recoveryVerificationPrompt, interruptAt: "during_tool_or_build_activity" },
     { kind: "reopen", prompt: "continue" }
@@ -120,6 +128,7 @@ function nodeCliTemplate(seed, random) {
     hiddenVerifier: { kind: "node_cli", file, args: ["--name", "Ada"], expectedOutput: "Thanks, Ada." }
   };
 }
+nodeCliTemplate.taskId = "node-cli";
 
 function pythonCliTemplate(seed, random) {
   const file = `deliverables/tool-${seed}.py`;
@@ -137,6 +146,7 @@ function pythonCliTemplate(seed, random) {
     hiddenVerifier: { kind: "python_cli", file, args: ["Ada"], expectedOutput: "delta: Ada" }
   };
 }
+pythonCliTemplate.taskId = "python-cli";
 
 function jsonDocumentTemplate(seed, random) {
   const file = `deliverables/record-${seed}.json`;
@@ -154,6 +164,7 @@ function jsonDocumentTemplate(seed, random) {
     hiddenVerifier: { kind: "json", file, expected: { status: "released" } }
   };
 }
+jsonDocumentTemplate.taskId = "json-document";
 
 function jsonToCsvTemplate(seed, random) {
   const source = `inputs/records-${seed}.json`;
@@ -183,6 +194,7 @@ function jsonToCsvTemplate(seed, random) {
     hiddenVerifier: { kind: "csv", file, headers: ["name", "score", "result"], rows }
   };
 }
+jsonToCsvTemplate.taskId = "json-to-csv";
 
 function externalNodeCliTemplate(seed, random) {
   const file = `${EXTERNAL_ROOT_TOKEN}/deliverables/external-greeting-${seed}.js`;
@@ -201,6 +213,7 @@ function externalNodeCliTemplate(seed, random) {
     hiddenVerifier: { kind: "node_cli", file, args: ["--name", "Ada"], expectedOutput: "Thanks, Ada." }
   };
 }
+externalNodeCliTemplate.taskId = "external-node-cli";
 
 function zipArchiveTemplate(seed, random) {
   const sourceRoot = `inputs/archive-${seed}`;
@@ -229,6 +242,7 @@ function zipArchiveTemplate(seed, random) {
     hiddenVerifier: { kind: "zip", file, entries }
   };
 }
+zipArchiveTemplate.taskId = "zip-archive";
 
 function apiCollectionTemplate(seed, random) {
   const file = `deliverables/catalog-${seed}.json`;
@@ -264,6 +278,7 @@ function apiCollectionTemplate(seed, random) {
     }
   };
 }
+apiCollectionTemplate.taskId = "api-collection";
 
 function imageToolAcquisitionTemplate(seed, random) {
   const file = `deliverables/generated-image-${seed}.png`;
@@ -309,6 +324,7 @@ function imageToolAcquisitionTemplate(seed, random) {
     }
   };
 }
+imageToolAcquisitionTemplate.taskId = "image-tool-acquisition";
 
 function delegatedBriefTemplate(seed, random) {
   const source = `inputs/release-research-${seed}.txt`;
@@ -320,6 +336,10 @@ function delegatedBriefTemplate(seed, random) {
     domain: "bounded_research_delegation_and_owner_delivery",
     deliverable: file,
     delegationRequired: true,
+    participationRequired: true,
+    stableFinalizerRequired: true,
+    workMode: "collab",
+    minimumParticipants: 1,
     initialQuestion: `Create the verified release brief at ${file}. Work as a delivery team: the delivery owner must first use the native delegate_task control to create a narrow, read-only research task for Critic (assignee_id "critic") to inspect ${source} and return a bounded handoff naming the source and extracted release facts. Do not write the final brief until that handoff is available. The owner must then integrate the handoff into valid JSON with release, window and status fields, and validate the artifact. The contributor must not write the deliverable or finalize the task.`,
     edits: [
       { prompt: "Update the existing release brief to add a top-level string field named source with exactly value research_note. Do not replace it with a research_note object. Preserve the research-derived release and window, keep valid JSON, and have the owner validate it." },
@@ -336,10 +356,115 @@ function delegatedBriefTemplate(seed, random) {
       kind: "json",
       file,
       expected: { release, window, source: "research_note", audience: "internal", status: "approved" },
-      requiresDelegation: true
+      requiresDelegation: true,
+      requiresParticipation: true,
+      requiresStableFinalizer: true,
+      workMode: "collab",
+      minimumParticipants: 1,
+      delegationTypes: ["research"]
     }
   };
 }
+delegatedBriefTemplate.taskId = "delegated-brief";
+
+function collaborativeBriefTemplate(seed, random) {
+  const file = `deliverables/collaborative-brief-${seed}.json`;
+  const topic = `collaboration-${randomInteger(random, 1000, 9999)}`;
+  return {
+    id: "collaborative-brief",
+    domain: "shared_deliberation_coauthoring_and_owner_delivery",
+    deliverable: file,
+    participationRequired: true,
+    stableFinalizerRequired: true,
+    workMode: "collab",
+    minimumParticipants: 1,
+    initialQuestion: `Work together in collaboration mode to create ${file}. Before the delivery owner writes it, every enabled ordinary collaborator must contribute one useful drafting, design, or critique input. The owner must visibly integrate those contributions into valid JSON with topic set to ${JSON.stringify(topic)}, a non-empty contributions array, and status draft, then validate the artifact.`,
+    edits: [
+      { prompt: "Update the same collaborative brief so status is review. Preserve the integrated contributions and validate it." },
+      { prompt: "Add ownerIntegrated set to true. Keep every current contribution and validate the JSON." },
+      { prompt: "Use the latest requirements only: keep the topic and contributions, ownerIntegrated true, and set status approved. Validate it." },
+      { prompt: "Make the final collaborative-brief update in the same artifact and validate the complete JSON." }
+    ],
+    reversalPrompt: "Use only the current collaborative brief requirements; do not discard already integrated member contributions.",
+    recallPrompt: `Inspect the retained collaboration and current ${file}, then continue from the newest requirement.`,
+    finalPrompt: "Apply the final current requirement and validate the same collaborative artifact.",
+    recoveryVerificationPrompt: `After recovery, validate ${file} and retain its integrated member contributions.`,
+    hiddenVerifier: {
+      kind: "json",
+      file,
+      expected: { topic, status: "approved", ownerIntegrated: true },
+      requiresParticipation: true,
+      requiresStableFinalizer: true,
+      workMode: "collab",
+      minimumParticipants: 1
+    }
+  };
+}
+collaborativeBriefTemplate.taskId = "collaborative-brief";
+
+function collaborativeMultifileTemplate(seed, random) {
+  const helper = `deliverables/collab-cli-${seed}-format.js`;
+  const file = `deliverables/collab-cli-${seed}.js`;
+  return {
+    id: "collaborative-multifile",
+    domain: "parallel_scoped_implementation_and_owner_integration",
+    deliverable: file,
+    delegationRequired: true,
+    participationRequired: true,
+    stableFinalizerRequired: true,
+    workMode: "collab",
+    minimumParticipants: 1,
+    initialQuestion: `Create the tested multi-file CLI at ${file}. The owner must use native delegate_task to give Critic (assignee_id "critic") a bounded implementation scope limited to ${helper}; the contributor must write only that helper and return current file evidence. The owner must integrate it from ${file}, which accepts --name <value> and prints "team: <value>", then run and validate the CLI.`,
+    edits: [
+      { prompt: "Update the owner entry file so the visible prefix is crew while preserving the delegated helper module and verify the CLI." },
+      { prompt: "Keep the same two-file project and add a --upper option in the owner entry file. Verify the default interface still works." },
+      { prompt: "Use only the newest requirement: the default output prefix must be final while the delegated helper remains imported. Verify the CLI." },
+      { prompt: "Apply the final current CLI requirement without repeating the completed implementation delegation, then verify it." }
+    ],
+    reversalPrompt: "Keep the current two-file implementation and latest output requirement; do not recreate or re-delegate completed work.",
+    recallPrompt: `Inspect ${file}, ${helper}, and the retained implementation handoff, then continue the same project.`,
+    finalPrompt: "Apply the final current CLI edit and run the same entry file to verify it.",
+    recoveryVerificationPrompt: `After recovery, run ${file} and verify the existing delegated helper integration without repeating completed work.`,
+    hiddenVerifier: {
+      kind: "node_cli", file, args: ["--name", "Ada"], expectedOutput: "final: Ada",
+      requiresDelegation: true, requiresParticipation: true, requiresStableFinalizer: true, workMode: "collab", minimumParticipants: 1, delegationTypes: ["implementation"]
+    }
+  };
+}
+collaborativeMultifileTemplate.taskId = "collaborative-multifile";
+
+function collaborativeReviewRepairTemplate(seed, random) {
+  const source = `inputs/review-source-${seed}.json`;
+  const file = `deliverables/reviewed-record-${seed}.json`;
+  const value = `reviewed-${randomInteger(random, 1000, 9999)}`;
+  return {
+    id: "collaborative-review-repair",
+    domain: "evidence_backed_review_owner_repair_and_delivery",
+    deliverable: file,
+    delegationRequired: true,
+    participationRequired: true,
+    stableFinalizerRequired: true,
+    workMode: "collab",
+    minimumParticipants: 1,
+    initialQuestion: `Create ${file} from ${source}. Before final delivery, the owner must use native delegate_task to assign Critic (assignee_id "critic") a bounded read-only review of ${source}. The reviewer must return current read evidence and identify the required value; the owner must integrate the review into valid JSON with value and status draft, then validate it.`,
+    edits: [
+      { prompt: "Update the reviewed record so status is review while preserving the reviewer-derived value. Validate it." },
+      { prompt: "Add reviewIntegrated set to true and validate the current JSON." },
+      { prompt: "Use only the latest requirements: keep the reviewed value, reviewIntegrated true, and set status approved. Validate it." },
+      { prompt: "Apply the final reviewed-record requirement without repeating the completed review, then validate it." }
+    ],
+    reversalPrompt: "Use the newest reviewed-record requirements only and keep the evidence-derived value.",
+    recallPrompt: `Inspect ${source}, ${file}, and the retained review handoff, then continue the current artifact.`,
+    finalPrompt: "Apply the final current reviewed-record requirement and validate it.",
+    recoveryVerificationPrompt: `After recovery, validate ${file} without repeating the completed review delegation.`,
+    fixtures: [{ path: source, content: JSON.stringify({ value }, null, 2) + "\n" }],
+    hiddenVerifier: {
+      kind: "json", file, expected: { value, status: "approved", reviewIntegrated: true },
+      requiresDelegation: true, requiresParticipation: true, requiresStableFinalizer: true, workMode: "collab", minimumParticipants: 1, delegationTypes: ["review"]
+    }
+  };
+}
+collaborativeReviewRepairTemplate.taskId = "collaborative-review-repair";
 
 function contextHistoryRetrievalTemplate(seed, random) {
   const file = `deliverables/history-lookup-${seed}.json`;
@@ -388,6 +513,7 @@ function contextHistoryRetrievalTemplate(seed, random) {
     }
   };
 }
+contextHistoryRetrievalTemplate.taskId = "context-history-retrieval";
 
 function pdfDocumentTemplate(seed, random) {
   const file = `deliverables/illustrated-report-${seed}.pdf`;
@@ -422,6 +548,7 @@ function pdfDocumentTemplate(seed, random) {
     }
   };
 }
+pdfDocumentTemplate.taskId = "pdf-report";
 
 function skillGuidedDocumentTemplate(seed, random) {
   const file = `deliverables/skill-brief-${seed}.json`;
@@ -456,6 +583,7 @@ function skillGuidedDocumentTemplate(seed, random) {
     }
   };
 }
+skillGuidedDocumentTemplate.taskId = "skill-guided-document";
 
 function mcpMemoryRecordTemplate(seed, random) {
   const file = `deliverables/mcp-record-${seed}.json`;
@@ -489,8 +617,9 @@ function mcpMemoryRecordTemplate(seed, random) {
     }
   };
 }
+mcpMemoryRecordTemplate.taskId = "mcp-memory-record";
 
-const TASK_TEMPLATES = [nodeCliTemplate, pythonCliTemplate, jsonDocumentTemplate, externalNodeCliTemplate, jsonToCsvTemplate, zipArchiveTemplate, apiCollectionTemplate, imageToolAcquisitionTemplate, delegatedBriefTemplate, contextHistoryRetrievalTemplate, pdfDocumentTemplate, skillGuidedDocumentTemplate, mcpMemoryRecordTemplate];
+const TASK_TEMPLATES = [nodeCliTemplate, pythonCliTemplate, jsonDocumentTemplate, externalNodeCliTemplate, jsonToCsvTemplate, zipArchiveTemplate, apiCollectionTemplate, imageToolAcquisitionTemplate, delegatedBriefTemplate, contextHistoryRetrievalTemplate, pdfDocumentTemplate, skillGuidedDocumentTemplate, mcpMemoryRecordTemplate, collaborativeBriefTemplate, collaborativeMultifileTemplate, collaborativeReviewRepairTemplate];
 
 function expectedImagePixels(spec) {
   const background = hexRgba(spec.background);

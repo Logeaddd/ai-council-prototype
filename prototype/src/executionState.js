@@ -1,41 +1,60 @@
 import { isReviewerLike } from "./objectionLedger.js";
 import { hasMaterialWorkspaceChange } from "./observationCache.js";
-import { verifyRequestedArtifactProgress } from "./deliverableVerification.js";
+import { requestedArtifactRequirementsFromQuestion, verifyRequestedArtifactProgress } from "./deliverableVerification.js";
 import { hasNativeModelSource } from "./nativeToolProvenance.js";
 import path from "node:path";
 
-export function createExecutionState({ question, agents = [], workspaceGroup, previousState } = {}) {
-  if (previousState?.active && previousState.phase !== "complete") {
+export function createExecutionState({ question, agents = [], workspaceGroup, previousState, workMode, resumeCompleted = false, prebuildContract = false } = {}) {
+  const resumingCompletedCheckpoint = previousState?.active && previousState.phase === "complete" && resumeCompleted === true;
+  if (previousState?.active && (previousState.phase !== "complete" || resumingCompletedCheckpoint)) {
     const executor = agents.find((agent) => agent.id === previousState.executorId && agent.enabled !== false)
       || chooseExecutor(agents, workspaceGroup);
     if (executor) {
       const ownership = resumeOwnership(previousState.ownership, previousState, executor);
-      return {
+      const resumedState = {
         ...previousState,
         active: true,
         executorId: executor.id,
         executorName: executor.name,
+        finalizerId: designatedFinalizerId(previousState, agents),
+        workMode: normalizeExecutionWorkMode(workMode ?? previousState.workMode),
         ownership,
+        participation: normalizeParticipation(previousState.participation),
         taskContract: normalizeTaskContract(previousState.taskContract)
           || (previousState.phase && previousState.phase !== "intake" ? inferredLegacyDeliveryContract(previousState) : undefined),
         taskQuestion: String(previousState.taskQuestion || question || ""),
+        phase: resumingCompletedCheckpoint ? "inspect" : previousState.phase,
+        nextAction: resumingCompletedCheckpoint
+          ? "Resume the retained delivery from its completed checkpoint. Inspect only the current requested output, implement any newly requested change, and validate it without changing the durable owner or finalizer."
+          : String(previousState.nextAction || ""),
+        artifactStatus: resumingCompletedCheckpoint ? "not_checked" : String(previousState.artifactStatus || "not_checked"),
+        lastAction: resumingCompletedCheckpoint ? "resumed_completed_checkpoint" : String(previousState.lastAction || ""),
+        lastError: resumingCompletedCheckpoint ? "" : String(previousState.lastError || ""),
+        checkpointEvidence: resumingCompletedCheckpoint ? [] : Array.isArray(previousState.checkpointEvidence) ? previousState.checkpointEvidence : [],
         processedToolResults: 0,
         processedFileResults: 0,
         noActionCalls: 0,
+        repair: normalizeRepairState(previousState.repair),
         recovery: normalizeRecoveryState(previousState.recovery),
         delegationSequence: Math.max(0, Number(previousState.delegationSequence || 0)),
         resumed: true
       };
+      return prebuildContract && resumedState.phase === "intake"
+        ? initializeDefaultTaskContract(resumedState, agents)
+        : resumedState;
     }
   }
   if (!String(question || "").trim()) return { active: false };
   const executor = chooseExecutor(agents, workspaceGroup);
   if (!executor) return { active: false };
-  return {
+  const state = {
     active: true,
     executorId: executor.id,
     executorName: executor.name,
+    finalizerId: initialFinalizerId(agents),
+    workMode: normalizeExecutionWorkMode(workMode),
     ownership: initialOwnership(executor),
+    participation: createParticipationState(),
     taskQuestion: String(question || ""),
     phase: "intake",
     taskContract: undefined,
@@ -46,6 +65,7 @@ export function createExecutionState({ question, agents = [], workspaceGroup, pr
     processedToolResults: 0,
     processedFileResults: 0,
     noActionCalls: 0,
+    repair: createRepairState(),
     recovery: createRecoveryState(),
     delegationSequence: 0,
     artifactStatus: "not_checked",
@@ -53,6 +73,45 @@ export function createExecutionState({ question, agents = [], workspaceGroup, pr
     lastError: "",
     checkpointEvidence: []
   };
+  return prebuildContract ? initializeDefaultTaskContract(state, agents) : state;
+}
+
+function initializeDefaultTaskContract(state, agents = []) {
+  const question = String(state.taskQuestion || "").trim();
+  const delivery = isDeliveryTask(question);
+  const artifactRequirements = requestedArtifactRequirementsFromQuestion(question);
+  const explicitWorkspaceOutput = artifactRequirements.length > 0;
+  const defaultContract = reconcileTaskContractWithQuestion(normalizeTaskContract({
+    mode: delivery ? "delivery" : "discussion",
+    objective: question || "Handle the user's current request.",
+    requires_workspace: explicitWorkspaceOutput,
+    requires_verification: explicitWorkspaceOutput,
+    deliverables: delivery ? ["Complete the user-requested outcome."] : [],
+    completion_criteria: delivery
+      ? ["The requested outcome is supported by real execution or verification evidence."]
+      : ["The user receives a substantive answer to the current request."],
+    next_action: delivery
+      ? "Inspect the relevant current state and take the first authorized material action."
+      : "Answer the request substantively and let the enabled members contribute according to the selected work mode.",
+    source: "deterministic_request_default"
+  }), question);
+  state.taskContract = enforceExplicitCollaboration(defaultContract, question);
+  state.intakeAttempts = 0;
+  state.lastError = "";
+  if (!delivery) {
+    state.active = false;
+    state.phase = "discussion";
+    state.lastAction = "task_contract_default:discussion";
+    state.nextAction = defaultContract.nextAction;
+    return state;
+  }
+  const participation = initializeParticipation(state, agents);
+  state.phase = participation.pending ? "deliberation" : "inspect";
+  state.lastAction = "task_contract_default:delivery";
+  state.nextAction = participation.pending
+    ? "Collect the scheduled collaborators' distinct contributions before the delivery owner implements the work."
+    : defaultContract.nextAction;
+  return state;
 }
 
 export function selectExecutionAgents(state, agents = []) {
@@ -60,9 +119,12 @@ export function selectExecutionAgents(state, agents = []) {
   if (state.phase === "complete") return [];
   const executor = agents.find((agent) => agent.id === state.executorId && agent.enabled !== false);
   if (!executor) return null;
+  const finalizerId = designatedFinalizerId(state, agents);
   const reviewers = agents.filter((agent) => (
-    agent.id !== executor.id && agent.enabled !== false && !agent.judge && isReviewerLike(agent)
+    agent.id !== executor.id && agent.id !== finalizerId && agent.enabled !== false && isReviewerLike(agent)
   ));
+  const pendingParticipants = pendingParticipationAgents(state, agents);
+  if (pendingParticipants.length) return pendingParticipants;
   const pendingDelegates = pendingWorkDelegates(state, agents);
   if (pendingDelegates.length) return pendingDelegates;
   if (hasUnacknowledgedWorkDelegations(state)) return [executor];
@@ -91,7 +153,9 @@ export function executionInstruction(state, agent) {
     return [
       `[Execution owner] You are the primary executor for this delivery task. Current phase: ${state.phase}.`,
       formatTaskContract(state.taskContract),
+      formatParticipationForOwner(state.participation),
       formatDelegationHandoffsForOwner(state),
+      formatRepairState(state.repair),
       formatRecoveryState(state.recovery),
       `Required next action: ${state.nextAction}`,
       formatCheckpointEvidence(state.checkpointEvidence),
@@ -102,6 +166,22 @@ export function executionInstruction(state, agent) {
     ].filter(Boolean).join("\n");
   }
   const workDelegation = workDelegationFor(state, agent);
+  const participation = participationForAgent(state, agent);
+  if (participation?.status === "scheduled") {
+    const independent = state.participation?.policy === "independent";
+    return [
+      independent
+        ? `[Independent first pass] You are independently contributing to delivery owner ${state.ownership?.ownerName || state.executorName}. Other ordinary members' current-task answers are intentionally hidden from you.`
+        : `[Collaborative deliberation] You are contributing to delivery owner ${state.ownership?.ownerName || state.executorName} before implementation continues.`,
+      formatTaskContract(state.taskContract),
+      `Your participation scope: ${participation.scope}`,
+      independent
+        ? "Give one substantive first-pass answer that the owner can compare and integrate. Do not assume or imitate another ordinary member's answer."
+        : "Give one substantive, non-duplicative contribution that the owner can integrate. You may discuss, design, draft, critique, or identify a concrete risk according to the task and your role.",
+      "A tool call is optional. Use tools only when your factual contribution actually requires evidence; a clear attributable text contribution is valid here.",
+      "Do not independently finalize the whole delivery and do not mutate workspace files unless the owner later gives you a typed implementation delegation."
+    ].filter(Boolean).join("\n");
+  }
   if (workDelegation) {
     return [
       `[Delegated ${workDelegation.type} work] You are contributor ${agent.name} for delivery owner ${state.ownership?.ownerName || state.executorName}. Delegation: ${workDelegation.id}.`,
@@ -113,7 +193,7 @@ export function executionInstruction(state, agent) {
         : workDelegation.allowRuntimeMutation
           ? "You have no workspace-mutation delegation. You may acquire only the explicitly allowed managed runtime, package, Skill, or MCP capability; do not run arbitrary commands or modify project outputs."
           : "You have no workspace-mutation delegation. Do not write, move, delete, build, package, or otherwise mutate project outputs.",
-      "Do not restart the whole task, do not independently finalize it, and do not delegate further. Return delegation_handoff with this exact delegation_id, a concise result, and concrete evidence for the owner."
+      "Do not restart the whole task, do not independently finalize it, and do not delegate further. Return delegation_handoff with this exact delegation_id, a concise summary (or result), and concrete evidence for the owner."
     ].filter(Boolean).join("\n");
   }
   if (isReviewerLike(agent)) {
@@ -127,8 +207,50 @@ export function executionInstruction(state, agent) {
 }
 
 export function advanceExecutionState({ state, session, agent, groupPath, question, response } = {}) {
-  if (!state?.active) return state;
+  if (!state) return state;
+  if (!state.active) {
+    const supplied = agent?.id === state.executorId && response?.task_contract
+      ? reconcileTaskContractWithQuestion(normalizeTaskContract(response.task_contract), question || state.taskQuestion)
+      : null;
+    if (state.phase !== "discussion" || supplied?.mode !== "delivery") return state;
+    state.active = true;
+    state.taskContract = enforceExplicitCollaboration(supplied, question || state.taskQuestion);
+    const participation = initializeParticipation(state, session?.groupSnapshot?.agents || []);
+    state.phase = participation.pending ? "deliberation" : "inspect";
+    state.lastAction = "task_contract_upgraded:delivery";
+    state.lastError = "";
+    state.nextAction = participation.pending
+      ? "Collect the scheduled collaborators' distinct contributions before the delivery owner implements the work."
+      : state.taskContract.nextAction;
+  }
+  if (agent?.id === state.executorId && state.phase !== "intake" && response?.task_contract) {
+    const supplemented = reconcileTaskContractWithQuestion(
+      normalizeTaskContract(response.task_contract),
+      question || state.taskQuestion
+    );
+    const wouldDowngradeDurableDelivery = state.taskContract?.mode === "delivery"
+      && supplemented?.mode === "discussion"
+      && state.taskContract?.source !== "deterministic_request_default";
+    if (supplemented && !wouldDowngradeDurableDelivery) {
+      state.taskContract = enforceExplicitCollaboration(supplemented, question || state.taskQuestion);
+      state.lastAction = "task_contract_supplemented";
+      state.lastError = "";
+      if (supplemented.mode === "discussion"
+        && !(session?.toolExecutionResults || []).length
+        && !(session?.fileOperationExecutionResults || []).length) {
+        state.active = false;
+        state.phase = "discussion";
+        state.nextAction = "The owner refined the provisional contract to discussion; release the enabled members to answer.";
+        return state;
+      }
+    }
+  }
   if (agent.id !== state.executorId) {
+    const participation = participationForAgent(state, agent);
+    if (participation?.status === "scheduled") {
+      completeParticipation(state, participation, agent, response, session);
+      return state;
+    }
     const workDelegation = workDelegationFor(state, agent);
     if (workDelegation) {
       completeWorkDelegation(state, workDelegation, agent, response, session);
@@ -137,19 +259,38 @@ export function advanceExecutionState({ state, session, agent, groupPath, questi
     if (isReviewerLike(agent)) {
       const delegation = reviewDelegationFor(state, agent, true);
       if (delegation) {
-        delegation.status = "completed";
-        delegation.result = response?.status || "reviewed";
+        const reviewStatus = String(response?.status || "speak").toLowerCase();
+        const terminalStatus = reviewStatus === "skip"
+          ? "skipped"
+          : ["unavailable", "error", "failed"].includes(reviewStatus)
+            ? "failed"
+            : ["timeout", "timed_out", "timed-out"].includes(reviewStatus)
+              ? "timed_out"
+              : "completed";
+        delegation.status = terminalStatus;
+        delegation.result = String(response?.reason || response?.status || "reviewed").slice(0, 600);
+        if (terminalStatus !== "completed") {
+          state.lastError = `Checkpoint reviewer ${agent.name} ended ${terminalStatus}: ${delegation.result}`;
+        }
       }
       state.lastAction = `checkpoint_reviewed_by:${agent.id}`;
       const blockingItems = (response?.objection_items || []).filter((item) => item?.blocks_final !== false && item?.in_scope !== false);
       if (blockingItems.length) {
         state.phase = "repair";
+        state.repair = requireMaterialRepair(state.repair, {
+          checkpointVersion: state.checkpointVersion,
+          reason: blockingItems.map((item) => item.issue || item.id).filter(Boolean).join("; ")
+        });
         state.lastError = blockingItems.map((item) => item.issue || item.id).filter(Boolean).join("; ").slice(0, 1200);
-        state.nextAction = "A reviewer found a blocking issue. Inspect its evidence, patch the responsible files, and rerun verification.";
+        state.nextAction = "A reviewer found a blocking issue. Make a real workspace change that addresses its evidence before rerunning verification; an unchanged read or validation cannot create another review checkpoint.";
       } else if (state.phase === "review" && state.artifactStatus !== "missing_or_invalid" && reviewCheckpointComplete(state)) {
         state.reviewedCheckpointVersion = state.checkpointVersion;
         state.phase = "complete";
-        state.nextAction = "All execution and review gates are complete; proceed to final synthesis.";
+        const reviewFailures = reviewDelegationsForCheckpoint(state)
+          .filter((item) => item.status !== "completed");
+        state.nextAction = reviewFailures.length
+          ? "Review reached a terminal non-passing outcome; preserve the warning and proceed to final synthesis without claiming unanimous review."
+          : "All execution and review gates are complete; proceed to final synthesis.";
       }
     }
     return state;
@@ -159,6 +300,7 @@ export function advanceExecutionState({ state, session, agent, groupPath, questi
     const intake = applyTaskIntake(state, response, session);
     if (!intake.delivery) return state;
   }
+  acknowledgeOwnerIntegration(state, agent, response);
 
   acknowledgeOwnerDelegations(state, agent);
   registerOwnerDelegations(state, response, session.groupSnapshot?.agents || []);
@@ -171,6 +313,15 @@ export function advanceExecutionState({ state, session, agent, groupPath, questi
   state.checkpointEvidence = mergeCheckpointEvidence(state.checkpointEvidence, [...fileResults, ...toolResults]);
   const recoveryUpdate = updateDeliveryRecoveryState(state, toolResults);
   const material = [...toolResults, ...fileResults].some(hasMaterialWorkspaceChange);
+  if (material && state.taskContract?.source === "deterministic_request_default" && state.taskContract.requiresWorkspace !== true) {
+    state.taskContract = {
+      ...state.taskContract,
+      requiresWorkspace: true,
+      requiresVerification: true,
+      source: "deterministic_request_default+observed_workspace_action"
+    };
+  }
+  if (material) resolveMaterialRepair(state);
   const collaborationBeforeAction = collaborationRequirementStatus(state);
   if (collaborationBeforeAction.pending && collaborationBeforeAction.beforeFirstMutation && material) {
     state.phase = "repair";
@@ -205,19 +356,26 @@ export function advanceExecutionState({ state, session, agent, groupPath, questi
     : undefined;
 
   if (recoveryUpdate.requiresAlternative && !material && !successfulVerification) {
-    state.phase = "repair";
+    const collectingParticipation = state.participation?.status === "collecting";
+    state.phase = collectingParticipation ? "deliberation" : "repair";
     state.checkpointVersion += 1;
     state.lastAction = `recovery_required:${recoveryUpdate.failure.resultId}`;
     state.lastError = recoveryUpdate.failure.error;
-    state.nextAction = recoveryAlternativeAction(recoveryUpdate.failure);
+    state.nextAction = collectingParticipation
+      ? `Collect the scheduled collaborator contributions first. Then ${recoveryAlternativeAction(recoveryUpdate.failure)}`
+      : recoveryAlternativeAction(recoveryUpdate.failure);
     state.noActionCalls = 0;
     return state;
   }
 
   if (recoveryUpdate.pendingCapability && !material && !successfulVerification) {
+    const collectingParticipation = state.participation?.status === "collecting";
+    if (collectingParticipation) state.phase = "deliberation";
     state.lastAction = `capability_acquired:${recoveryUpdate.pendingCapability.acquisitionId}`;
     state.lastError = "";
-    state.nextAction = recoveryUsageAction(recoveryUpdate.pendingCapability);
+    state.nextAction = collectingParticipation
+      ? `Collect the scheduled collaborator contributions first. Then ${recoveryUsageAction(recoveryUpdate.pendingCapability)}`
+      : recoveryUsageAction(recoveryUpdate.pendingCapability);
     state.noActionCalls = 0;
     return state;
   }
@@ -233,6 +391,19 @@ export function advanceExecutionState({ state, session, agent, groupPath, questi
   }
 
   if (successfulVerification) {
+    if (requiresMaterialRepair(state)) {
+      const repair = state.repair = normalizeRepairState(state.repair);
+      repair.unproductiveVerificationAttempts += 1;
+      state.phase = "repair";
+      state.lastAction = "repair_verification_without_material_change";
+      state.lastError = repair.reason || state.lastError || "A reviewer-required repair has not produced a workspace change.";
+      state.nextAction = "Do not create another review checkpoint yet. Make a real workspace edit or repair command that changes the responsible artifact, then rerun verification.";
+      state.noActionCalls = 0;
+      if (repair.unproductiveVerificationAttempts >= MAX_UNPRODUCTIVE_REPAIR_VERIFICATIONS) {
+        session.guardStopReason ||= `repair_requires_material_change_after_${repair.unproductiveVerificationAttempts}_verification_attempts`;
+      }
+      return state;
+    }
     const collaboration = collaborationRequirementStatus(state);
     if (collaboration.pending) {
       state.phase = "repair";
@@ -256,7 +427,8 @@ export function advanceExecutionState({ state, session, agent, groupPath, questi
       prepareReviewDelegations(state, session.groupSnapshot?.agents || []);
       state.lastError = "";
       state.nextAction = "A real verification checkpoint exists. Preserve the evidence and address any reviewer finding.";
-      const hasReviewers = (session.groupSnapshot?.agents || []).some((item) => item.enabled !== false && !item.judge && isReviewerLike(item));
+      const finalizerId = designatedFinalizerId(state, session.groupSnapshot?.agents || []);
+      const hasReviewers = (session.groupSnapshot?.agents || []).some((item) => item.enabled !== false && item.id !== finalizerId && isReviewerLike(item));
       if (!hasReviewers) state.phase = "complete";
     }
     state.noActionCalls = 0;
@@ -296,6 +468,22 @@ export function advanceExecutionState({ state, session, agent, groupPath, questi
   return state;
 }
 
+export function acknowledgeOwnerIntegration(state, agent, response = {}) {
+  if (!state?.active || agent?.id !== state.executorId || state.phase === "deliberation") return false;
+  if (!["pending", "scheduled"].includes(state.participation?.ownerIntegrationStatus)) return false;
+  const hasIntegrationResponse = response?.status === "speak" && (
+    String(response.argument || response.reason || "").trim()
+    || response.tool_requests?.length
+    || response.file_operations?.length
+    || response.task_delegations?.length
+  );
+  if (!hasIntegrationResponse) return false;
+  state.participation.ownerIntegrationStatus = "completed";
+  state.participation.ownerIntegratedAt = new Date().toISOString();
+  state.lastAction = "collaboration_contributions_integrated";
+  return true;
+}
+
 // Delivery recovery is durable evidence, not a model-facing suggestion.  It
 // records the exact acquisition/runtime strategy that failed and the later
 // result that proved an acquired capability was actually used.  This lets a
@@ -318,6 +506,55 @@ function normalizeRecoveryState(value) {
     pendingCapabilities: Array.isArray(source.pendingCapabilities) ? source.pendingCapabilities.filter(isPendingCapability).slice(-16) : [],
     usage: Array.isArray(source.usage) ? source.usage.filter(isCapabilityUsageRecord).slice(-32) : []
   };
+}
+
+function createRepairState() {
+  return {
+    requiredMaterialChange: false,
+    checkpointVersion: 0,
+    reason: "",
+    unproductiveVerificationAttempts: 0
+  };
+}
+
+function normalizeRepairState(value) {
+  const source = value && typeof value === "object" ? value : {};
+  return {
+    requiredMaterialChange: source.requiredMaterialChange === true,
+    checkpointVersion: Math.max(0, Number(source.checkpointVersion || 0)),
+    reason: String(source.reason || "").trim().slice(0, 1200),
+    unproductiveVerificationAttempts: Math.max(0, Number(source.unproductiveVerificationAttempts || 0))
+  };
+}
+
+function requireMaterialRepair(value, details = {}) {
+  return {
+    ...normalizeRepairState(value),
+    requiredMaterialChange: true,
+    checkpointVersion: Math.max(0, Number(details.checkpointVersion || 0)),
+    reason: String(details.reason || "").trim().slice(0, 1200),
+    unproductiveVerificationAttempts: 0
+  };
+}
+
+function requiresMaterialRepair(state) {
+  return state?.phase === "repair" && state?.repair?.requiredMaterialChange === true;
+}
+
+function resolveMaterialRepair(state) {
+  if (!state?.repair?.requiredMaterialChange) return false;
+  state.repair = createRepairState();
+  return true;
+}
+
+function formatRepairState(value) {
+  const repair = normalizeRepairState(value);
+  if (!repair.requiredMaterialChange) return "";
+  return [
+    "[Blocking repair gate] A reviewer found a blocking issue after checkpoint " + repair.checkpointVersion + ".",
+    repair.reason ? `Blocking evidence: ${repair.reason}` : "",
+    "You must make a real workspace mutation that addresses this issue before validation. Repeating a read, parse, test, or unchanged verification is rejected and cannot create another checkpoint."
+  ].filter(Boolean).join("\n");
 }
 
 function isRecoveryFailure(item) {
@@ -398,6 +635,14 @@ function isFailedToolResult(result = {}) {
 
 function recoveryStrategyForResult(result = {}) {
   const tool = String(result.tool || "");
+  if (tool === "skill_read") {
+    const skillId = normalizeRecoveryValue(result.skillId || result.result?.skillId || "unknown-skill");
+    return {
+      family: "skill_read",
+      fingerprint: `skill_read:${skillId}`,
+      label: `skill instructions for ${skillId}`
+    };
+  }
   if (tool === "install_package") {
     const manager = String(result.manager || result.result?.manager || "default").toLowerCase();
     const packageName = normalizeRecoveryValue(result.packageName || result.result?.packageName || "unknown-package");
@@ -428,7 +673,13 @@ function recoveryStrategyForResult(result = {}) {
 }
 
 function isDirectPackageInstall(result = {}) {
-  return /(?:^|[;&|]\s*)(?:npm|pnpm|yarn)\s+(?:add|install)\b|\b(?:python|python3|py)(?:\.exe)?\s+-m\s+pip\s+install\b|(?:^|[;&|]\s*)pip3?\s+install\b|(?:^|[;&|]\s*)(?:cargo|gem)\s+(?:add|install)\b|(?:^|[;&|]\s*)go\s+(?:get|install)\b|(?:^|[;&|]\s*)(?:winget|choco|scoop|brew)\s+install\b|\bapt(?:-get)?\s+install\b/i.test(String(result.command || result.result?.command || ""));
+  return /(?:^|[;&|]\s*)(?:npm|pnpm|yarn)\s+(?:add|install|ci)\b|\b(?:python|python3|py)(?:\.exe)?\s+-m\s+pip\s+install\b|(?:^|[;&|]\s*)pip3?\s+install\b|(?:^|[;&|]\s*)(?:cargo|gem)\s+(?:add|install)\b|(?:^|[;&|]\s*)go\s+(?:get|install)\b|(?:^|[;&|]\s*)(?:winget|choco|scoop|brew)\s+install\b|\bapt(?:-get)?\s+install\b/i.test(String(result.command || result.result?.command || ""));
+}
+
+function isAcquisitionCommand(result = {}) {
+  const command = String(result.command || result.result?.command || "");
+  return isDirectPackageInstall(result)
+    || /\b(?:python|python3|py)(?:\.exe)?\s+-m\s+(?:venv|virtualenv)\b|\b(?:virtualenv|corepack)\s+(?:create|enable)\b/i.test(command);
 }
 
 function missingExecutableName(result = {}) {
@@ -458,7 +709,8 @@ function recoveryErrorText(result = {}) {
 function pendingCapabilityFromResult(result = {}) {
   if (result?.status !== "completed" || result?.result?.ok === false) return undefined;
   const tool = String(result.tool || "");
-  if (!new Set(["install_package", "provision_tool", "skill_install", "mcp_install_npm"]).has(tool)) return undefined;
+  if (!["install_package", "provision_tool", "skill_install", "mcp_install_npm"].includes(tool)
+    && !(tool === "execute_command" && isAcquisitionCommand(result))) return undefined;
   return {
     acquisitionId: String(result.id || ""),
     tool,
@@ -470,6 +722,7 @@ function pendingCapabilityFromResult(result = {}) {
 
 function capabilityLabel(result = {}) {
   if (result.tool === "install_package") return `installed package ${String(result.result?.packageName || result.packageName || "")}`.trim();
+  if (result.tool === "execute_command") return "completed direct package-manager acquisition";
   if (result.tool === "provision_tool") return `provisioned command ${String(result.result?.command || result.commandName || result.toolName || "")}`.trim();
   if (result.tool === "skill_install") return `installed skill ${String(result.result?.skill?.id || result.skillId || "")}`.trim();
   return `configured MCP server ${String(result.result?.id || result.serverId || result.packageSpec || "")}`.trim();
@@ -478,6 +731,8 @@ function capabilityLabel(result = {}) {
 function capabilityReferences(result = {}) {
   const values = result.tool === "install_package"
     ? [result.result?.packageName, result.packageName]
+    : result.tool === "execute_command"
+      ? [result.command || result.result?.command]
     : result.tool === "provision_tool"
       ? [result.result?.command, result.commandName, result.toolName]
       : result.tool === "skill_install"
@@ -499,6 +754,9 @@ function resolveRecoveredFailures(recovery, toolResults = []) {
 
 function resolvesRecoveryFailure(failure, result = {}) {
   const tool = String(result.tool || "");
+  if (failure.family === "skill_read") {
+    return ["skill_install", "workspace_edit", "execute_command", "run_code"].includes(tool);
+  }
   if (failure.family === "managed_package") {
     return tool === "provision_tool" || (tool === "install_package" && recoveryStrategyForResult({ ...result, status: "failed" })?.fingerprint !== failure.fingerprint);
   }
@@ -575,6 +833,9 @@ function requestIsMaterialExecution(request = {}) {
 
 function recoveryStrategyForRequest(request = {}) {
   const tool = String(request.tool || "").trim().toLowerCase().replace(/-/g, "_");
+  if (tool === "skill_read") {
+    return `skill_read:${normalizeRecoveryValue(request.skillId || "unknown-skill")}`;
+  }
   if (tool === "install_package") {
     return `install_package:${String(request.manager || request.packageManager || "default").toLowerCase()}:${normalizeRecoveryValue(request.packageName || request.package || request.name || request.query || "unknown-package")}`;
   }
@@ -657,7 +918,10 @@ export function requiresWorkspaceExecution(state) {
 function applyTaskIntake(state, response = {}, session = {}) {
   const observedContract = inferContractFromObservedAction(response, session);
   if (response.status == null && !observedContract) return { delivery: false };
-  const contract = normalizeTaskContract(response.task_contract) || observedContract;
+  const contract = reconcileTaskContractWithQuestion(
+    normalizeTaskContract(response.task_contract) || observedContract,
+    state.taskQuestion
+  );
   if (!contract) {
     retainMissingTaskContractForOwner(state, response);
     return { delivery: false, intakeRequired: true };
@@ -671,14 +935,166 @@ function applyTaskIntake(state, response = {}, session = {}) {
     state.nextAction = "Task intake recorded a discussion contract; normal group discussion may proceed.";
     return { delivery: false };
   }
-  state.phase = "inspect";
+  const participation = initializeParticipation(state, session.groupSnapshot?.agents || []);
+  state.phase = participation.pending ? "deliberation" : "inspect";
   state.lastAction = "task_contract:delivery";
   state.lastError = "";
-  state.nextAction = contract.nextAction
+  state.nextAction = participation.pending
+    ? "Collect the scheduled collaborators' distinct contributions before the delivery owner decomposes or implements the work."
+    : contract.nextAction
     || (contract.requiresWorkspace
       ? "Inspect only the minimum facts required, then perform the first real workspace mutation or command."
       : "Perform the first material action required by the recorded task contract.");
   return { delivery: true };
+}
+
+function normalizeExecutionWorkMode(value) {
+  if (value === "collab" || value === "independent") return value;
+  return "";
+}
+
+function createParticipationState(value = {}) {
+  return {
+    policy: normalizeExecutionWorkMode(value.policy),
+    status: String(value.status || "not_started"),
+    startedAt: String(value.startedAt || ""),
+    completedAt: String(value.completedAt || ""),
+    ownerIntegrationStatus: String(value.ownerIntegrationStatus || "not_required"),
+    ownerIntegratedAt: String(value.ownerIntegratedAt || ""),
+    participants: Array.isArray(value.participants)
+      ? value.participants.filter((item) => item && typeof item === "object").map((item) => ({
+          agentId: String(item.agentId || ""),
+          agentName: String(item.agentName || ""),
+          role: String(item.role || ""),
+          scope: String(item.scope || "").slice(0, 600),
+          status: String(item.status || "scheduled"),
+          outcome: String(item.outcome || ""),
+          summary: String(item.summary || "").slice(0, 1200),
+          evidence: Array.isArray(item.evidence)
+            ? item.evidence.filter((entry) => entry && typeof entry === "object").map((entry) => ({
+                kind: String(entry.kind || "message"),
+                detail: String(entry.detail || "").slice(0, 500)
+              })).filter((entry) => entry.detail).slice(0, 8)
+            : [],
+          completedAt: String(item.completedAt || "")
+        })).filter((item) => item.agentId).slice(0, 40)
+      : []
+  };
+}
+
+function normalizeParticipation(value) {
+  return createParticipationState(value);
+}
+
+function initializeParticipation(state, agents = []) {
+  const participation = state.participation = createParticipationState({ policy: state.workMode });
+  if (!["collab", "independent"].includes(state.workMode)) {
+    participation.status = "not_applicable";
+    return { pending: false };
+  }
+  const requiredTypes = state.taskContract?.collaboration?.required
+    ? state.taskContract.collaboration.types || []
+    : [];
+  if (requiredTypes.length && requiredTypes.every((type) => WORK_DELEGATION_TYPES.has(type))) {
+    participation.status = "typed_delegation_required";
+    return { pending: false };
+  }
+  const finalizerId = designatedFinalizerId(state, agents);
+  const candidates = (agents || []).filter((agent) => (
+    agent?.enabled !== false
+    && agent.id !== finalizerId
+    && agent.id !== state.executorId
+  ));
+  participation.policy = state.workMode;
+  participation.startedAt = new Date().toISOString();
+  participation.participants = candidates.map((agent) => ({
+    agentId: agent.id,
+    agentName: agent.name,
+    role: String(agent.role || ""),
+    scope: participationScope(agent, state.taskContract, state.workMode),
+    status: "scheduled",
+    outcome: "",
+    summary: "",
+    evidence: [],
+    completedAt: ""
+  }));
+  participation.status = participation.participants.length ? "collecting" : "not_applicable";
+  participation.ownerIntegrationStatus = participation.participants.length ? "waiting" : "not_required";
+  if (!participation.participants.length) participation.completedAt = participation.startedAt;
+  return { pending: participation.participants.length > 0 };
+}
+
+function participationScope(agent, contract = {}, workMode = "collab") {
+  const role = String(agent?.role || "").toLowerCase();
+  const objective = String(contract?.objective || "the recorded delivery objective");
+  if (workMode === "independent") return `Independently propose an approach, draft, risk analysis, or implementation plan for: ${objective}`.slice(0, 600);
+  if (isReviewerLike(agent)) return `Critique the proposed objective and completion criteria for concrete omissions, risks, or verification gaps: ${objective}`.slice(0, 600);
+  if (/architect|design|planner/.test(role)) return `Propose a bounded design or decomposition input for: ${objective}`.slice(0, 600);
+  if (/research|analyst/.test(role)) return `Identify one useful factual question, evidence need, or domain constraint for: ${objective}`.slice(0, 600);
+  return `Provide one distinct draft, idea, risk, or implementation input for: ${objective}`.slice(0, 600);
+}
+
+function participationForAgent(state, agent) {
+  if (!state || !agent?.id) return undefined;
+  return state.participation?.participants?.find((item) => item.agentId === agent.id);
+}
+
+function pendingParticipationAgents(state, agents = []) {
+  if (state?.phase !== "deliberation" || state?.participation?.status !== "collecting") return [];
+  const byId = new Map((agents || []).filter((agent) => agent?.enabled !== false).map((agent) => [agent.id, agent]));
+  for (const participant of state.participation.participants || []) {
+    if (participant.status === "scheduled" && !byId.has(participant.agentId)) {
+      participant.status = "unavailable";
+      participant.outcome = "mechanically_ineligible";
+      participant.completedAt = new Date().toISOString();
+    }
+  }
+  const pending = (state.participation.participants || [])
+    .filter((item) => item.status === "scheduled")
+    .map((item) => byId.get(item.agentId))
+    .filter(Boolean);
+  if (!pending.length) finishParticipationIfComplete(state);
+  return pending;
+}
+
+function completeParticipation(state, participation, agent, response = {}, session = {}) {
+  const status = String(response?.status || "unavailable");
+  const summary = String(response?.argument || response?.reason || "").trim().slice(0, 1200);
+  const substantive = status === "speak" && summary.length > 0;
+  participation.status = "completed";
+  participation.outcome = substantive ? "substantive" : status === "skip" ? "declined" : "unavailable";
+  participation.summary = summary;
+  participation.completedAt = new Date().toISOString();
+  participation.evidence = summary ? [{
+    kind: "message",
+    detail: `session=${session.id || "current"}; agent=${agent.id}; status=${status}; summary=${summary}`.slice(0, 500)
+  }] : [];
+  state.lastAction = `collaboration_contribution:${agent.id}:${participation.outcome}`;
+  finishParticipationIfComplete(state);
+}
+
+function finishParticipationIfComplete(state) {
+  const participation = state?.participation;
+  if (!participation?.participants?.length) return false;
+  if (participation.participants.some((item) => item.status === "scheduled")) return false;
+  participation.status = "completed";
+  participation.completedAt ||= new Date().toISOString();
+  participation.ownerIntegrationStatus = "pending";
+  if (state.phase === "deliberation") state.phase = "inspect";
+  state.lastAction = "collaboration_deliberation_completed";
+  state.lastError = "";
+  state.nextAction = "Integrate the collaborators' attributable contributions, decompose any remaining typed work, then continue the first material delivery action.";
+  return true;
+}
+
+function formatParticipationForOwner(participation = {}) {
+  if (!Array.isArray(participation.participants) || !participation.participants.length) return "";
+  const contributions = participation.participants
+    .filter((item) => item.status === "completed")
+    .map((item) => `- ${item.agentName || item.agentId} (${item.role || "member"}; ${item.outcome || "unknown"}): ${item.summary || "No substantive contribution was returned."}`)
+    .join("\n");
+  if (!contributions) return "";
+  return `[Collaborator contributions to integrate]\n${contributions}`;
 }
 
 function enforceExplicitCollaboration(contract, question) {
@@ -690,16 +1106,18 @@ function enforceExplicitCollaboration(contract, question) {
       required: true,
       beforeFirstMutation: true,
       minimumDelegations: Math.max(1, Number(contract.collaboration?.minimumDelegations || 0)),
-      types: contract.collaboration?.types?.length ? contract.collaboration.types : ["research"],
-      reason: contract.collaboration?.reason || "The user explicitly requested collaborative delivery, so one evidence-backed delegated handoff is required before the owner creates the final artifact."
+      types: contract.collaboration?.types?.length ? contract.collaboration.types : ["discussion"],
+      reason: contract.collaboration?.reason || "The user explicitly requested collaborative delivery, so one attributable collaborator contribution must be integrated before completion."
     }
   };
 }
 
 function ensureRequiredCollaborationDelegation(state, agents = []) {
+  if (state.phase === "deliberation" || state.participation?.status === "collecting") return false;
   const requirement = collaborationRequirementStatus(state);
   if (!requirement.pending || hasOpenWorkDelegations(state) || hasUnacknowledgedWorkDelegations(state)) return false;
-  const candidates = (agents || []).filter((agent) => agent?.enabled !== false && !agent?.judge && agent.id !== state.executorId);
+  const finalizerId = designatedFinalizerId(state, agents);
+  const candidates = (agents || []).filter((agent) => agent?.enabled !== false && agent.id !== finalizerId && agent.id !== state.executorId);
   if (!candidates.length) {
     state.lastAction = "collaboration_member_unavailable";
     state.lastError = "The task requires collaboration, but no enabled non-owner member is available.";
@@ -758,10 +1176,10 @@ function retainMissingTaskContractForOwner(state, response = {}) {
   state.nextAction = "Return a complete task_contract now. Do not delegate, release other members, or restart planning. Explicitly choose mode=delivery or mode=discussion and include the objective, requirements, deliverables, completion criteria, and one concrete next action.";
 }
 
-export function normalizeTaskContract(value) {
+export function normalizeTaskContract(value, options = {}) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
-  const mode = String(value.mode || "").trim().toLowerCase();
-  if (mode !== "delivery" && mode !== "discussion") return undefined;
+  const mode = normalizeTaskContractMode(value.mode);
+  if (!mode) return undefined;
   const objective = String(value.objective || "").trim().slice(0, 1200);
   const deliverables = normalizeTaskContractTextList(value.deliverables);
   const artifacts = normalizeTaskContractArtifacts(value.artifacts);
@@ -771,18 +1189,80 @@ export function normalizeTaskContract(value) {
   const hasVerificationRequirement = Object.hasOwn(value, "requires_verification") || Object.hasOwn(value, "requiresVerification");
   // A mode alone is not a semantic contract. Requiring these fields keeps an
   // invalid provider reply with no work evidence from releasing delivery ownership.
-  if (!objective || !completionCriteria.length || !nextAction || !hasWorkspaceRequirement || !hasVerificationRequirement || (mode === "delivery" && !deliverables.length)) return undefined;
-  return {
+  if (options.allowIncomplete !== true && (!objective || !completionCriteria.length || !nextAction || !hasWorkspaceRequirement || !hasVerificationRequirement || (mode === "delivery" && !deliverables.length))) return undefined;
+  const normalized = {
     mode,
     objective,
-    requiresWorkspace: Boolean(value.requires_workspace ?? value.requiresWorkspace),
-    requiresVerification: Boolean(value.requires_verification ?? value.requiresVerification),
+    requiresWorkspace: normalizeTaskContractBoolean(value.requires_workspace ?? value.requiresWorkspace),
+    requiresVerification: normalizeTaskContractBoolean(value.requires_verification ?? value.requiresVerification),
     deliverables,
     artifacts,
     completionCriteria,
     nextAction,
     collaboration: normalizeCollaborationRequirement(value.collaboration, value),
     source: String(value.source || "model_task_contract")
+  };
+  if (options.shape !== "wire") return normalized;
+  return {
+    mode: normalized.mode,
+    objective: normalized.objective,
+    requires_workspace: normalized.requiresWorkspace,
+    requires_verification: normalized.requiresVerification,
+    deliverables: normalized.deliverables,
+    ...(normalized.artifacts.length ? { artifacts: normalized.artifacts } : {}),
+    completion_criteria: normalized.completionCriteria,
+    next_action: normalized.nextAction,
+    collaboration: {
+      required: normalized.collaboration.required,
+      before_first_mutation: normalized.collaboration.beforeFirstMutation,
+      minimum_delegations: normalized.collaboration.minimumDelegations,
+      types: normalized.collaboration.types,
+      reason: normalized.collaboration.reason
+    }
+  };
+}
+
+function normalizeTaskContractMode(value) {
+  const mode = String(value || "").trim().toLowerCase();
+  if (["delivery", "deliver", "execution", "execute", "交付", "执行", "实施"].includes(mode)) return "delivery";
+  if (["discussion", "discuss", "analysis", "advice", "讨论", "分析", "建议"].includes(mode)) return "discussion";
+  return "";
+}
+
+function normalizeTaskContractBoolean(value) {
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (["false", "0", "no", "off", "否", "不需要"].includes(normalized)) return false;
+    if (["true", "1", "yes", "on", "是", "需要"].includes(normalized)) return true;
+  }
+  return Boolean(value);
+}
+
+// The user request is the source of truth for explicit file deliveries. A
+// provider contract that omits or downgrades that output must not turn a real
+// artifact task into a non-workspace, non-verifying conversation.
+function reconcileTaskContractWithQuestion(value, question) {
+  const requirements = requestedArtifactRequirementsFromQuestion(question);
+  if (!requirements.length) return value;
+  const normalized = normalizeTaskContract(value);
+  const source = normalized || (value && typeof value === "object" && !Array.isArray(value) ? value : {});
+  const baseDeliverables = normalized?.deliverables || normalizeTaskContractTextList(source.deliverables);
+  const baseArtifacts = normalized?.artifacts || normalizeTaskContractArtifacts(source.artifacts);
+  const inferredDeliverables = requirements.map((item) => `User-requested ${item.extension} artifact`);
+  const completionCriteria = normalized?.completionCriteria
+    || normalizeTaskContractTextList(source.completion_criteria ?? source.completionCriteria);
+  const inferredCriteria = requirements.map((item) => `The requested ${item.extension} artifact exists and passes format validation.`);
+  return {
+    mode: "delivery",
+    objective: String(normalized?.objective || source.objective || "Create the user-requested deliverable.").trim().slice(0, 1200),
+    requiresWorkspace: true,
+    requiresVerification: true,
+    deliverables: [...new Set([...baseDeliverables, ...inferredDeliverables])].slice(0, 12),
+    artifacts: normalizeTaskContractArtifacts([...baseArtifacts, ...requirements]),
+    completionCriteria: [...new Set([...completionCriteria, ...inferredCriteria])].slice(0, 12),
+    nextAction: String(normalized?.nextAction || source.next_action || source.nextAction || "Create and verify the requested deliverable.").trim().slice(0, 1200),
+    collaboration: normalized?.collaboration || normalizeCollaborationRequirement(source.collaboration, source),
+    source: normalized?.source ? `${normalized.source}+user_artifact_requirement` : "inferred_user_artifact_requirement"
   };
 }
 
@@ -832,7 +1312,7 @@ function normalizeCollaborationRequirement(value, contract = {}) {
   const minimum = Number.parseInt(String(source.minimum_delegations ?? source.minimumDelegations ?? 1), 10);
   const types = normalizeContractTextList(source.types ?? source.delegation_types ?? source.delegationTypes)
     .map((item) => item.toLowerCase())
-    .filter((item) => WORK_DELEGATION_TYPES.has(item));
+    .filter((item) => COLLABORATION_TYPES.has(item));
   return {
     required,
     beforeFirstMutation: required && source.before_first_mutation !== false && source.beforeFirstMutation !== false,
@@ -924,7 +1404,7 @@ function formatTaskContract(contract) {
 export function isDeliveryTask(question) {
   const text = String(question || "");
   const directive = taskDirectiveText(text);
-  const directArtifactRequest = /\b(?:make|produce|create|generate|write|export)\b[^\r\n]{0,100}\b(?:pdf|report|document|presentation|spreadsheet|file)\b|\u5e2e\u6211\u505a|\u505a(?:\u4e00|\u4e2a|\u4efd)[^\r\n]{0,100}(?:\u62a5\u544a|\u6587\u4ef6|\u6587\u6863|\u8868\u683c|\u5e7b\u706f\u7247|pdf)|(?:\u7f16\u8f91|\u5bfc\u51fa|\u4fdd\u5b58|\u653e)[^\r\n]{0,80}(?:\u6587\u4ef6|\u684c\u9762|pdf)/i;
+  const directArtifactRequest = /\b(?:make|produce|create|generate|write|export)\b[^\r\n]{0,100}\b(?:pdf|ppt|pptx|report|document|presentation|spreadsheet|file)\b|\u5e2e\u6211\u505a|\u505a(?:\u4e00|\u4e2a|\u4efd)[^\r\n]{0,100}(?:\u62a5\u544a|\u6587\u4ef6|\u6587\u6863|\u8868\u683c|\u5e7b\u706f\u7247|ppt|pptx|pdf)|(?:\u7f16\u8f91|\u5bfc\u51fa|\u4fdd\u5b58|\u653e)[^\r\n]{0,80}(?:\u6587\u4ef6|\u684c\u9762|ppt|pptx|pdf)/i;
   if (directArtifactRequest.test(directive.combined)) return true;
   const continuationWork = /\bcontinue(?:\s+from|\s+with|\s+the)?\b|继续(?:处理|完成|做|推进)?/i.test(directive.combined)
     && /\b(?:current|existing|latest|newest|requested)\b[^\r\n]{0,100}\b(?:artifact|deliverable|file|project|task|requirement)\b|\b[\w./-]+\.(?:json|js|cjs|mjs|ts|py|java|md|txt|csv|zip|jar)\b|当前|现有|最新|最终|要求|产物|文件|项目/i.test(directive.combined);
@@ -964,10 +1444,20 @@ function taskDirectiveText(value) {
 }
 
 function chooseExecutor(agents, workspaceGroup) {
-  const candidates = agents.filter((agent) => agent.enabled !== false && !agent.judge && !isReviewerLike(agent));
+  const finalizerId = initialFinalizerId(agents);
+  const candidates = agents.filter((agent) => agent.enabled !== false && agent.id !== finalizerId && !isReviewerLike(agent));
   const tiers = workspaceGroup?.permissions?.seatTiers || {};
   const fallbackTier = workspaceGroup?.permissions?.defaultTier || "text";
   return candidates.sort((a, b) => permissionRank(tiers[b.id] || fallbackTier) - permissionRank(tiers[a.id] || fallbackTier))[0];
+}
+
+function initialFinalizerId(agents = []) {
+  return (agents || []).find((agent) => agent?.enabled !== false && agent?.judge)?.id || "";
+}
+
+function designatedFinalizerId(state = {}, agents = []) {
+  const persisted = String(state?.finalizerId || "").trim();
+  return persisted || initialFinalizerId(agents);
 }
 
 function initialOwnership(executor) {
@@ -1014,17 +1504,22 @@ function normalizeOwnership(value, state = {}) {
 }
 
 const WORK_DELEGATION_TYPES = new Set(["research", "implementation", "review", "unblocker"]);
+const TEXT_COLLABORATION_TYPES = new Set(["discussion", "design", "draft", "critique"]);
+const COLLABORATION_TYPES = new Set([...WORK_DELEGATION_TYPES, ...TEXT_COLLABORATION_TYPES]);
 const DEFAULT_RESEARCH_TOOLS = ["web_search", "fetch_url", "api_request", "list_directory", "read_file", "search_files", "grep_content", "search_context", "load_context"];
 const DEFAULT_UNBLOCKER_TOOLS = [...DEFAULT_RESEARCH_TOOLS, "read_process_status", "skill_list", "skill_search", "mcp_search_npm", "mcp_list_tools"];
 const DEFAULT_UNBLOCKER_RUNTIME_TOOLS = [...DEFAULT_UNBLOCKER_TOOLS, "install_package", "provision_tool", "skill_install", "skill_enable", "mcp_install_npm"];
+const DELEGATED_WORKSPACE_MUTATION_TOOLS = new Set(["workspace_edit", "execute_command", "run_code", "run_tests", "git_operation", "create_archive", "extract_archive"]);
+const DELEGATED_RUNTIME_MUTATION_TOOLS = new Set(["install_package", "provision_tool", "skill_install", "skill_enable", "skill_disable", "skill_remove", "mcp_install_npm", "mcp_uninstall"]);
+const MAX_UNPRODUCTIVE_REPAIR_VERIFICATIONS = 3;
 
 export function collaborationRequirementStatus(state = {}) {
   const requirement = state?.taskContract?.collaboration || {};
   const required = requirement.required === true;
   const minimumDelegations = required ? Math.max(1, Number(requirement.minimumDelegations || 1)) : 0;
-  const types = Array.isArray(requirement.types) ? requirement.types.filter((item) => WORK_DELEGATION_TYPES.has(item)) : [];
+  const types = Array.isArray(requirement.types) ? requirement.types.filter((item) => COLLABORATION_TYPES.has(item)) : [];
   const ownership = normalizeOwnership(state.ownership, state);
-  const completed = ownership.delegations.filter((item) => (
+  const completedDelegations = ownership.delegations.filter((item) => (
     WORK_DELEGATION_TYPES.has(item.type)
     && item.native === true
     && item.status === "completed"
@@ -1033,7 +1528,16 @@ export function collaborationRequirementStatus(state = {}) {
     && item.handoffEvidence.some((evidence) => ["tool", "file"].includes(evidence?.kind))
     && (!types.length || types.includes(item.type))
   ));
-  const pending = required && completed.length < minimumDelegations;
+  const acceptsTextContribution = !types.length || types.some((item) => TEXT_COLLABORATION_TYPES.has(item));
+  const completedParticipants = acceptsTextContribution && state.participation?.ownerIntegrationStatus === "completed"
+    ? (state.participation?.participants || []).filter((item) => (
+        item.status === "completed"
+        && item.outcome === "substantive"
+        && item.evidence?.some((evidence) => evidence?.kind === "message")
+      ))
+    : [];
+  const completed = completedDelegations.length + completedParticipants.length;
+  const pending = required && completed < minimumDelegations;
   const typeText = types.length ? ` of type ${types.join(", ")}` : "";
   const reason = requirement.reason || `The task contract requires ${minimumDelegations} native, evidence-backed delegated handoff(s)${typeText} before delivery can complete.`;
   return {
@@ -1041,11 +1545,15 @@ export function collaborationRequirementStatus(state = {}) {
     beforeFirstMutation: requirement.beforeFirstMutation === true,
     minimumDelegations,
     types,
-    completed: completed.length,
+    completed,
+    completedDelegations: completedDelegations.length,
+    completedTextContributions: completedParticipants.length,
     pending,
     reason,
     nextAction: pending
-      ? `${reason} The delivery owner must use native delegate_task for a narrow eligible subtask, wait for its concrete handoff evidence, acknowledge and integrate it, then rerun verification.`
+      ? acceptsTextContribution
+        ? `${reason} Collect and integrate the remaining attributable collaborator contributions before delivery.`
+        : `${reason} The delivery owner must use native delegate_task for a narrow eligible subtask, wait for its concrete handoff evidence, acknowledge and integrate it, then rerun verification.`
       : ""
   };
 }
@@ -1099,11 +1607,14 @@ function registerOwnerDelegations(state, response = {}, agents = []) {
     Object.defineProperty(response, "__registeredTaskDelegationKeys", { value: registered, enumerable: false });
   }
   const ownership = state.ownership = normalizeOwnership(state.ownership, state);
-  const assignees = new Map((agents || []).filter((agent) => agent?.enabled !== false).map((agent) => [agent.id, agent]));
+  const enabledAssignees = (agents || []).filter((agent) => agent?.enabled !== false);
+  const assignees = new Map(enabledAssignees.map((agent) => [agent.id, agent]));
   const added = [];
   for (const request of requested) {
     const type = String(request?.type || "").trim().toLowerCase();
-    const assigneeId = String(request?.assignee_id || request?.assigneeId || "").trim();
+    const assigneeReference = String(request?.assignee_id || request?.assigneeId || "").trim();
+    const resolvedAssigneeId = resolveDelegationAssigneeId(assigneeReference, enabledAssignees);
+    const assigneeId = resolvedAssigneeId || assigneeReference;
     const task = String(request?.task || request?.question || "").trim().slice(0, 1200);
     const expectedEvidence = normalizeContractTextList(request?.expected_evidence ?? request?.expectedEvidence).slice(0, 8);
     const allowWorkspaceMutation = Boolean(request?.allow_workspace_mutation ?? request?.allowWorkspaceMutation);
@@ -1187,6 +1698,19 @@ function registerOwnerDelegations(state, response = {}, agents = []) {
   }
 }
 
+export function resolveDelegationAssigneeId(reference, agents = []) {
+  const value = String(reference || "").trim();
+  if (!value) return "";
+  const enabled = (agents || []).filter((agent) => agent?.enabled !== false);
+  const exactId = enabled.find((agent) => String(agent.id || "") === value);
+  if (exactId) return exactId.id;
+  const folded = value.toLocaleLowerCase();
+  const idMatches = enabled.filter((agent) => String(agent.id || "").toLocaleLowerCase() === folded);
+  if (idMatches.length === 1) return idMatches[0].id;
+  const nameMatches = enabled.filter((agent) => String(agent.name || "").trim().toLocaleLowerCase() === folded);
+  return nameMatches.length === 1 ? nameMatches[0].id : "";
+}
+
 function delegationRequestKey(value = {}) {
   return JSON.stringify({
     type: String(value.type || ""),
@@ -1225,12 +1749,50 @@ function completeWorkDelegation(state, delegation, agent, response = {}, session
     ]);
   }
   delegation.ownerAcknowledged = false;
+  recordDelegatedParticipation(state, delegation, agent, response, session);
   state.lastAction = `delegation_handoff:${delegation.id}:${delegation.status}`;
   state.nextAction = hasOpenWorkDelegations(state)
     ? "Wait for the remaining delegated handoffs."
     : "Read every delegated handoff, use or correct its evidence, then continue the delivery as the owner.";
   if (delegation.status === "failed") {
     state.lastError = `Delegated ${delegation.type} work from ${agent.name} failed: ${delegation.result}`;
+  }
+}
+
+function recordDelegatedParticipation(state, delegation, agent, response = {}, session = {}) {
+  if (!["collab", "independent"].includes(state.workMode)) return;
+  const participation = state.participation = createParticipationState({
+    ...state.participation,
+    policy: state.workMode,
+    participants: state.participation?.participants || []
+  });
+  let participant = participation.participants.find((item) => item.agentId === agent.id);
+  if (!participant) {
+    participant = {
+      agentId: agent.id,
+      agentName: agent.name,
+      role: String(agent.role || ""),
+      scope: String(delegation.task || "Typed delegated contribution").slice(0, 600),
+      status: "delegated",
+      outcome: "",
+      summary: "",
+      evidence: [],
+      completedAt: ""
+    };
+    participation.participants.push(participant);
+  }
+  participant.status = delegation.status === "completed" ? "completed" : "unavailable";
+  participant.outcome = delegation.status === "completed" ? "substantive" : "delegation_failed";
+  participant.summary = String(response?.delegation_handoff?.summary || delegation.result || "").slice(0, 1200);
+  participant.evidence = participant.summary ? [{
+    kind: "message",
+    detail: `session=${session.id || "current"}; delegation=${delegation.id}; agent=${agent.id}; summary=${participant.summary}`.slice(0, 500)
+  }] : [];
+  participant.completedAt = new Date().toISOString();
+  if (delegation.status === "completed") {
+    participation.status = "completed";
+    participation.completedAt = participant.completedAt;
+    participation.ownerIntegrationStatus = "pending";
   }
 }
 
@@ -1287,7 +1849,11 @@ function uniqueDelegationEvidence(items = []) {
 }
 
 function normalizeDelegationTools(value, type, allowWorkspaceMutation, allowRuntimeMutation) {
-  const supplied = normalizeContractTextList(value).map((item) => item.toLowerCase().replace(/-/g, "_")).slice(0, 24);
+  const supplied = normalizeContractTextList(value)
+    .map((item) => item.toLowerCase().replace(/-/g, "_"))
+    .filter((item) => allowWorkspaceMutation || !DELEGATED_WORKSPACE_MUTATION_TOOLS.has(item))
+    .filter((item) => allowRuntimeMutation || !DELEGATED_RUNTIME_MUTATION_TOOLS.has(item))
+    .slice(0, 24);
   if (supplied.length) return supplied;
   if (type === "research" || type === "review") return DEFAULT_RESEARCH_TOOLS;
   if (type === "unblocker") return allowRuntimeMutation ? DEFAULT_UNBLOCKER_RUNTIME_TOOLS : DEFAULT_UNBLOCKER_TOOLS;
@@ -1319,8 +1885,9 @@ function formatDelegationHandoffsForOwner(state) {
 
 function prepareReviewDelegations(state, agents = []) {
   const ownership = state.ownership = normalizeOwnership(state.ownership, state);
+  const finalizerId = designatedFinalizerId(state, agents);
   const reviewerIds = new Set(agents
-    .filter((agent) => agent.id !== state.executorId && agent.enabled !== false && !agent.judge && isReviewerLike(agent))
+    .filter((agent) => agent.id !== state.executorId && agent.id !== finalizerId && agent.enabled !== false && isReviewerLike(agent))
     .map((agent) => agent.id));
   for (const delegation of ownership.delegations) {
     if (delegation.type === "checkpoint_review" && delegation.checkpointVersion === state.checkpointVersion && !reviewerIds.has(delegation.assigneeId) && delegation.status === "pending") {
@@ -1360,11 +1927,15 @@ function pendingReviewersForCheckpoint(state, reviewers) {
 }
 
 function reviewCheckpointComplete(state) {
+  const delegates = reviewDelegationsForCheckpoint(state);
+  return delegates.length > 0 && delegates.every((item) => ["completed", "skipped", "failed", "timed_out", "superseded"].includes(item.status));
+}
+
+function reviewDelegationsForCheckpoint(state) {
   const ownership = normalizeOwnership(state.ownership, state);
-  const delegates = ownership.delegations.filter((item) => (
+  return ownership.delegations.filter((item) => (
     item.type === "checkpoint_review" && item.checkpointVersion === state.checkpointVersion
   ));
-  return delegates.length > 0 && delegates.every((item) => item.status === "completed" || item.status === "superseded");
 }
 
 function permissionRank(value) {
@@ -1374,7 +1945,10 @@ function permissionRank(value) {
 }
 
 function isVerificationResult(item = {}) {
-  if (item.tool === "run_tests") return true;
+  const tool = String(item.tool || "");
+  if (["install_package", "provision_tool", "skill_install", "mcp_install_npm"].includes(tool)) return false;
+  if (tool === "execute_command" && isAcquisitionCommand(item)) return false;
+  if (tool === "run_tests") return true;
   if (item.tool === "run_code") {
     return Boolean(item.result?.verificationIntent)
       || /\b(?:verify|verification|validat(?:e|ion)?|test|check|parse|lint|smoke|assert(?:ion)?)/i.test(String(item.reason || ""));

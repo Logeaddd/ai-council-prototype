@@ -240,13 +240,10 @@ export function searchLiveSessionContext(session, query, options = {}) {
   const record = liveSessionRecord(session);
   const visible = visibleLiveSession(session, options.agent, options.transcriptVisibility);
   const candidates = [];
-  candidates.push(makeLiveSearchHit({
-    record,
-    sourceType: "live_session_question",
-    sourcePath: `live:${record.sessionId}`,
-    text: [record.question, session.finalDecision?.answer].filter(Boolean).join("\n"),
-    terms
-  }));
+  // The current question is already visible to the caller. Returning it from
+  // search_context lets a lookup marker echo crowd out the retained record the
+  // caller is trying to find. Live search is therefore limited to evidence
+  // produced after the question (messages, tools, and file operations).
   for (const round of liveRoundNumbers(visible.messages)) {
     const text = liveRoundSearchText(visible, round);
     candidates.push(makeLiveSearchHit({
@@ -865,7 +862,23 @@ function durationBetween(start, end) {
 }
 
 export function appendMemoryCandidates(finalDecision, session, baseDir) {
-  const candidates = filterDurableMemoryCandidates(finalDecision.memory_candidates ?? []);
+  const rejected = [];
+  const candidates = filterDurableMemoryCandidates(finalDecision.memory_candidates ?? [], {
+    onReject: (candidate, reason) => rejected.push({ candidate, reason })
+  });
+  if (rejected.length) {
+    const dir = path.resolve(baseDir, "memory");
+    fs.mkdirSync(dir, { recursive: true });
+    const auditPath = path.join(dir, "rejected.jsonl");
+    const records = rejected.map((item) => ({
+      id: makeId("memrej"),
+      source_session_id: session.id,
+      reason: item.reason,
+      candidate_length: String(item.candidate ?? "").trim().length,
+      created_at: nowIso()
+    }));
+    fs.appendFileSync(auditPath, records.map((record) => JSON.stringify(record)).join("\n") + "\n", "utf8");
+  }
   if (!candidates.length) return [];
 
   const dir = path.resolve(baseDir, "memory");
@@ -884,11 +897,15 @@ export function appendMemoryCandidates(finalDecision, session, baseDir) {
   return records;
 }
 
-export function filterDurableMemoryCandidates(candidates) {
+export function filterDurableMemoryCandidates(candidates, options = {}) {
   return candidates.filter((candidate) => {
     const text = String(candidate ?? "").trim();
-    if (!text) return false;
-    return hasDurablePrefix(text) && !hasEphemeralMeetingLanguage(text);
+    const reason = !text ? "empty" : !hasDurablePrefix(text) ? "missing_durable_prefix" : hasEphemeralMeetingLanguage(text) ? "ephemeral_meeting_language" : "";
+    if (reason) {
+      if (typeof options.onReject === "function") options.onReject(candidate, reason);
+      return false;
+    }
+    return true;
   });
 }
 

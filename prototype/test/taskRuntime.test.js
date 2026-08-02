@@ -13,6 +13,7 @@ import {
   readTaskRunEvents,
   syncTaskRunFromSession
 } from "../src/taskRuntime.js";
+import { advanceExecutionState, selectExecutionAgents } from "../src/executionState.js";
 
 function workspace() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-task-runtime-"));
@@ -23,6 +24,7 @@ function activeExecution(phase = "inspect") {
     active: true,
     executorId: "builder",
     executorName: "Builder",
+    finalizerId: "judge",
     phase,
     nextAction: "Perform a real action.",
     checkpointVersion: 0,
@@ -79,6 +81,7 @@ test("task run checkpoints preserve semantic intake state for an interrupted own
   });
   const stored = readTaskRun(groupPath, taskRun.id);
   assert.equal(stored.execution.taskQuestion, execution.taskQuestion);
+  assert.equal(stored.execution.finalizerId, "judge");
   assert.equal(stored.execution.intakeAttempts, 1);
   assert.equal(stored.execution.taskContract.mode, "delivery");
   assert.deepEqual(stored.execution.taskContract.deliverables, ["shared/result.txt"]);
@@ -90,6 +93,32 @@ test("task run checkpoints preserve semantic intake state for an interrupted own
   });
   assert.equal(resumed.execution.taskContract.nextAction, "Write the artifact.");
   assert.equal(resumed.execution.lastAction, "task_contract_missing");
+});
+
+test("task run preserves a blocking repair gate through an interrupted checkpoint", () => {
+  const groupPath = workspace();
+  const execution = {
+    ...activeExecution("repair"),
+    checkpointVersion: 7,
+    repair: {
+      requiredMaterialChange: true,
+      checkpointVersion: 7,
+      reason: "Reviewer confirmed that the JSON status was not updated.",
+      unproductiveVerificationAttempts: 2
+    }
+  };
+  const taskRun = createTaskRun({
+    groupPath,
+    sessionId: "session-blocking-repair",
+    question: "Update the current JSON status and validate it.",
+    session: { executionState: execution }
+  });
+  const stored = readTaskRun(groupPath, taskRun.id);
+
+  assert.equal(stored.execution.repair.requiredMaterialChange, true);
+  assert.equal(stored.execution.repair.checkpointVersion, 7);
+  assert.equal(stored.execution.repair.unproductiveVerificationAttempts, 2);
+  assert.match(stored.execution.repair.reason, /status was not updated/);
 });
 
 test("task run records successful tool, verification, and workspace evidence by stable attempt id", () => {
@@ -297,6 +326,78 @@ test("task run preserves a pending bounded delegation through interruption and r
   assert.equal(delegation.task, "Find the required format fact.");
   assert.deepEqual(delegation.expectedEvidence, ["Official source"]);
   assert.deepEqual(delegation.allowedTools, ["web_search", "fetch_url"]);
+});
+
+test("an interrupted pending review resumes and reaches a durable terminal reviewer outcome", () => {
+  const groupPath = workspace();
+  const builder = { id: "builder", name: "Builder", role: "Builder", enabled: true };
+  const reviewer = { id: "reviewer", name: "Reviewer", role: "Red Team", mandatoryRedTeam: true, enabled: true };
+  const execution = {
+    ...activeExecution("review"),
+    checkpointVersion: 2,
+    reviewedCheckpointVersion: 1,
+    artifactStatus: "verified",
+    ownership: {
+      ownerId: "builder",
+      ownerName: "Builder",
+      version: 1,
+      transfers: [],
+      delegations: [{
+        id: "review:2:reviewer",
+        type: "checkpoint_review",
+        checkpointVersion: 2,
+        assignedBy: "builder",
+        assigneeId: "reviewer",
+        assigneeName: "Reviewer",
+        status: "pending"
+      }]
+    }
+  };
+  const taskRun = createTaskRun({ groupPath, sessionId: "session-review-before", question: "Review the verified artifact.", session: { executionState: execution } });
+  const interrupted = syncTaskRunFromSession({
+    groupPath,
+    taskRun,
+    session: { id: "session-review-before", status: "interrupted", interruptionReason: "process_exit", executionState: execution }
+  });
+  const resumed = createTaskRun({
+    groupPath,
+    sessionId: "session-review-after",
+    question: "Continue the review.",
+    resumeTaskRunId: taskRun.id,
+    session: { executionState: interrupted.execution }
+  });
+  assert.deepEqual(selectExecutionAgents(resumed.execution, [builder, reviewer]).map((agent) => agent.id), ["reviewer"]);
+
+  advanceExecutionState({
+    state: resumed.execution,
+    session: { groupSnapshot: { agents: [builder, reviewer] } },
+    agent: reviewer,
+    response: { status: "timed_out", reason: "provider deadline", objection_items: [] }
+  });
+  const terminal = syncTaskRunFromSession({
+    groupPath,
+    taskRun: resumed,
+    session: { id: "session-review-after", status: "running", executionState: resumed.execution }
+  });
+  assert.equal(terminal.execution.ownership.delegations[0].status, "timed_out");
+  assert.equal(terminal.execution.phase, "complete");
+  assert.equal(terminal.state, "checkpointed");
+});
+
+test("guard stops preserve their exact reason and checkpoint for recovery", () => {
+  const groupPath = workspace();
+  const execution = { ...activeExecution("verify"), checkpointVersion: 4, lastAction: "verification_requested" };
+  const taskRun = createTaskRun({ groupPath, sessionId: "session-guard", question: "Verify the artifact.", session: { executionState: execution } });
+  const blocked = syncTaskRunFromSession({
+    groupPath,
+    taskRun,
+    session: { id: "session-guard", status: "guard_stopped", guardStopReason: "provider_call_budget_exhausted", executionState: execution }
+  });
+  const stored = readTaskRun(groupPath, taskRun.id);
+  assert.equal(blocked.state, "blocked");
+  assert.equal(stored.blockReason, "provider_call_budget_exhausted");
+  assert.equal(stored.execution.phase, "verify");
+  assert.equal(stored.execution.checkpointVersion, 4);
 });
 
 test("background process and artifact verification are durable TaskRun evidence", () => {

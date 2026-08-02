@@ -84,10 +84,24 @@ const ALLOWED_TOOLS = new Set([
   "skill_disable",
   "skill_remove",
   "record_task_contract",
-  "delegate_task"
+  "delegate_task",
+  "tool_search",
+  "tool_inspect",
+  "tool_invoke"
+]);
+// Providers commonly use the names exposed by their own SDK instead of the
+// canonical names in our protocol. Normalize these at the boundary so audit
+// records and execution handlers only ever see one tool vocabulary.
+const TOOL_ALIASES = new Map([
+  ["run_command", "execute_command"],
+  ["shell_command", "execute_command"],
+  ["command", "execute_command"],
+  ["edit_workspace", "workspace_edit"],
+  ["write_file", "workspace_edit"]
 ]);
 const FILE_TOOLS = new Set(["list_directory", "read_file", "search_files", "grep_content"]);
-const CONTEXT_TOOLS = new Set(["record_task_contract", "search_context", "load_context"]);
+const DEFERRED_TOOL_META_TOOLS = new Set(["tool_search", "tool_inspect", "tool_invoke"]);
+const CONTEXT_TOOLS = new Set(["record_task_contract", "search_context", "load_context", ...DEFERRED_TOOL_META_TOOLS]);
 const ARCHIVE_TOOLS = new Set(["extract_archive", "create_archive"]);
 const WORKSPACE_EDIT_TOOLS = new Set(["workspace_edit"]);
 const COMMAND_TOOLS = new Set(["execute_command"]);
@@ -122,7 +136,11 @@ export async function executeToolRequests(options = {}) {
   const permissionTier = options.permissionTier || "text";
 
   for (const request of requests) {
-    const normalized = normalizeToolRequest(request, request.sourceIndex || 0);
+    const wrapper = normalizeToolRequest(request, request.sourceIndex || 0);
+    const deferredInvocation = wrapper.tool === "tool_invoke";
+    const normalized = deferredInvocation
+      ? unwrapDeferredToolInvocation(wrapper, options.toolCatalog)
+      : wrapper;
     const base = {
       ...normalized,
       round: options.round,
@@ -130,6 +148,13 @@ export async function executeToolRequests(options = {}) {
       source_agent_name: options.agent?.name || ""
     };
 
+    if (normalized.deferredToolUnavailable) {
+      const rejection = reject(base, "tool_not_available", `${normalized.tool || "Requested tool"} is not available to this seat.`);
+      rejected.push(rejection);
+      events.push(toolEvent("tool_failure", base, { status: "rejected", code: rejection.code, error: rejection.error }));
+      appendToolAuditLog(options.groupPath, "rejected", rejection);
+      continue;
+    }
     if (!ALLOWED_TOOLS.has(normalized.tool)) {
       const rejection = reject(base, "invalid_tool", "Unknown tool. Use one of the tool values listed in the software protocol, including skill_read and the skill management tools.");
       rejected.push(rejection);
@@ -642,6 +667,28 @@ function failureStrategyFamily(item = {}) {
 
 async function executeOne(request, options) {
   try {
+    if (request.tool === "tool_search") {
+      const query = request.query.toLowerCase();
+      const terms = query.split(/\s+/).filter(Boolean);
+      const matches = deferredToolCatalog(options.toolCatalog)
+        .map((definition) => ({
+          name: definition.name,
+          description: definition.description,
+          score: deferredToolSearchScore(definition, terms)
+        }))
+        .filter((item) => item.score > 0)
+        .sort((left, right) => right.score - left.score || left.name.localeCompare(right.name))
+        .slice(0, request.count || 8)
+        .map(({ name, description }) => ({ name, description }));
+      return resultRecord(request, { status: "completed", result: { ok: true, query: request.query, tools: matches } });
+    }
+    if (request.tool === "tool_inspect") {
+      const definition = deferredToolCatalog(options.toolCatalog).find((item) => item.name === request.toolName);
+      if (!definition) {
+        return resultRecord(request, { status: "failed", code: "tool_not_available", error: `${request.toolName || "Requested tool"} is not available to this seat.` });
+      }
+      return resultRecord(request, { status: "completed", result: { ok: true, tool: definition } });
+    }
     if (request.tool === "record_task_contract") {
       if (typeof options.recordTaskContractTool !== "function") {
         return resultRecord(request, { status: "failed", code: "task_contract_controller_unavailable", error: "No active execution controller can record the task contract." });
@@ -1166,113 +1213,155 @@ function delegatedPathAllowed(value, allowedPaths = []) {
 }
 
 function normalizeToolRequest(item, index) {
-  const tool = String(item.tool || item.name || item.type || "").trim().toLowerCase().replace(/-/g, "_");
+  const nestedArguments = objectField(item.arguments || item.toolArguments || item.tool_arguments || item.input);
+  // Some model adapters serialize the actual request under `arguments` (or
+  // `input`) while leaving only the tool name at the top level. Promote those
+  // fields before schema/permission validation; explicit top-level fields win.
+  const source = nestedArguments ? { ...nestedArguments, ...item } : item;
+  const tool = normalizeToolName(source.tool || source.name || source.type);
   return {
-    id: String(item.id || makeId("tool")).trim(),
+    id: String(source.id || makeId("tool")).trim(),
     tool,
     nativeToolCall: hasNativeModelSource(item),
-    query: stringField(item.query),
-    url: stringField(item.url),
-    path: stringField(item.path),
-    destination: stringField(item.destination || item.destinationPath || item.outputPath || item.dest),
-    command: stringField(item.command || item.cmd || item.shellCommand || item.shell_command),
-    code: contentField(item.code ?? item.content ?? item.source),
-    language: stringField(item.language || item.lang),
-    packageName: stringField(item.packageName || item.package || item.package_name || item.name),
-    manager: stringField(item.manager || item.packageManager || item.package_manager || item.ecosystem),
-    toolName: stringField(item.toolName || item.tool_name || item.name || item.query),
-    commandName: stringField(item.commandName || item.command_name || item.executable),
-    packageId: stringField(item.packageId || item.package_id),
-    installCommand: stringField(item.installCommand || item.install_command),
-    downloadUrl: stringField(item.downloadUrl || item.download_url),
-    discoverySourceUrl: stringField(item.discoverySourceUrl || item.discovery_source_url || item.sourceUrl || item.source_url),
-    discoveryQuery: stringField(item.discoveryQuery || item.discovery_query),
-    sha256: stringField(item.sha256 || item.expectedSha256 || item.expected_sha256 || item.checksum),
-    maxDownloadBytes: normalizeOptionalNumber(item.maxDownloadBytes || item.max_download_bytes),
-    executablePath: stringField(item.executablePath || item.executable_path),
-    verifyCommand: stringField(item.verifyCommand || item.verify_command),
-    fileName: stringField(item.fileName || item.file_name),
-    runner: stringField(item.runner || item.framework || item.testRunner || item.test_runner),
-    cwd: stringField(item.cwd || item.workingDirectory || item.working_directory),
-    shell: stringField(item.shell),
-    pattern: stringField(item.pattern),
-    root: stringField(item.root),
-    sessionId: stringField(item.sessionId || item.session_id),
-    eventId: stringField(item.eventId || item.event_id),
-    contextSessionId: stringField(item.contextSessionId || item.context_session_id),
-    eventType: stringField(item.eventType || item.event_type || item.typeFilter || item.type_filter),
-    actorId: stringField(item.actorId || item.actor_id || item.actor),
-    taskId: stringField(item.taskId || item.task_id || item.task),
-    file: stringField(item.file || item.filePath || item.file_path),
-    commit: stringField(item.commit || item.commitHash || item.commit_hash),
-    toolFilter: stringField(item.toolFilter || item.tool_filter),
-    statusFilter: stringField(item.statusFilter || item.status_filter),
-    fromTime: stringField(item.fromTime || item.from_time || item.from),
-    toTime: stringField(item.toTime || item.to_time || item.to),
-    method: stringField(item.method),
-    action: stringField(item.action || item.operation),
-    oldText: contentField(item.oldText ?? item.old_text ?? item.before),
-    newText: typeof (item.newText ?? item.new_text ?? item.after) === "string" ? (item.newText ?? item.new_text ?? item.after) : "",
-    replaceAll: Boolean(item.replaceAll || item.replace_all),
-    processId: stringField(item.processId || item.process_id || item.backgroundProcessId || item.background_process_id),
-    stream: stringField(item.stream),
-    offset: normalizeOptionalNumber(item.offset),
-    columns: normalizeOptionalNumber(item.columns ?? item.cols),
-    rows: normalizeOptionalNumber(item.rows),
-    branch: stringField(item.branch),
-    remote: stringField(item.remote),
-    message: stringField(item.message || item.commitMessage || item.commit_message),
-    paths: arrayOfStrings(item.paths || item.files),
-    selector: stringField(item.selector),
-    inputText: inputField(item.inputText ?? item.input_text ?? item.text ?? item.value),
-    expression: stringField(item.expression || item.script || item.js),
-    steps: arrayOfObjects(item.steps),
-    viewport: objectField(item.viewport),
-    waitMs: normalizeOptionalNumber(item.waitMs || item.wait_ms),
-    databasePath: stringField(item.databasePath || item.database_path || item.dbPath || item.db_path),
-    sql: stringField(item.sql),
-    params: arrayOfPrimitive(item.params),
-    serverId: stringField(item.serverId || item.server_id || item.mcpServerId || item.mcp_server_id),
-    catalogId: stringField(item.catalogId || item.catalog_id),
-    packageSpec: stringField(item.packageSpec || item.package_spec || item.packageName || item.package_name),
-    binName: stringField(item.binName || item.bin_name),
-    mcpArgs: arrayOfStrings(item.args || item.mcpArgs || item.mcp_args),
-    mcpToolName: stringField(item.mcpToolName || item.mcp_tool_name || item.mcpTool || item.mcp_tool || item.toolName || item.tool_name),
-    toolArguments: objectField(item.arguments || item.toolArguments || item.tool_arguments || item.input),
-    resourceUri: stringField(item.uri || item.resourceUri || item.resource_uri),
-    promptName: stringField(item.promptName || item.prompt_name || item.prompt || item.name),
-    promptArguments: objectField(item.promptArguments || item.prompt_arguments || item.arguments || item.input),
-    skillId: stringField(item.skillId || item.skill_id || item.catalogId || item.catalog_id),
-    skillUrl: stringField(item.skillUrl || item.skill_url || item.url),
-    skillMarkdown: stringField(item.skillMarkdown || item.skill_markdown || item.markdown),
-    delegationType: stringField(item.delegationType || item.delegation_type || item.type),
-    assigneeId: stringField(item.assigneeId || item.assignee_id),
-    delegationTask: stringField(item.delegationTask || item.delegation_task || item.task),
-    expectedEvidence: arrayOfStrings(item.expectedEvidence || item.expected_evidence),
-    allowedTools: arrayOfStrings(item.allowedTools || item.allowed_tools),
-    allowWorkspaceMutation: Boolean(item.allowWorkspaceMutation || item.allow_workspace_mutation),
-    allowRuntimeMutation: Boolean(item.allowRuntimeMutation || item.allow_runtime_mutation),
-    allowedPaths: arrayOfStrings(item.allowedPaths || item.allowed_paths),
-    taskContract: objectField(item.taskContract || item.task_contract),
-    mode: stringField(item.mode),
-    maxRows: normalizeOptionalNumber(item.maxRows || item.max_rows),
-    headers: objectField(item.headers),
-    body: item.body,
-    json: item.json,
-    archiveRound: item.round === undefined ? undefined : Number(item.round),
-    overwrite: Boolean(item.overwrite),
-    background: Boolean(item.background),
-    interactive: Boolean(item.interactive),
-    force: Boolean(item.force),
-    screenshot: Boolean(item.screenshot),
-    create: Boolean(item.create),
-    reason: stringField(item.reason),
-    count: normalizeCount(item.count, tool),
-    maxBytes: normalizeMaxBytes(item.maxBytes || item.max_bytes),
-    timeoutMs: normalizeTimeoutMs(item.timeoutMs || item.timeout_ms),
-    maxOutputBytes: normalizeMaxBytes(item.maxOutputBytes || item.max_output_bytes),
+    query: stringField(source.query),
+    url: stringField(source.url),
+    path: stringField(source.path),
+    destination: stringField(source.destination || source.destinationPath || source.outputPath || source.dest),
+    command: stringField(source.command || source.cmd || source.shellCommand || source.shell_command),
+    code: contentField(source.code ?? source.content ?? source.source),
+    language: stringField(source.language || source.lang),
+    packageName: stringField(source.packageName || source.package || source.package_name || source.name),
+    manager: stringField(source.manager || source.packageManager || source.package_manager || source.ecosystem),
+    toolName: stringField(source.toolName || source.tool_name || source.name || source.query),
+    commandName: stringField(source.commandName || source.command_name || source.executable),
+    packageId: stringField(source.packageId || source.package_id),
+    installCommand: stringField(source.installCommand || source.install_command),
+    downloadUrl: stringField(source.downloadUrl || source.download_url),
+    discoverySourceUrl: stringField(source.discoverySourceUrl || source.discovery_source_url || source.sourceUrl || source.source_url),
+    discoveryQuery: stringField(source.discoveryQuery || source.discovery_query),
+    sha256: stringField(source.sha256 || source.expectedSha256 || source.expected_sha256 || source.checksum),
+    maxDownloadBytes: normalizeOptionalNumber(source.maxDownloadBytes || source.max_download_bytes),
+    executablePath: stringField(source.executablePath || source.executable_path),
+    verifyCommand: stringField(source.verifyCommand || source.verify_command),
+    fileName: stringField(source.fileName || source.file_name),
+    runner: stringField(source.runner || source.framework || source.testRunner || source.test_runner),
+    cwd: stringField(source.cwd || source.workingDirectory || source.working_directory),
+    shell: stringField(source.shell),
+    pattern: stringField(source.pattern),
+    root: stringField(source.root),
+    sessionId: stringField(source.sessionId || source.session_id),
+    eventId: stringField(source.eventId || source.event_id),
+    contextSessionId: stringField(source.contextSessionId || source.context_session_id),
+    eventType: stringField(source.eventType || source.event_type || source.typeFilter || source.type_filter),
+    actorId: stringField(source.actorId || source.actor_id || source.actor),
+    taskId: stringField(source.taskId || source.task_id || source.task),
+    file: stringField(source.file || source.filePath || source.file_path),
+    commit: stringField(source.commit || source.commitHash || source.commit_hash),
+    toolFilter: stringField(source.toolFilter || source.tool_filter),
+    statusFilter: stringField(source.statusFilter || source.status_filter),
+    fromTime: stringField(source.fromTime || source.from_time || source.from),
+    toTime: stringField(source.toTime || source.to_time || source.to),
+    method: stringField(source.method),
+    action: stringField(source.action || source.operation || source.op),
+    oldText: contentField(source.oldText ?? source.old_text ?? source.before),
+    newText: typeof (source.newText ?? source.new_text ?? source.after) === "string" ? (source.newText ?? source.new_text ?? source.after) : "",
+    replaceAll: Boolean(source.replaceAll || source.replace_all),
+    processId: stringField(source.processId || source.process_id || source.backgroundProcessId || source.background_process_id),
+    stream: stringField(source.stream),
+    offset: normalizeOptionalNumber(source.offset),
+    columns: normalizeOptionalNumber(source.columns ?? source.cols),
+    rows: normalizeOptionalNumber(source.rows),
+    branch: stringField(source.branch),
+    remote: stringField(source.remote),
+    message: stringField(source.message || source.commitMessage || source.commit_message),
+    paths: arrayOfStrings(source.paths || source.files),
+    selector: stringField(source.selector),
+    inputText: inputField(source.inputText ?? source.input_text ?? source.text ?? source.value),
+    expression: stringField(source.expression || source.script || source.js),
+    steps: arrayOfObjects(source.steps),
+    viewport: objectField(source.viewport),
+    waitMs: normalizeOptionalNumber(source.waitMs || source.wait_ms),
+    databasePath: stringField(source.databasePath || source.database_path || source.dbPath || source.db_path),
+    sql: stringField(source.sql),
+    params: arrayOfPrimitive(source.params),
+    serverId: stringField(source.serverId || source.server_id || source.mcpServerId || source.mcp_server_id),
+    catalogId: stringField(source.catalogId || source.catalog_id),
+    packageSpec: stringField(source.packageSpec || source.package_spec || source.packageName || source.package_name),
+    binName: stringField(source.binName || source.bin_name),
+    mcpArgs: arrayOfStrings(source.args || source.mcpArgs || source.mcp_args),
+    mcpToolName: stringField(source.mcpToolName || source.mcp_tool_name || source.mcpTool || source.mcp_tool || source.toolName || source.tool_name),
+    toolArguments: nestedArguments,
+    resourceUri: stringField(source.uri || source.resourceUri || source.resource_uri),
+    promptName: stringField(source.promptName || source.prompt_name || source.prompt || source.name),
+    promptArguments: objectField(source.promptArguments || source.prompt_arguments || source.arguments || source.input),
+    skillId: stringField(source.skillId || source.skill_id || source.catalogId || source.catalog_id),
+    skillUrl: stringField(source.skillUrl || source.skill_url || source.url),
+    skillMarkdown: stringField(source.skillMarkdown || source.skill_markdown || source.markdown),
+    delegationType: stringField(source.delegationType || source.delegation_type || source.type),
+    assigneeId: stringField(source.assigneeId || source.assignee_id),
+    delegationTask: stringField(source.delegationTask || source.delegation_task || source.task),
+    expectedEvidence: arrayOfStrings(source.expectedEvidence || source.expected_evidence),
+    allowedTools: arrayOfStrings(source.allowedTools || source.allowed_tools),
+    allowWorkspaceMutation: Boolean(source.allowWorkspaceMutation || source.allow_workspace_mutation),
+    allowRuntimeMutation: Boolean(source.allowRuntimeMutation || source.allow_runtime_mutation),
+    allowedPaths: arrayOfStrings(source.allowedPaths || source.allowed_paths),
+    taskContract: objectField(source.taskContract || source.task_contract),
+    mode: stringField(source.mode),
+    maxRows: normalizeOptionalNumber(source.maxRows || source.max_rows),
+    headers: objectField(source.headers),
+    body: source.body,
+    json: source.json,
+    archiveRound: source.round === undefined ? undefined : Number(source.round),
+    overwrite: Boolean(source.overwrite),
+    background: Boolean(source.background),
+    interactive: Boolean(source.interactive),
+    force: Boolean(source.force),
+    screenshot: Boolean(source.screenshot),
+    create: Boolean(source.create),
+    reason: stringField(source.reason),
+    count: normalizeCount(source.count, tool),
+    maxBytes: normalizeMaxBytes(source.maxBytes || source.max_bytes),
+    timeoutMs: normalizeTimeoutMs(source.timeoutMs || source.timeout_ms),
+    maxOutputBytes: normalizeMaxBytes(source.maxOutputBytes || source.max_output_bytes),
     sourceIndex: index
   };
+}
+
+function normalizeToolName(value) {
+  const raw = String(value || "").trim().toLowerCase().replace(/-/g, "_");
+  return TOOL_ALIASES.get(raw) || raw;
+}
+
+function unwrapDeferredToolInvocation(wrapper, toolCatalog) {
+  const targetName = String(wrapper.toolName || "").trim().toLowerCase().replace(/-/g, "_");
+  const available = deferredToolCatalog(toolCatalog).some((definition) => definition.name === targetName);
+  if (!available || DEFERRED_TOOL_META_TOOLS.has(targetName)) {
+    return {
+      ...wrapper,
+      tool: targetName || "tool_invoke",
+      deferredToolUnavailable: true
+    };
+  }
+  const normalized = normalizeToolRequest({
+    ...wrapper.toolArguments,
+    id: wrapper.id,
+    tool: targetName,
+    reason: wrapper.toolArguments?.reason || wrapper.reason
+  }, wrapper.sourceIndex);
+  normalized.nativeToolCall = wrapper.nativeToolCall;
+  return normalized;
+}
+
+function deferredToolCatalog(value) {
+  return (Array.isArray(value) ? value : [])
+    .filter((item) => item && typeof item === "object" && !DEFERRED_TOOL_META_TOOLS.has(String(item.name || "")));
+}
+
+function deferredToolSearchScore(definition, terms) {
+  if (!terms.length) return 0;
+  const name = String(definition.name || "").toLowerCase();
+  const description = String(definition.description || "").toLowerCase();
+  return terms.reduce((score, term) => score + (name.includes(term) ? 4 : 0) + (description.includes(term) ? 1 : 0), 0);
 }
 
 function reject(request, code, reason) {

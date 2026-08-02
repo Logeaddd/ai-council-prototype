@@ -174,6 +174,20 @@ test("endlessly novel inspection eventually requires action without imposing a t
   assert.deepEqual(state, { count: 9, recoveryRequired: true });
 });
 
+test("repeated successful run_code with identical non-material output triggers recovery", () => {
+  const seenTargets = new Set();
+  let state = { count: 0, recoveryRequired: false };
+  for (let index = 0; index < 4; index += 1) {
+    state = updateStagnantToolLoopCount({
+      requests: [{ tool: "run_code", language: "javascript", code: "console.log('same evidence')" }],
+      results: [{ tool: "run_code", status: "completed", result: { ok: true, stdout: "same evidence\n", workspaceChanges: { totalChanges: 0 } } }],
+      current: state.count,
+      seenTargets
+    });
+  }
+  assert.deepEqual(state, { count: 10, recoveryRequired: true });
+});
+
 test("failed capability calls cannot erase search-only stagnation", () => {
   let state = { count: 0, recoveryRequired: false };
   const seenTargets = new Set();

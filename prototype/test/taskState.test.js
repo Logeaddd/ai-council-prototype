@@ -81,6 +81,7 @@ test("task state ledger persists a resumable execution checkpoint before finaliz
       taskQuestion: "Build the project",
       executorId: "builder",
       executorName: "Builder",
+      finalizerId: "judge",
       ownership: {
         ownerId: "builder",
         ownerName: "Builder",
@@ -102,6 +103,12 @@ test("task state ledger persists a resumable execution checkpoint before finaliz
       nextAction: "Fix the compile error and rerun tests.",
       checkpointVersion: 4,
       reviewedCheckpointVersion: 2,
+      repair: {
+        requiredMaterialChange: true,
+        checkpointVersion: 4,
+        reason: "The reviewer found that status is still draft.",
+        unproductiveVerificationAttempts: 1
+      },
       artifactStatus: "needs_revision",
       lastAction: "verification_failed:build",
       lastError: "cannot find symbol"
@@ -111,12 +118,15 @@ test("task state ledger persists a resumable execution checkpoint before finaliz
   const saved = readTaskState(tmp);
   assert.equal(saved.executionCheckpoint.sourceSessionId, "session_running_1");
   assert.equal(saved.executionCheckpoint.executorId, "builder");
+  assert.equal(saved.executionCheckpoint.finalizerId, "judge");
   assert.equal(saved.executionCheckpoint.phase, "repair");
   assert.equal(saved.executionCheckpoint.ownership.version, 2);
   assert.equal(saved.executionCheckpoint.ownership.delegations[0].assigneeId, "reviewer");
   assert.equal(saved.executionCheckpoint.taskContract.mode, "delivery");
   assert.deepEqual(saved.executionCheckpoint.taskContract.deliverables, ["dist/project.zip"]);
   assert.equal(saved.executionCheckpoint.intakeAttempts, 1);
+  assert.equal(saved.executionCheckpoint.repair.requiredMaterialChange, true);
+  assert.equal(saved.executionCheckpoint.repair.checkpointVersion, 4);
   assert.match(saved.executionCheckpoint.lastError, /cannot find symbol/);
   assert.match(formatTaskStateForPrompt(saved), /executionCheckpoint/);
 
@@ -126,8 +136,11 @@ test("task state ledger persists a resumable execution checkpoint before finaliz
     previousState: saved.executionCheckpoint
   });
   assert.equal(resumed.taskContract.objective, "Build the requested project.");
+  assert.equal(resumed.finalizerId, "judge");
   assert.equal(resumed.ownership.transfers[0].fromId, "old-builder");
   assert.equal(resumed.ownership.delegations[0].assigneeId, "reviewer");
+  assert.equal(resumed.repair.requiredMaterialChange, true);
+  assert.equal(resumed.repair.unproductiveVerificationAttempts, 1);
 });
 
 test("fallback task-state recovery retains pending bounded work and schedules only its assignee", () => {

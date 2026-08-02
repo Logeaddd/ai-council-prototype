@@ -21,6 +21,7 @@ import {
   checkProviderHealth,
   createWorkspaceGroup,
   deleteWorkspaceGroup,
+  deleteWorkspaceMember,
   discoverModels,
   executeFileOperation,
   fetchAppSettings,
@@ -574,6 +575,31 @@ export function CouncilApp() {
     }
   }
 
+  async function handleDeleteMember(seatId: string) {
+    if (!group.path || !workspaceGroup) return
+    if (running) {
+      setStatusText("请先停止当前任务，再删除成员。")
+      return
+    }
+    const member = members.find((item) => item.id === seatId)
+    if (!member || !window.confirm(`确定删除成员“${member.name}”吗？私有目录和历史资料会保留。`)) return
+    try {
+      const result = await deleteWorkspaceMember({ groupPath: group.path, seatId })
+      setWorkspaceGroup(result.group)
+      setMutedSeatIds((current) => current.filter((id) => id !== seatId))
+      setConfigMemberId((current) => (current === seatId ? null : current))
+      const seatCount = (result.group.seats || result.group.agents || []).length
+      setGroupList((current) => current.map((item) => (
+        item.id === group.id ? { ...item, memberCount: seatCount } : item
+      )))
+      addSystemItem(`已删除成员：${member.name}。私有目录和历史资料已保留。`)
+      setStatusText("成员已删除。")
+    } catch (error) {
+      addSystemItem(`删除成员失败：${errorMessage(error)}`)
+      setStatusText("删除成员失败。")
+    }
+  }
+
   async function handleDiscoverModels(values: {
     providerId: string
     baseUrl: string
@@ -743,6 +769,26 @@ export function CouncilApp() {
       ])
       return
     }
+    if (event.type === "execution_state" && event.execution) {
+      const execution = event.execution
+      const ownerIntegration = execution.participation?.ownerIntegrationStatus || ""
+      setAgentStates((current) => {
+        const next = { ...current }
+        for (const participant of execution.participation?.participants || []) {
+          if (!participant.agentId) continue
+          if (participant.status === "scheduled") next[participant.agentId] = "scheduled"
+          else if (participant.status === "unavailable") next[participant.agentId] = "unavailable"
+          else if (participant.status === "completed" && ["pending", "scheduled"].includes(ownerIntegration)) next[participant.agentId] = "handoff_ready"
+          else if (participant.status === "completed") next[participant.agentId] = "completed"
+          else next[participant.agentId] = "waiting"
+        }
+        if (execution.executorId && ["pending", "scheduled"].includes(ownerIntegration)) {
+          next[execution.executorId] = ownerIntegration === "scheduled" ? "integrating" : "waiting"
+        }
+        return next
+      })
+      return
+    }
     if (event.type === "final_decision") {
       setDecision(finalDecisionToUiDecision(event.finalDecision))
       setBlockers(finalDecisionToBlockers(event.finalDecision))
@@ -759,6 +805,14 @@ export function CouncilApp() {
     }
     if (event.type === "task_run" && event.taskRun?.id) {
       const state = event.taskRun.state || "unknown"
+      if (["blocked", "failed", "guard_stopped", "incomplete"].includes(state)) {
+        setAgentStates((current) => Object.fromEntries(
+          Object.entries(current).map(([id, memberState]) => [
+            id,
+            memberState === "completed" ? "blocked" : memberState,
+          ]),
+        ) as Record<string, AgentState>)
+      }
       const phase = event.taskRun.execution?.phase ? ` · ${event.taskRun.execution.phase}` : ""
       const reason = event.taskRun.blockReason ? ` · ${event.taskRun.blockReason}` : ""
       addSystemItem(`任务 ${state}${phase}${reason}`)
@@ -942,6 +996,7 @@ export function CouncilApp() {
             mode={mode}
             onAddMember={handleAddMember}
             onConfigureMember={setConfigMemberId}
+            onDeleteMember={handleDeleteMember}
             onToggleMuteMember={toggleMuteMember}
             onReorderMembers={handleReorderMembers}
             onApproveFileOp={(id) => handleFileOperation("approve", id)}

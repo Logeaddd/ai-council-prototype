@@ -20,6 +20,11 @@ const EXECUTION_EVIDENCE_RESERVE_TOKENS = 160;
 const UNKNOWN_LIMIT_EVIDENCE_TOKENS = 2400;
 
 export function buildMemberContext(agent, session, options = {}) {
+  const projection = {
+    includeStableContext: options.includeStableContext !== false,
+    includeRetainedExecutionEvidence: options.includeRetainedExecutionEvidence !== false,
+    enableContextInvalidationRefs: options.enableContextInvalidationRefs !== false
+  };
   const limits = resolveEffectiveLimits(agent, options.groupSettings || {}, options.providerUsageCalibration);
   const originalQuestion = session.question || options.question || "";
   const latestBossInstruction = options.latestBossInstruction || "";
@@ -36,8 +41,13 @@ export function buildMemberContext(agent, session, options = {}) {
   const latestArtifacts = selectLatestArtifacts(selectVisibleArtifacts(session.artifacts || [], agent, transcriptVisibility));
   const unresolvedObjections = selectVisibleObjections(session.unresolvedObjections || {}, agent, transcriptVisibility);
   const visibleFileOperationExecutionResults = selectVisibleFileOperationResults(session.fileOperationExecutionResults || [], agent, transcriptVisibility);
-  const visibleToolExecutionResults = selectVisibleToolResults(session.toolExecutionResults || [], agent, transcriptVisibility);
-  const visibleRejectedToolRequests = selectVisibleToolResults(session.rejectedToolRequests || [], agent, transcriptVisibility);
+  const retainedToolResults = (session.toolExecutionResults || []).filter((item) => (
+    projection.includeRetainedExecutionEvidence || isProcessLifecycleEvidence(item)
+  ));
+  const visibleToolExecutionResults = selectVisibleToolResults(retainedToolResults, agent, transcriptVisibility);
+  const visibleRejectedToolRequests = projection.includeRetainedExecutionEvidence
+    ? selectVisibleToolResults(session.rejectedToolRequests || [], agent, transcriptVisibility)
+    : [];
   const currentTurnGroups = {
     toolExecutionResults: selectVisibleToolResults(options.currentTurnToolResults || [], agent, transcriptVisibility),
     rejectedToolRequests: selectVisibleToolResults(options.currentTurnRejectedToolRequests || [], agent, transcriptVisibility)
@@ -101,6 +111,8 @@ export function buildMemberContext(agent, session, options = {}) {
     configuredMaxTokens: options.activeWorkingMemoryTokens ?? options.groupSettings?.activeWorkingMemoryTokens
   });
   summaries.activeWorkingMemory = activeWorkingMemory;
+  // Stable fields are already emitted by the system prompt in lean mode, but
+  // they still consume provider input capacity and remain part of budgeting.
   const stableMessages = contextMessagesFromStable(stable);
   const currentTurnEvidenceBudget = resolveCurrentTurnEvidenceBudget({
     limits,
@@ -126,7 +138,7 @@ export function buildMemberContext(agent, session, options = {}) {
   const currentInstructionSource = contextSource("session_question", String(session?.id || "active-session"), {
     sessionId: String(session?.id || "active-session")
   });
-  const provisionalInvalidationSourceRefs = buildInvalidationSourceRefs({
+  const provisionalInvalidationSourceRefs = projection.enableContextInvalidationRefs ? buildInvalidationSourceRefs({
     session,
     recentTranscript: requestedRecentTranscript,
     retrievedContext: summaries.retrievedContext.items,
@@ -134,7 +146,7 @@ export function buildMemberContext(agent, session, options = {}) {
     continuationSources: continuationSelection.sources,
     publicEvents: summaries.publicEventHotCache.events,
     activeWorkingMemorySources: activeWorkingMemory.sources
-  });
+  }) : [];
   const core = {
     ...coreBase,
     fileOperationExecutionResults: executionEvidence.fileOperationExecutionResults,
@@ -157,7 +169,7 @@ export function buildMemberContext(agent, session, options = {}) {
   // Source pointers must refer only to content that is actually retained in
   // this prompt. The first pass budgets conservatively; this pass removes
   // pointers for transcript entries that did not fit before final accounting.
-  core.invalidationSourceRefs = buildInvalidationSourceRefs({
+  core.invalidationSourceRefs = projection.enableContextInvalidationRefs ? buildInvalidationSourceRefs({
     session,
     recentTranscript,
     retrievedContext: summaries.retrievedContext.items,
@@ -165,7 +177,7 @@ export function buildMemberContext(agent, session, options = {}) {
     continuationSources: continuationSelection.sources,
     publicEvents: summaries.publicEventHotCache.events,
     activeWorkingMemorySources: activeWorkingMemory.sources
-  });
+  }) : [];
   coreMessages = contextMessagesFromCore(core);
   const recentMessages = recentTranscript.map((message) => ({
     role: "user",
@@ -209,6 +221,7 @@ export function buildMemberContext(agent, session, options = {}) {
     coreOverflow: hasCoreOverflow(nonCompressibleCoreTokens, limits),
     priorityPolicy,
     providerCacheBreakpoint: "after_original_question",
+    projection,
     currentInstructionSource: core.currentInstructionSource,
     invalidationSourceRefs: core.invalidationSourceRefs
   };
@@ -236,7 +249,9 @@ export function buildMemberContext(agent, session, options = {}) {
 export function materializeContextReceipt(context, details = {}) {
   const draft = context?.contextReceipt || {};
   const inputMessages = Array.isArray(details.inputMessages) ? details.inputMessages : [];
+  const nativeTools = Array.isArray(details.nativeTools) ? details.nativeTools : [];
   const inputChars = inputMessages.reduce((total, message) => total + contextMessageChars(message), 0);
+  const nativeToolSchemaChars = nativeTools.length ? JSON.stringify(nativeTools).length : 0;
   return {
     ...structuredClone(draft),
     id: `${String(details.sessionId || "session")}::context::${Number(details.modelCallIndex || 0)}`,
@@ -249,6 +264,9 @@ export function materializeContextReceipt(context, details = {}) {
       agentId: String(details.agentId || context?.agentId || ""),
       inputMessageCount: inputMessages.length,
       inputChars,
+      nativeToolCount: nativeTools.length,
+      nativeToolSchemaChars,
+      totalRequestChars: inputChars + nativeToolSchemaChars,
       estimatedInputTokens: estimateMessagesTokens(inputMessages, context?.limits || {}),
       inputEstimateMultiplier: Number(context?.limits?.inputEstimateMultiplier || 1)
     }
@@ -314,6 +332,14 @@ function buildContextReceiptDraft({ agent, session, options, context, visibleMes
     policy: {
       conflicts: context.priorityPolicy.conflicts,
       invalidatedSources,
+      projection: {
+        ...context.projection,
+        omitted: [
+          ...(context.projection?.includeStableContext === false ? ["stable_context_already_in_system_prompt"] : []),
+          ...(context.projection?.includeRetainedExecutionEvidence === false ? ["retained_execution_evidence_available_in_session_ledger"] : []),
+          ...(context.projection?.enableContextInvalidationRefs === false ? ["context_invalidation_refs_not_needed_for_this_call"] : [])
+        ]
+      },
       priorityDecisions: [
         ...context.priorityPolicy.priorityDecisions,
         {
@@ -804,9 +830,10 @@ function contextMessageChars(message = {}) {
   return JSON.stringify(message.content || "").length;
 }
 
-export function buildContextPromptSections(context) {
+export function buildContextPromptSections(context, options = {}) {
+  const projection = { ...(context.projection || {}), ...options };
   return [
-    ["Stable context", [
+    ["Stable context", projection.includeStableContext === false ? [] : [
       `Role: ${context.stable.roleIdentity}`,
       `Current assignment: ${context.stable.roleAssignment}`,
       `Member: ${context.stable.memberName}`,
@@ -1423,7 +1450,7 @@ function compactEvidenceValue(value, maxStringChars, depth = 0) {
     };
   }
   if (!value || typeof value !== "object") return { value, shortened: false };
-  if (depth > 5) return { value: "[truncated nested object]", shortened: true };
+  if (depth > 8) return { value: "[truncated nested object]", shortened: true };
   if (Array.isArray(value)) {
     const limit = 20;
     let shortened = value.length > limit;
@@ -1773,6 +1800,12 @@ function roleAssignmentLine(agent) {
 
 function isStaleReviewerRoleText(value) {
   return /reviewer|red\s*team|审查|复查|监督员/i.test(String(value || ""));
+}
+
+function isProcessLifecycleEvidence(item = {}) {
+  const result = item.result || {};
+  return item.tool === "process_control"
+    || Boolean(result.processId || result.process?.processId || result.background || item.background);
 }
 
 function contextMessagesFromCore(core) {

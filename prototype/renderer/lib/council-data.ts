@@ -6,10 +6,15 @@ export type VisualStyle = "workbench" | "roundtable"
 
 export type AgentState =
   | "idle"
+  | "scheduled"
+  | "waiting"
+  | "handoff_ready"
+  | "integrating"
   | "thinking"
   | "speaking"
   | "skipped"
   | "unavailable"
+  | "blocked"
   | "completed"
 
 export type Permission = "text" | "tool" | "full"
@@ -149,8 +154,12 @@ export const ROLE_LABEL: Record<Role, string> = {
   summarizer: "总结者",
 }
 
-export const STATE_LABEL: Record<AgentState, string> = {
+export const STATE_LABEL: Record<string, string> = {
   idle: "空闲",
+  scheduled: "已调度",
+  waiting: "等待协作",
+  handoff_ready: "贡献待整合",
+  integrating: "整合中",
   thinking: "思考中",
   speaking: "发言中",
   skipped: "已跳过",

@@ -3,7 +3,22 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { listGroupSessions, listSessionHistoryCatalogue, loadLiveSessionContext, loadSessionContextArchiveItem, readGroupSession, readSessionContextArchive, searchLiveSessionContext, searchSessionContextArchive, writeContextArchive, writeGroupSession } from "../src/storage.js";
+import { appendMemoryCandidates, listGroupSessions, listSessionHistoryCatalogue, loadLiveSessionContext, loadSessionContextArchiveItem, readGroupSession, readSessionContextArchive, searchLiveSessionContext, searchSessionContextArchive, writeContextArchive, writeGroupSession } from "../src/storage.js";
+
+test("memory candidate rejection writes a reason-only audit without retaining rejected content", () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-memory-audit-"));
+  const rejectedText = "This session decision should not become durable memory.";
+  const saved = appendMemoryCandidates(
+    { memory_candidates: [rejectedText, "User prefers concise status updates."] },
+    { id: "session-memory-audit" },
+    tmp
+  );
+
+  assert.equal(saved.length, 1);
+  const audit = fs.readFileSync(path.join(tmp, "memory", "rejected.jsonl"), "utf8");
+  assert.match(audit, /missing_durable_prefix/);
+  assert.doesNotMatch(audit, new RegExp(rejectedText.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+});
 
 test("group session history lists real saved sessions and reads details", () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-history-"));

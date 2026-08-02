@@ -197,6 +197,7 @@ async function runRealUserCampaignCommand(args) {
   const run = await runSeededRealUserCampaign({
     group,
     seed: getArg(args, "--seed"),
+    taskId: getArg(args, "--task-id"),
     outputDir: getArg(args, "--output", path.join(baseDir, "eval", "real-user-campaign")),
     maxCostUsd,
     maxModelCalls
@@ -429,7 +430,7 @@ function printHelp() {
   node src/cli.js eval-compare --baseline ./eval/reports/baseline --candidate ./eval/reports/candidate --mode council-current
   node src/cli.js benchmark-real --group ./config/group.real.example.json --task ./eval/real-task.json --workspace ./workspace-template --output ./eval/real-provider --max-cost-usd 1.00 --max-model-calls 24
   node src/cli.js real-user-baseline --group ./config/group.real.example.json --output ./eval/real-user --seed 20260714
-  node src/cli.js real-user-campaign --group ./config/group.real.example.json --output ./eval/real-user-campaign --seed 7 --max-cost-usd 80 --max-model-calls 320
+  node src/cli.js real-user-campaign --group ./config/group.real.example.json --output ./eval/real-user-campaign --seed 7 [--task-id collaborative-brief] --max-cost-usd 80 --max-model-calls 320
   node src/cli.js context-pressure --output ./eval/context-pressure --seed 20260714
   node src/cli.js harness-check --report ./harness/reports/latest.json
   node src/cli.js harness-check --skip-tests --report ./harness/reports/latest.json

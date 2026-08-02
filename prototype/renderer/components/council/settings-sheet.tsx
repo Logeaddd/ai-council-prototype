@@ -65,6 +65,17 @@ type SettingsTab =
   | "data"
   | "security"
 
+type FactsScope = "providers" | "capabilities" | "mcp" | "skills" | "all"
+
+const FACTS_SCOPE_BY_TAB: Partial<Record<SettingsTab, Exclude<FactsScope, "all">>> = {
+  models: "providers",
+  mcp: "mcp",
+  plugins: "mcp",
+  skills: "skills",
+  memory: "capabilities",
+  security: "capabilities",
+}
+
 const SETTINGS_TABS: Array<{
   id: SettingsTab
   label: string
@@ -153,55 +164,62 @@ export function SettingsSheet({
   const [skillSearchResults, setSkillSearchResults] = useState<SkillSearchResult[]>([])
   const [searchingSkills, setSearchingSkills] = useState(false)
   const [busySkillId, setBusySkillId] = useState("")
-  const refreshingFacts = useRef(false)
+  const refreshingFacts = useRef(new Set<FactsScope>())
 
-  const reloadFacts = useCallback(async (options: { silent?: boolean } = {}) => {
-    if (refreshingFacts.current) return
-    refreshingFacts.current = true
+  const reloadFacts = useCallback(async (options: { silent?: boolean; scope?: FactsScope } = {}) => {
+    const scope = options.scope || "all"
+    if (refreshingFacts.current.has(scope)) return
+    refreshingFacts.current.add(scope)
     await Promise.resolve()
     if (!options.silent) {
       setLoadingFacts(true)
       setSettingsError("")
     }
     try {
-      const [providerResult, capabilityResult, catalogResult, serverResult, skillCatalogResult, skillsResult] = await Promise.all([
-        fetchProviderPresets(),
-        fetchCapabilities(groupPath),
-        fetchMcpCatalog(),
-        fetchMcpServers(),
-        fetchSkillCatalog(),
-        groupPath ? fetchSkills(groupPath) : Promise.resolve({ ok: true, skills: [] }),
-      ])
-      setProviders(providerResult.providers || [])
-      onProvidersChange?.(providerResult.providers || [])
-      setCapabilities(capabilityResult.capabilities || [])
-      setCapabilityAccess(capabilityResult.toolAccess || accessFromCapabilities(capabilityResult.capabilities || []))
-      setMcpCatalog(catalogResult.catalog || [])
-      setMcpServers(serverResult.servers || [])
-      setSkillCatalog(skillCatalogResult.catalog || [])
-      setSkills(skillsResult.skills || [])
+      const tasks: Array<Promise<void>> = []
+      if (scope === "all" || scope === "providers") {
+        tasks.push(fetchProviderPresets().then((result) => {
+          const nextProviders = result.providers || []
+          setProviders(nextProviders)
+          onProvidersChange?.(nextProviders)
+        }))
+      }
+      if (scope === "all" || scope === "capabilities") {
+        tasks.push(fetchCapabilities(groupPath).then((result) => {
+          const nextCapabilities = result.capabilities || []
+          setCapabilities(nextCapabilities)
+          setCapabilityAccess(result.toolAccess || accessFromCapabilities(nextCapabilities))
+        }))
+      }
+      if (scope === "all" || scope === "mcp") {
+        tasks.push(Promise.all([fetchMcpCatalog(), fetchMcpServers()]).then(([catalogResult, serverResult]) => {
+          setMcpCatalog(catalogResult.catalog || [])
+          setMcpServers(serverResult.servers || [])
+        }))
+      }
+      if (scope === "all" || scope === "skills") {
+        tasks.push(Promise.all([
+          fetchSkillCatalog(),
+          groupPath ? fetchSkills(groupPath) : Promise.resolve({ ok: true, skills: [] }),
+        ]).then(([skillCatalogResult, skillsResult]) => {
+          setSkillCatalog(skillCatalogResult.catalog || [])
+          setSkills(skillsResult.skills || [])
+        }))
+      }
+      await Promise.all(tasks)
     } catch (error) {
       if (!options.silent) setSettingsError(errorMessage(error))
     } finally {
-      refreshingFacts.current = false
+      refreshingFacts.current.delete(scope)
       if (!options.silent) setLoadingFacts(false)
     }
   }, [groupPath, onProvidersChange])
 
   useEffect(() => {
     if (!open) return
-    let cancelled = false
-    void Promise.resolve().then(() => {
-      if (!cancelled) return reloadFacts()
-    })
-    const intervalId = window.setInterval(() => {
-      if (!cancelled) void reloadFacts({ silent: true })
-    }, 4000)
-    return () => {
-      cancelled = true
-      window.clearInterval(intervalId)
-    }
-  }, [open, reloadFacts])
+    const scope = FACTS_SCOPE_BY_TAB[activeTab]
+    if (scope) void reloadFacts({ scope })
+  }, [activeTab, open, reloadFacts])
 
   async function save() {
     if (saving) return
@@ -234,7 +252,7 @@ export function SettingsSheet({
     try {
       const result = await installMcpCatalogItem(item.id)
       if (!result.ok) throw new Error(result.error || result.code || "加入失败")
-      await reloadFacts()
+      await reloadFacts({ scope: "mcp" })
     } catch (error) {
       setSettingsError(errorMessage(error))
     } finally {
@@ -271,7 +289,7 @@ export function SettingsSheet({
         name: item.name || packageName,
       })
       if (!result.ok) throw new Error(result.error || result.code || "加入失败")
-      await reloadFacts()
+      await reloadFacts({ scope: "mcp" })
     } catch (error) {
       setSettingsError(errorMessage(error))
     } finally {
@@ -289,7 +307,7 @@ export function SettingsSheet({
       if (!result.ok) throw new Error(result.error || result.code || "加入失败")
       setMcpSearchQuery("")
       setMcpSearchResults([])
-      await reloadFacts()
+      await reloadFacts({ scope: "mcp" })
     } catch (error) {
       setSettingsError(errorMessage(error))
     } finally {
@@ -305,7 +323,7 @@ export function SettingsSheet({
     try {
       const result = await uninstallMcpServer(id)
       if (!result.ok) throw new Error(result.error || result.code || "移除失败")
-      await reloadFacts()
+      await reloadFacts({ scope: "mcp" })
     } catch (error) {
       setSettingsError(errorMessage(error))
     } finally {
@@ -351,7 +369,7 @@ export function SettingsSheet({
       })
       if (!result.ok) throw new Error(result.error || result.code || "加入失败")
       setSkillSearchResults([])
-      await reloadFacts()
+      await reloadFacts({ scope: "skills" })
     } catch (error) {
       setSettingsError(errorMessage(error))
     } finally {
@@ -366,7 +384,7 @@ export function SettingsSheet({
     try {
       const result = await setSkillEnabled(groupPath, item.id, !item.enabled)
       if (!result.ok) throw new Error(result.error || result.code || "保存失败")
-      await reloadFacts()
+      await reloadFacts({ scope: "skills" })
     } catch (error) {
       setSettingsError(errorMessage(error))
     } finally {
@@ -381,7 +399,7 @@ export function SettingsSheet({
     try {
       const result = await removeSkill(groupPath, item.id)
       if (!result.ok) throw new Error(result.error || "移除失败")
-      await reloadFacts()
+      await reloadFacts({ scope: "skills" })
     } catch (error) {
       setSettingsError(errorMessage(error))
     } finally {
@@ -451,7 +469,7 @@ export function SettingsSheet({
             />
           ) : null}
 
-          {activeTab === "models" ? <ModelsPanel providers={providers} loading={loadingFacts} onChanged={() => reloadFacts()} /> : null}
+          {activeTab === "models" ? <ModelsPanel providers={providers} loading={loadingFacts} onChanged={() => reloadFacts({ scope: "providers" })} /> : null}
 
           {activeTab === "search" ? (
             <SearchPanel
@@ -481,7 +499,7 @@ export function SettingsSheet({
               searching={searchingMcp}
               onSearchQueryChange={setMcpSearchQuery}
               onSearch={searchMcp}
-              onRefresh={reloadFacts}
+              onRefresh={() => reloadFacts({ scope: "mcp" })}
               onInstall={installMcp}
               onInstallSearchResult={installMcpSearchResult}
               onInstallCustom={installCustomMcpPackage}

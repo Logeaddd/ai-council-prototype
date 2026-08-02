@@ -1145,7 +1145,8 @@ test("unknown provider capacity remains explicit and retains bounded immediate t
   const receipt = materializeContextReceipt(context, {
     sessionId: "session_unknown_provider_limit",
     modelCallIndex: 1,
-    inputMessages: buildContextPromptSections(context).map((section) => ({ role: "system", content: section.content }))
+    inputMessages: buildContextPromptSections(context).map((section) => ({ role: "system", content: section.content })),
+    nativeTools: [{ name: "read_file", description: "Read a file", inputSchema: { type: "object" } }]
   });
 
   assert.equal(context.limits.inputLimitKnown, false);
@@ -1156,4 +1157,34 @@ test("unknown provider capacity remains explicit and retains bounded immediate t
   assert.equal(receipt.budget.effectiveInputLimit, null);
   assert.equal(receipt.budget.inputLimitKnown, false);
   assert.equal(receipt.call.inputEstimateMultiplier, 1);
+  assert.equal(receipt.call.nativeToolCount, 1);
+  assert.equal(receipt.call.totalRequestChars, receipt.call.inputChars + receipt.call.nativeToolSchemaChars);
+});
+
+test("lean call projection omits duplicated stable and retained evidence but keeps immediate results", () => {
+  const context = buildMemberContext(agent, {
+    id: "session_lean_projection",
+    question: "Continue from the newest result.",
+    unresolvedObjections: {},
+    artifacts: [],
+    messages: [],
+    toolExecutionResults: [{ id: "old-tool", tool: "read_file", status: "completed", result: { content: "OLD_TOOL_EVIDENCE" } }]
+  }, {
+    includeStableContext: false,
+    includeRetainedExecutionEvidence: false,
+    enableContextInvalidationRefs: false,
+    currentTurnToolResults: [{ id: "fresh-tool", tool: "read_file", status: "completed", result: { content: "FRESH_TOOL_EVIDENCE" } }]
+  });
+  const sections = buildContextPromptSections(context);
+  const prompt = sections.map((section) => section.content).join("\n");
+
+  assert.equal(sections.some((section) => section.title === "Stable context"), false);
+  assert.equal(sections.some((section) => section.title === "Context source references"), false);
+  assert.doesNotMatch(prompt, /OLD_TOOL_EVIDENCE/);
+  assert.match(prompt, /FRESH_TOOL_EVIDENCE/);
+  assert.deepEqual(context.contextReceipt.policy.projection.omitted, [
+    "stable_context_already_in_system_prompt",
+    "retained_execution_evidence_available_in_session_ledger",
+    "context_invalidation_refs_not_needed_for_this_call"
+  ]);
 });

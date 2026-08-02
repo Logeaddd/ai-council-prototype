@@ -41,6 +41,79 @@ test("OpenAI-compatible client retries retryable rate-limit responses", async ()
   }
 });
 
+test("OpenAI-compatible client uses three retries by default", async () => {
+  let requestCount = 0;
+  const server = http.createServer(async (req, res) => {
+    requestCount += 1;
+    for await (const _ of req) {
+      // Drain request body.
+    }
+    if (requestCount <= 3) {
+      res.writeHead(429, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: { message: "rate limited" } }));
+      return;
+    }
+    writeOpenAiStream(res, JSON.stringify({ status: "skip", reason: "Recovered on the fourth attempt." }));
+  });
+  await listen(server);
+  const address = server.address();
+
+  try {
+    const text = await callAgent({
+      id: "default-retry-agent",
+      provider: "openai-compatible",
+      apiBaseUrl: `http://127.0.0.1:${address.port}/v1`,
+      apiKey: "secret-test-key",
+      model: "runtime-model"
+    }, [{ role: "user", content: "Question" }], {
+      timeoutMs: 1000,
+      backoffMs: 0,
+      allowUnsafePrivateNetwork: true
+    });
+
+    assert.equal(requestCount, 4);
+    assert.match(text, /fourth attempt/);
+  } finally {
+    await close(server);
+  }
+});
+
+test("OpenAI-compatible client retries transient fetch failures", async () => {
+  let requestCount = 0;
+  const server = http.createServer(async (req, res) => {
+    requestCount += 1;
+    for await (const _ of req) {
+      // Drain request body.
+    }
+    if (requestCount === 1) {
+      req.socket.destroy();
+      return;
+    }
+    writeOpenAiStream(res, JSON.stringify({ status: "skip", reason: "Recovered after fetch failed." }));
+  });
+  await listen(server);
+  const address = server.address();
+
+  try {
+    const text = await callAgent({
+      id: "fetch-failure-retry-agent",
+      provider: "openai-compatible",
+      apiBaseUrl: `http://127.0.0.1:${address.port}/v1`,
+      apiKey: "secret-test-key",
+      model: "runtime-model",
+      retry: { maxRetries: 1, backoffMs: 0 }
+    }, [{ role: "user", content: "Question" }], {
+      timeoutMs: 1000,
+      allowUnsafePrivateNetwork: true
+    });
+
+    assert.equal(requestCount, 2);
+    assert.match(text, /Recovered after fetch failed/);
+  } finally {
+    await close(server);
+  }
+});
+
 test("OpenAI-compatible client rejects unsafe metadata and private API base URLs", async () => {
   await assert.rejects(() => callAgent({
     id: "metadata-agent",

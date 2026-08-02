@@ -161,6 +161,37 @@ export function addMember(options) {
   return { ok: true, group, seat };
 }
 
+export function deleteMember(options) {
+  const groupPath = path.resolve(requireOption(options.groupPath, "groupPath"));
+  const seatId = requireOption(options.seatId, "seatId");
+  const groupFile = path.join(groupPath, "group.json");
+  const group = JSON.parse(fs.readFileSync(groupFile, "utf8"));
+  const seatKey = Array.isArray(group.seats) ? "seats" : "agents";
+  const seats = Array.isArray(group[seatKey]) ? group[seatKey] : [];
+  const index = seats.findIndex((seat, seatIndex) => seatIdForOrder(seat, seatIndex) === seatId);
+  if (index < 0) throw new Error(`Unknown seatId: ${seatId}`);
+  if (seats.length <= 1) throw new Error("Cannot delete the last member");
+
+  const seat = seats[index];
+  const remaining = seats.filter((_, seatIndex) => seatIndex !== index);
+  if (seat.enabled !== false && !remaining.some((item) => item.enabled !== false)) {
+    throw new Error("Cannot delete the last enabled member");
+  }
+
+  group[seatKey] = remaining;
+  if (group.permissions?.seatTiers && typeof group.permissions.seatTiers === "object") {
+    delete group.permissions.seatTiers[seatId];
+  }
+  writeJson(groupFile, group);
+  appendLog(groupPath, `Deleted ${seatId}: ${seat.displayName || seat.name || seatId}; preservedPrivateFolder=${seat.privateFolder || ""}`);
+  return {
+    ok: true,
+    group,
+    deletedSeat: seat,
+    preservedPrivateFolder: seat.privateFolder || ""
+  };
+}
+
 export function reorderSeats(options) {
   const groupPath = path.resolve(requireOption(options.groupPath, "groupPath"));
   const seatIds = options.seatIds;

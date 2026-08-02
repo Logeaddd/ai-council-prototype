@@ -543,7 +543,10 @@ function normalizeExecution(value = {}) {
     active: Boolean(source.active),
     executorId: String(source.executorId || ""),
     executorName: String(source.executorName || ""),
+    finalizerId: String(source.finalizerId || ""),
+    workMode: ["collab", "independent"].includes(source.workMode) ? source.workMode : "",
     ownership: normalizeOwnership(source.ownership, source),
+    participation: normalizeParticipation(source.participation),
     taskQuestion: String(source.taskQuestion || ""),
     taskContract: normalizeTaskContract(source.taskContract),
     intakeAttempts: Math.max(0, Number(source.intakeAttempts || 0)),
@@ -551,6 +554,7 @@ function normalizeExecution(value = {}) {
     nextAction: String(source.nextAction || ""),
     checkpointVersion: Math.max(0, Number(source.checkpointVersion || 0)),
     reviewedCheckpointVersion: Math.max(0, Number(source.reviewedCheckpointVersion || 0)),
+    repair: normalizeRepair(source.repair),
     processedToolResults: Math.max(0, Number(source.processedToolResults || 0)),
     processedFileResults: Math.max(0, Number(source.processedFileResults || 0)),
     noActionCalls: Math.max(0, Number(source.noActionCalls || 0)),
@@ -563,6 +567,16 @@ function normalizeExecution(value = {}) {
     activeProcesses: normalizeProcesses(source.activeProcesses),
     processes: normalizeProcesses(source.processes),
     resumed: Boolean(source.resumed)
+  };
+}
+
+function normalizeRepair(value) {
+  const source = value && typeof value === "object" ? value : {};
+  return {
+    requiredMaterialChange: source.requiredMaterialChange === true,
+    checkpointVersion: Math.max(0, Number(source.checkpointVersion || 0)),
+    reason: String(source.reason || "").slice(0, 1200),
+    unproductiveVerificationAttempts: Math.max(0, Number(source.unproductiveVerificationAttempts || 0))
   };
 }
 
@@ -620,6 +634,31 @@ function compactDelegationEvidence(value) {
     kind: String(item.kind || "reported").slice(0, 40),
     detail: String(item.detail || "").slice(0, 500)
   })).filter((item) => item.detail).slice(0, 16);
+}
+
+function normalizeParticipation(value = {}) {
+  const source = value && typeof value === "object" ? value : {};
+  return {
+    policy: ["collab", "independent"].includes(source.policy) ? source.policy : "",
+    status: String(source.status || "not_started"),
+    startedAt: String(source.startedAt || ""),
+    completedAt: String(source.completedAt || ""),
+    ownerIntegrationStatus: String(source.ownerIntegrationStatus || "not_required"),
+    ownerIntegratedAt: String(source.ownerIntegratedAt || ""),
+    participants: Array.isArray(source.participants)
+      ? source.participants.filter((item) => item && typeof item === "object").map((item) => ({
+          agentId: String(item.agentId || ""),
+          agentName: String(item.agentName || ""),
+          role: String(item.role || ""),
+          scope: String(item.scope || "").slice(0, 600),
+          status: String(item.status || "scheduled"),
+          outcome: String(item.outcome || ""),
+          summary: String(item.summary || "").slice(0, 1200),
+          evidence: compactDelegationEvidence(item.evidence),
+          completedAt: String(item.completedAt || "")
+        })).filter((item) => item.agentId).slice(0, 40)
+      : []
+  };
 }
 
 function normalizeTextList(value) {

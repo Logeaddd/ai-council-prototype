@@ -174,7 +174,10 @@ function normalizeExecutionCheckpoint(value, session = {}) {
     taskQuestion: String(value.taskQuestion || session.question || ""),
     executorId: String(value.executorId || ""),
     executorName: String(value.executorName || ""),
+    finalizerId: String(value.finalizerId || ""),
+    workMode: ["collab", "independent"].includes(value.workMode) ? value.workMode : "",
     ownership: normalizeExecutionOwnership(value.ownership, value),
+    participation: normalizeExecutionParticipation(value.participation),
     taskContract: normalizeTaskContract(value.taskContract),
     intakeAttempts: Math.max(0, Number(value.intakeAttempts || 0)),
     delegationSequence: Math.max(0, Number(value.delegationSequence || 0)),
@@ -182,12 +185,23 @@ function normalizeExecutionCheckpoint(value, session = {}) {
     nextAction: String(value.nextAction || ""),
     checkpointVersion: Math.max(0, Number(value.checkpointVersion) || 0),
     reviewedCheckpointVersion: Math.max(0, Number(value.reviewedCheckpointVersion) || 0),
+    repair: normalizeExecutionRepair(value.repair),
     artifactStatus: String(value.artifactStatus || "not_checked"),
     lastAction: String(value.lastAction || ""),
     lastError: truncate(value.lastError || "", 1200),
     checkpointEvidence: normalizeCheckpointEvidence(value.checkpointEvidence),
     sourceSessionId: String(session.id || value.sourceSessionId || ""),
     updatedAt: String(session.id ? nowIso() : value.updatedAt || "")
+  };
+}
+
+function normalizeExecutionRepair(value) {
+  const source = value && typeof value === "object" ? value : {};
+  return {
+    requiredMaterialChange: source.requiredMaterialChange === true,
+    checkpointVersion: Math.max(0, Number(source.checkpointVersion || 0)),
+    reason: truncate(source.reason || "", 1200),
+    unproductiveVerificationAttempts: Math.max(0, Number(source.unproductiveVerificationAttempts || 0))
   };
 }
 
@@ -237,6 +251,31 @@ function normalizeDelegationEvidence(value) {
     kind: String(item.kind || "reported").slice(0, 40),
     detail: String(item.detail || "").slice(0, 500)
   })).filter((item) => item.detail).slice(0, 16);
+}
+
+function normalizeExecutionParticipation(value = {}) {
+  const source = value && typeof value === "object" ? value : {};
+  return {
+    policy: ["collab", "independent"].includes(source.policy) ? source.policy : "",
+    status: String(source.status || "not_started"),
+    startedAt: String(source.startedAt || ""),
+    completedAt: String(source.completedAt || ""),
+    ownerIntegrationStatus: String(source.ownerIntegrationStatus || "not_required"),
+    ownerIntegratedAt: String(source.ownerIntegratedAt || ""),
+    participants: Array.isArray(source.participants)
+      ? source.participants.filter((item) => item && typeof item === "object").map((item) => ({
+          agentId: String(item.agentId || ""),
+          agentName: String(item.agentName || ""),
+          role: String(item.role || ""),
+          scope: String(item.scope || "").slice(0, 600),
+          status: String(item.status || "scheduled"),
+          outcome: String(item.outcome || ""),
+          summary: String(item.summary || "").slice(0, 1200),
+          evidence: normalizeDelegationEvidence(item.evidence),
+          completedAt: String(item.completedAt || "")
+        })).filter((item) => item.agentId).slice(0, 40)
+      : []
+  };
 }
 
 function normalizeCheckpointEvidence(value) {

@@ -19,7 +19,7 @@ test("round prompt uses arbitrary user-defined role identity", () => {
   assert.match(system, /\[Role identity\]/);
   assert.match(system, /\[Software protocol\]/);
   assert.ok(system.includes(`You are ${directorRole}.`));
-  assert.match(system, /If you agree with the prior context and have no new objection, return skip\./);
+  assert.match(system, /If you agree and have no new information, return skip\./);
   assert.ok(system.includes(`gpt-director${"\u8bf4\uff1a"}`));
 });
 
@@ -272,41 +272,15 @@ test("round prompt advertises artifacts in speak schema", () => {
   }, "Question", { messages: [] }, 1);
 
   assert.match(messages[0].content, /suggested_revision, artifacts, file_operations, tool_requests, task_contract, task_delegations, delegation_handoff, confidence/);
-  assert.match(messages[0].content, /When the context labels you \[Task intake owner\], call the native record_task_contract tool exactly once/);
-  assert.match(messages[0].content, /Only an \[Execution owner\] may create bounded sub-work/);
-  assert.match(messages[0].content, /only to request file work/);
-  assert.match(messages[0].content, /Do not invent tool results/);
-  assert.match(messages[0].content, /Do not use proposed_files/);
-  assert.match(messages[0].content, /Durable file contents must be in file_operations\.content/);
-  assert.match(messages[0].content, /Write each complete file in a single operation/);
-  assert.match(messages[0].content, /Only split into append chunks when a real provider or tool constraint requires it/);
-  assert.match(messages[0].content, /There is no per-turn limit on how many tools you may call or how much you may write/);
-  assert.match(messages[0].content, /no file writes will run/);
+  assert.match(messages[0].content, /runtime already created a provisional contract/);
+  assert.match(messages[0].content, /optional, never blocks other authorized tools/);
+  assert.match(messages[0].content, /\[Execution owner\] must use delegate_task/);
   assert.match(messages[0].content, /Do not put full source code/);
-  assert.match(messages[0].content, /Use fetch_url only for text\/html\/json pages/);
-  assert.match(messages[0].content, /Do not use fetch_url to download zip/);
-  assert.match(messages[0].content, /use provision_tool for a missing CLI\/runtime download/);
-  assert.match(messages[0].content, /With shell=powershell, provide the PowerShell script directly/);
-  assert.match(messages[0].content, /publisher SHA-256/);
-  assert.match(messages[0].content, /discoverySourceUrl/);
-  assert.match(messages[0].content, /Discovery provenance is not a trust guarantee/);
-  assert.match(messages[0].content, /api_request/);
-  assert.match(messages[0].content, /search saved public group history/);
-  assert.match(messages[0].content, /search_context/);
-  assert.match(messages[0].content, /load_context/);
-  assert.match(messages[0].content, /extract_archive/);
-  assert.match(messages[0].content, /execute_command/);
-  assert.match(messages[0].content, /process_control/);
-  assert.match(messages[0].content, /run_code/);
-  assert.match(messages[0].content, /install_package/);
-  assert.match(messages[0].content, /run_tests/);
-  assert.match(messages[0].content, /git_operation/);
-  assert.match(messages[0].content, /browser_control/);
-  assert.match(messages[0].content, /database_query/);
-  assert.match(messages[0].content, /sessionId and optional round/);
-  assert.match(messages[0].content, /read\/list can be executed by the app/);
+  assert.match(messages[0].content, /Never invent tool results/);
   assert.match(messages[0].content, /op, path, reason, expected_effect/);
   assert.match(messages[0].content, /write\/append also require content/);
+  assert.ok(messages[0].content.length < 5000, `system prompt is ${messages[0].content.length} chars`);
+  assert.doesNotMatch(messages[0].content, /mcp_search_npm for real npm registry search/);
 });
 
 test("full-permission workspace prompt requires real complete tool writes", () => {
@@ -319,10 +293,9 @@ test("full-permission workspace prompt requires real complete tool writes", () =
     fileOperationPermissionTier: "full"
   });
 
-  assert.match(messages[0].content, /use native workspace_edit tool calls/);
-  assert.match(messages[0].content, /write complete durable files/);
-  assert.match(messages[0].content, /perform multiple writes and commands in one response/);
-  assert.match(messages[0].content, /continue with append calls until the file is complete/);
+  assert.match(messages[0].content, /Use workspace_edit for file mutations/);
+  assert.match(messages[0].content, /Prefer one complete workspace_edit per file/);
+  assert.match(messages[0].content, /finish and verify every chunk/);
   assert.doesNotMatch(messages[0].content, /exactly one write or append/);
   assert.doesNotMatch(messages[0].content, /under 1400 characters/);
 });
@@ -356,14 +329,13 @@ test("text-only workspace round prompt does not ask the member to propose file_o
   });
 
   assert.match(messages[0].content, /text-only file permission/);
-  assert.match(messages[0].content, /may still use search_context and load_context/);
-  assert.match(messages[0].content, /Do not request web_search.*api_request.*list_directory.*extract_archive.*execute_command.*run_tests.*git_operation.*browser_control.*database_query/);
-  assert.doesNotMatch(messages[0].content, /Do not request .*search_context.*load_context/);
+  assert.match(messages[0].content, /Text-only seats may use search_context\/load_context plus tool_search\/tool_inspect/);
+  assert.match(messages[0].content, /tool_invoke still enforces the underlying permission/);
   assert.match(messages[0].content, /do not propose file_operations yourself/);
   assert.doesNotMatch(messages[0].content, /MUST propose the change in file_operations/);
 });
 
-test("full tool prompt advertises full-only tools while tool tier does not", () => {
+test("tool prompts defer the long tool catalog to native schemas", () => {
   const full = buildRoundPrompt({
     id: "executor",
     name: "Executor",
@@ -381,52 +353,12 @@ test("full tool prompt advertises full-only tools while tool tier does not", () 
     fileOperationPermissionTier: "tool"
   });
 
-  assert.match(full[0].content, /extract_archive for zip files/);
-  assert.match(full[0].content, /create_archive for packaging workspace files\/directories into a real zip/);
-  assert.match(full[0].content, /For create_archive include paths \(or files\)/);
-  assert.match(full[0].content, /execute_command for real shell commands/);
-  assert.match(full[0].content, /process_control for listing background processes/);
-  assert.match(full[0].content, /background execute_command result means started, not completed/);
-  assert.match(full[0].content, /api_request for real HTTP API calls/);
-  assert.match(full[0].content, /pipes, redirection, curl \| bash/);
-  assert.match(full[0].content, /run_code for real JavaScript\/Node, Python, PowerShell, or shell snippets/);
-  assert.match(full[0].content, /install_package for real npm, pip, cargo, go, or gem installs/);
-  assert.match(full[0].content, /run_tests for real npm, pytest, cargo, or custom test commands/);
-  assert.match(full[0].content, /git_operation for real Git status/);
-  assert.match(full[0].content, /browser_control for opening a real browser page/);
-  assert.match(full[0].content, /database_query for reading or writing SQLite/);
-  assert.match(full[0].content, /skill_read for loading the full instructions/);
-  assert.match(full[0].content, /skill_install for validated text-only SKILL\.md installation/);
-  assert.match(full[0].content, /Installing a skill stores instructions and never executes downloaded scripts implicitly/);
-  assert.match(full[0].content, /mcp_search_npm for real npm registry search/);
-  assert.match(full[0].content, /mcp_install_npm for built-in or npm MCP servers/);
-  assert.match(full[0].content, /mcp_uninstall for configured MCP servers/);
-  assert.match(full[0].content, /mcp_list_tools and mcp_call for configured MCP tools/);
-  assert.match(full[0].content, /mcp_call can infer the server when the tool name is unique/);
-  assert.match(full[0].content, /include serverId for ambiguous tool names/);
-  assert.match(full[0].content, /For mcp_call include mcpToolName and arguments; include serverId only/);
-  assert.match(full[0].content, /mcp_list_resources and mcp_read_resource for configured MCP resources/);
-  assert.match(full[0].content, /mcp_list_prompts and mcp_get_prompt for configured MCP prompts/);
-  assert.doesNotMatch(full[0].content, /external MCP/);
-  assert.match(tool[0].content, /database_query for read-only SQLite SELECT queries/);
-  assert.match(tool[0].content, /skill_read for loading an enabled skill's instructions/);
-  assert.match(tool[0].content, /skill_list, skill_search, skill_install, skill_enable, skill_disable, skill_remove.*require full permission/);
-  assert.match(tool[0].content, /database_query write operations require full permission/);
-  assert.match(tool[0].content, /extract_archive, create_archive, execute_command, process_control, run_code, install_package, provision_tool, run_tests, git_operation, browser_control, mcp_search_npm, mcp_install_npm, mcp_uninstall, mcp_list_tools, mcp_call, mcp_list_resources, mcp_read_resource, mcp_list_prompts, and mcp_get_prompt require full permission/);
-  assert.doesNotMatch(tool[0].content, /extract_archive for zip files inside the group workspace/);
-  assert.doesNotMatch(tool[0].content, /execute_command for real shell commands/);
-  assert.doesNotMatch(tool[0].content, /process_control for listing background processes/);
-  assert.doesNotMatch(tool[0].content, /run_code for real/);
-  assert.doesNotMatch(tool[0].content, /install_package for real/);
-  assert.doesNotMatch(tool[0].content, /provision_tool for detecting/);
-  assert.doesNotMatch(tool[0].content, /run_tests for real/);
-  assert.doesNotMatch(tool[0].content, /git_operation for real Git/);
-  assert.doesNotMatch(tool[0].content, /browser_control for opening/);
-  assert.doesNotMatch(tool[0].content, /database_query for reading or writing/);
-  assert.doesNotMatch(tool[0].content, /mcp_search_npm for real/);
-  assert.doesNotMatch(tool[0].content, /mcp_install_npm and mcp_uninstall/);
-  assert.doesNotMatch(tool[0].content, /mcp_call for calling/);
-  assert.doesNotMatch(tool[0].content, /mcp_read_resource for configured/);
+  for (const prompt of [full[0].content, tool[0].content]) {
+    assert.match(prompt, /Native schemas are the tool contract/);
+    assert.match(prompt, /tool_search[\s\S]*tool_inspect[\s\S]*tool_invoke/);
+    assert.doesNotMatch(prompt, /mcp_search_npm for real npm registry search/);
+    assert.ok(prompt.length < 5000, `system prompt is ${prompt.length} chars`);
+  }
 });
 
 test("round prompt overrides the generic catalog with globally disabled tools", () => {
@@ -462,14 +394,11 @@ test("round prompt tells members the real tool runtime environment", () => {
     fileOperationPermissionTier: "full"
   });
 
-  assert.match(messages[0].content, /Tool runtime environment:/);
+  assert.match(messages[0].content, /Tool runtime:/);
   if (process.platform === "win32") {
     assert.match(messages[0].content, /Windows/);
-    assert.match(messages[0].content, /shell=cmd/);
-    assert.match(messages[0].content, /shell=powershell/);
-    assert.match(messages[0].content, /apt-get/);
-    assert.match(messages[0].content, /mkdir -p/);
-    assert.match(messages[0].content, /New-Item -ItemType Directory -Force/);
+    assert.match(messages[0].content, /system\/cmd\/PowerShell syntax/);
+    assert.match(messages[0].content, /pass PowerShell scripts directly/);
   }
 });
 

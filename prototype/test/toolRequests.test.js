@@ -13,6 +13,64 @@ import { executeReadListFileOperations } from "../src/fileOperationReader.js";
 import { writeContextArchive, writeGroupSession } from "../src/storage.js";
 import { createObservationCache } from "../src/observationCache.js";
 import { markNativeModelSource } from "../src/nativeToolProvenance.js";
+import { nativeToolDefinitions } from "../src/nativeToolProtocol.js";
+
+test("deferred tools can be searched, inspected, and invoked through the authoritative catalog", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-deferred-tools-"));
+  fs.mkdirSync(path.join(tmp, "shared", "logs"), { recursive: true });
+  fs.writeFileSync(path.join(tmp, "notes.txt"), "deferred tool evidence", "utf8");
+  const toolCatalog = nativeToolDefinitions("tool");
+
+  const searched = await executeToolRequests({
+    permissionTier: "tool",
+    groupPath: tmp,
+    toolCatalog,
+    requests: [{ tool: "tool_search", query: "read file", reason: "Find the file-reading capability." }]
+  });
+  assert.equal(searched.results[0].result.tools.some((item) => item.name === "read_file"), true);
+
+  const inspected = await executeToolRequests({
+    permissionTier: "tool",
+    groupPath: tmp,
+    toolCatalog,
+    requests: [{ tool: "tool_inspect", toolName: "read_file", reason: "Load its exact schema." }]
+  });
+  assert.equal(inspected.results[0].result.tool.name, "read_file");
+  assert.equal(inspected.results[0].result.tool.inputSchema.additionalProperties, false);
+
+  const invoked = await executeToolRequests({
+    permissionTier: "tool",
+    groupPath: tmp,
+    toolCatalog,
+    requests: [{
+      tool: "tool_invoke",
+      toolName: "read_file",
+      arguments: { path: "notes.txt", reason: "Read the selected file." },
+      reason: "Invoke the inspected capability."
+    }]
+  });
+  assert.equal(invoked.results[0].tool, "read_file");
+  assert.match(invoked.results[0].result.content, /deferred tool evidence/);
+});
+
+test("tool_invoke cannot bypass underlying seat permissions", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-deferred-permission-"));
+  fs.mkdirSync(path.join(tmp, "shared", "logs"), { recursive: true });
+  const request = markNativeModelSource({
+    tool: "tool_invoke",
+    toolName: "workspace_edit",
+    arguments: { action: "write", path: "blocked.txt", code: "blocked", reason: "Attempt a write." },
+    reason: "Invoke a deferred write tool."
+  });
+  const result = await executeToolRequests({
+    permissionTier: "tool",
+    groupPath: tmp,
+    toolCatalog: nativeToolDefinitions("full"),
+    requests: [request]
+  });
+  assert.equal(result.rejected[0].code, "permission_denied");
+  assert.equal(fs.existsSync(path.join(tmp, "blocked.txt")), false);
+});
 
 test("controlled file tool requests list, read, search, and grep real workspace files", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-tools-"));
@@ -217,6 +275,41 @@ test("workspace_edit requires full permission and writes through the real tool c
   assert.equal(executed.results[0].status, "completed");
   assert.equal(executed.results[0].result.workspaceChanges.totalChanges, 1);
   assert.equal(fs.readFileSync(path.join(tmp, "shared/project/src/App.java"), "utf8"), "public final class App {}\n");
+});
+
+test("workspace_edit promotes nested provider arguments and canonicalizes the write action", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-nested-workspace-edit-"));
+  const result = await executeToolRequests({
+    permissionTier: "full",
+    groupPath: tmp,
+    requests: [{
+      tool: "workspace_edit",
+      arguments: { op: "write", path: "nested/output.txt", content: "NESTED_ARGUMENT_FACT\n" },
+      reason: "Write the requested output."
+    }]
+  });
+
+  assert.equal(result.rejected.length, 0, JSON.stringify(result.rejected));
+  assert.equal(result.results[0].tool, "workspace_edit");
+  assert.equal(result.results[0].status, "completed");
+  assert.equal(fs.readFileSync(path.join(tmp, "nested", "output.txt"), "utf8"), "NESTED_ARGUMENT_FACT\n");
+});
+
+test("common run_command aliases execute through the canonical command tool", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-command-alias-"));
+  const result = await executeToolRequests({
+    permissionTier: "full",
+    groupPath: tmp,
+    requests: [{
+      tool: "run_command",
+      arguments: { command: nodeCommand("console.log('COMMAND_ALIAS_FACT')"), shell: shellForNodeCommand() },
+      reason: "Run the generated check."
+    }]
+  });
+
+  assert.equal(result.rejected.length, 0, JSON.stringify(result.rejected));
+  assert.equal(result.results[0].tool, "execute_command");
+  assert.match(String(result.results[0].result?.stdout || ""), /COMMAND_ALIAS_FACT/);
 });
 
 test("workspace_edit invalidates observations and audits bounded content metadata", async () => {
@@ -516,6 +609,17 @@ test("context tools search and load earlier rounds from the active session", asy
   assert.match(JSON.stringify(searched.results[0].result), /LIVE_CONTEXT_TOOL_FACT/);
   assert.equal(loaded.results[0].result.source, "live_session_context");
   assert.match(JSON.stringify(loaded.results[0].result), /LIVE_CONTEXT_TOOL_FACT/);
+
+  const selfEcho = await executeToolRequests({
+    permissionTier: "tool",
+    groupPath: tmp,
+    currentSession,
+    transcriptVisibility: "full",
+    agent: { id: "reader", name: "Reader" },
+    round: 3,
+    requests: [{ tool: "search_context", query: "Current council task", reason: "Search retained evidence, not the visible prompt." }]
+  });
+  assert.deepEqual(selfEcho.results[0].result.results, []);
 });
 
 test("text-only members can retrieve public group history but still cannot read workspace files", async () => {

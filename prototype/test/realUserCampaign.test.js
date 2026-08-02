@@ -156,3 +156,45 @@ test("different seeds select deterministic task variants while preserving the ca
     assert.equal(campaign.stages.filter((stage) => stage.artifactEdit).length >= 4, true);
   }
 });
+
+test("collaboration task families can be selected exactly without changing seeded replay", () => {
+  const taskIds = ["collaborative-brief", "delegated-brief", "collaborative-multifile", "collaborative-review-repair"];
+  for (const taskId of taskIds) {
+    const first = createSeededCampaignScenario({ seed: 20260730, taskId });
+    const replay = createSeededCampaignScenario({ seed: 20260730, taskId });
+    assert.equal(first.task.id, taskId);
+    assert.equal(first.task.participationRequired, true);
+    assert.equal(first.task.stableFinalizerRequired, true);
+    assert.equal(first.task.workMode, "collab");
+    assert.equal(first.hiddenVerifier.requiresParticipation, true);
+    assert.equal(first.hiddenVerifier.requiresStableFinalizer, true);
+    assert.deepEqual(first, replay);
+    assert.equal(JSON.stringify(publicCampaignScenario(first)).includes("hiddenVerifier"), false);
+  }
+  assert.throws(() => createSeededCampaignScenario({ seed: 1, taskId: "not-a-real-task" }), /Unknown real-user campaign task/);
+});
+
+test("every campaign family can be selected by its public task id", () => {
+  const taskIds = [
+    "node-cli",
+    "python-cli",
+    "json-document",
+    "external-node-cli",
+    "json-to-csv",
+    "zip-archive",
+    "api-collection",
+    "image-tool-acquisition",
+    "delegated-brief",
+    "context-history-retrieval",
+    "pdf-report",
+    "skill-guided-document",
+    "mcp-memory-record",
+    "collaborative-brief",
+    "collaborative-multifile",
+    "collaborative-review-repair"
+  ];
+  for (const taskId of taskIds) {
+    const campaign = createSeededCampaignScenario({ seed: 20260731, taskId });
+    assert.equal(campaign.task.id, taskId);
+  }
+});

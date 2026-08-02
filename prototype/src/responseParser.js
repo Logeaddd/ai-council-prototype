@@ -4,6 +4,7 @@ import { normalizeToolRequests } from "./toolRequests.js";
 import { normalizeDeliverableClaims } from "./deliverableVerification.js";
 import { normalizeNativeToolCalls } from "./nativeToolProtocol.js";
 import { markNativeModelSource } from "./nativeToolProvenance.js";
+import { normalizeTaskContract } from "./executionState.js";
 
 export function parseRoundModelResult(rawText, nativeToolCalls = []) {
   const nativeRequests = normalizeNativeToolCalls(nativeToolCalls).map(markNativeModelSource);
@@ -41,7 +42,7 @@ export function parseRoundResponse(rawText) {
       status: "skip",
       reason: String(parsed.reason || "No new objection."),
       resolved_ids: normalizeResolvedIds(parsed.resolved_ids),
-      task_contract: normalizeTaskContract(parsed.task_contract),
+      task_contract: normalizeTaskContract(parsed.task_contract, { allowIncomplete: true, shape: "wire" }),
       // A delegated contributor may correctly use skip after a tool follow-up.
       // Keep its durable handoff so executionState can acknowledge the work.
       delegation_handoff: normalizeDelegationHandoff(parsed.delegation_handoff ?? parsed.handoff),
@@ -68,7 +69,7 @@ export function parseRoundResponse(rawText) {
     artifacts: normalizeArtifacts(parsed.artifacts),
     file_operations: normalizeFileOperations(parsed.file_operations),
     tool_requests: normalizeToolRequests(parsed.tool_requests),
-    task_contract: normalizeTaskContract(parsed.task_contract),
+    task_contract: normalizeTaskContract(parsed.task_contract, { allowIncomplete: true, shape: "wire" }),
     task_delegations: normalizeTaskDelegations(parsed.task_delegations ?? parsed.delegations),
     delegation_handoff: normalizeDelegationHandoff(parsed.delegation_handoff ?? parsed.handoff),
     confidence: normalizeConfidence(parsed.confidence),
@@ -185,39 +186,6 @@ function normalizeFileOperations(value) {
     .slice(0, 20);
 }
 
-function normalizeTaskContract(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
-  const mode = String(value.mode || "").trim().toLowerCase();
-  if (mode !== "delivery" && mode !== "discussion") return undefined;
-  return {
-    mode,
-    objective: optionalString(value.objective) || "",
-    requires_workspace: Boolean(value.requires_workspace ?? value.requiresWorkspace),
-    requires_verification: Boolean(value.requires_verification ?? value.requiresVerification),
-    deliverables: normalizeStringArray(value.deliverables).slice(0, 12),
-    completion_criteria: normalizeStringArray(value.completion_criteria ?? value.completionCriteria).slice(0, 12),
-    next_action: optionalString(value.next_action ?? value.nextAction) || "",
-    collaboration: normalizeCollaborationRequirement(value.collaboration, value)
-  };
-}
-
-function normalizeCollaborationRequirement(value, contract = {}) {
-  const source = value && typeof value === "object" && !Array.isArray(value) ? value : {};
-  const allowedTypes = new Set(["research", "implementation", "review", "unblocker"]);
-  const required = Boolean(source.required ?? contract.requires_collaboration ?? contract.requiresCollaboration);
-  const minimum = Number.parseInt(String(source.minimum_delegations ?? source.minimumDelegations ?? 1), 10);
-  const types = normalizeStringArray(source.types ?? source.delegation_types ?? source.delegationTypes)
-    .map((item) => item.toLowerCase())
-    .filter((item) => allowedTypes.has(item));
-  return {
-    required,
-    before_first_mutation: required && source.before_first_mutation !== false && source.beforeFirstMutation !== false,
-    minimum_delegations: required ? Math.max(1, Math.min(8, Number.isFinite(minimum) ? minimum : 1)) : 0,
-    types: [...new Set(types)],
-    reason: optionalString(source.reason ?? contract.collaboration_reason ?? contract.collaborationReason) || ""
-  };
-}
-
 function normalizeTaskDelegations(value) {
   if (!Array.isArray(value)) return [];
   const allowedTypes = new Set(["research", "implementation", "review", "unblocker"]);
@@ -255,7 +223,7 @@ function normalizeTaskDelegations(value) {
 function normalizeDelegationHandoff(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const delegationId = optionalString(value.delegation_id ?? value.delegationId);
-  const summary = optionalString(value.summary);
+  const summary = optionalString(value.summary ?? value.result);
   const evidence = normalizeDelegationEvidence(value.evidence ?? value.handoff_evidence);
   if (!delegationId || !summary || !evidence.length) return undefined;
   return { delegation_id: delegationId, summary, evidence };

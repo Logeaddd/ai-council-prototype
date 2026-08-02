@@ -32,3 +32,27 @@ test("any command help exits before runtime validation or execution", () => {
   assert.match(result.stdout, /node src\/cli\.js run --question/);
   assert.doesNotMatch(result.stderr, /Missing|AI_COUNCIL/);
 });
+
+test("real-user-campaign forwards --task-id to exact campaign selection", () => {
+  const result = spawnSync(process.execPath, [
+    "./src/cli.js",
+    "real-user-campaign",
+    "--group",
+    "./config/group.example.json",
+    "--task-id",
+    "not-a-real-task",
+    "--max-cost-usd",
+    "1",
+    "--max-model-calls",
+    "1"
+  ], {
+    cwd: root,
+    encoding: "utf8",
+    timeout: 10_000,
+    windowsHide: true
+  });
+
+  assert.equal(result.status, 1, result.stdout);
+  assert.match(result.stderr, /Unknown real-user campaign task: not-a-real-task/);
+  assert.doesNotMatch(result.stderr, /mock providers|Missing model provider configuration/);
+});

@@ -147,6 +147,18 @@ export function verifyRequestedArtifactProgress(options = {}) {
   };
 }
 
+// Shared by intake and final verification. Keeping the question parser here
+// prevents the execution state machine from maintaining a weaker, divergent
+// list of file-format phrases.
+export function requestedArtifactRequirementsFromQuestion(question) {
+  return requestedArtifactExtensions(question).map((extension) => ({
+    extension,
+    source: "legacy_question_inference",
+    requiresImages: extension === ".pdf" && requestRequiresIllustrations(question),
+    minimumPages: 0
+  }));
+}
+
 export function normalizeRequestedArtifactRequirements(value) {
   if (!Array.isArray(value)) return [];
   const seen = new Set();
@@ -236,7 +248,7 @@ function requestedArtifactExtensions(question) {
     [".pdf", /\bpdf\b/i],
     [".docx", /\bdocx\b|\bword(?: document)?\b|Word文档|Word文件/i],
     [".xlsx", /\bxlsx\b|\bexcel(?: workbook| spreadsheet)?\b|Excel表格|电子表格|試算表/i],
-    [".pptx", /\bpptx\b|\bpowerpoint\b|PPT文件|演示文稿|簡報/i],
+    [".pptx", /\bpptx?\b|\bpowerpoint\b|PPT文件|演示文稿|簡報/i],
     [".json", /\bjson\b/i],
     [".csv", /\bcsv\b/i],
     [".txt", /\btxt\b|纯文本文件|純文字檔/i],

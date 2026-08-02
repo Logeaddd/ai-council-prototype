@@ -6,7 +6,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { once } from "node:events";
 import zlib from "node:zlib";
-import { readZipArchiveEntries } from "./archiveTools.js";
+import { inspectZipArchive, readZipArchiveEntries } from "./archiveTools.js";
 import { inspectPdfDocument } from "./deliverableVerification.js";
 import { CAMPAIGN_API_URL_TOKEN, createSeededCampaignScenario, EXTERNAL_ROOT_TOKEN, publicCampaignScenario } from "./realUserCampaign.js";
 import { assertHardCampaignBudgetGroup, readCampaignBudgetLedger } from "./harnessCostGuard.js";
@@ -142,7 +142,7 @@ export async function runSeededRealUserBaseline(options = {}) {
 
 export async function runSeededRealUserCampaign(options = {}) {
   const group = structuredClone(options.group || {});
-  const sourceCampaign = options.campaign || createSeededCampaignScenario({ seed: options.seed });
+  const sourceCampaign = options.campaign || createSeededCampaignScenario({ seed: options.seed, taskId: options.taskId });
   assertRunnableGroup(group, { allowMockProvider: options.allowMockProvider === true });
   assertCampaignBudget(options, { allowMockProvider: options.allowMockProvider === true });
   if (options.allowMockProvider !== true) assertHardCampaignBudgetGroup(group);
@@ -488,7 +488,7 @@ function normalizeScenario(value) {
   for (const field of required) {
     if (!String(scenario[field] || "").trim()) throw harnessFailure("invalid_scenario", `Baseline scenario is missing ${field}.`, true);
   }
-  if (!scenario.verify?.expectedOutput || !Array.isArray(scenario.verify?.args)) {
+  if (scenario.verify?.kind !== "pptx" && (!scenario.verify?.expectedOutput || !Array.isArray(scenario.verify?.args))) {
     throw harnessFailure("invalid_scenario_verifier", "Baseline scenario needs a hidden command verifier.", true);
   }
   scenario.seed = normalizeSeed(scenario.seed);
@@ -644,7 +644,7 @@ export function campaignProviderFailureReason(session = {}) {
   const responses = (session.messages || []).map((message) => message.response).filter(Boolean);
   if (!responses.length || responses.some((response) => response.status !== "unavailable")) return "";
   const reasons = responses.map((response) => String(response.reason || ""));
-  const providerReasons = reasons.filter((reason) => /agent_call_failed:.*(?:HTTP\s+(?:401|402|403|408|409|429|5\d\d)|insufficient balance|rate limit|authentication|provider)/i.test(reason));
+  const providerReasons = reasons.filter((reason) => /agent_call_failed:.*(?:HTTP\s+(?:401|402|403|408|409|429|5\d\d)|insufficient balance|rate limit|authentication|provider|credential[-_ ]?pool|all credential.*unavailable)/i.test(reason));
   if (providerReasons.length !== responses.length) return "";
   return `All participating provider calls were unavailable: ${providerReasons[0].slice(0, 1200)}`;
 }
@@ -976,7 +976,16 @@ function createCollaborationExecutionReceipt(groupPath, sessionEntries = []) {
 }
 
 export function verifyCampaignCollaboration(verifier = {}, sessions = []) {
+  const participation = verifyCampaignParticipation(verifier, sessions);
+  const finalizer = verifyCampaignStableFinalizer(verifier, sessions);
   if (verifier.requiresDelegation !== true) {
+    if (verifier.requiresParticipation === true || verifier.requiresStableFinalizer === true) {
+      const checks = [
+        ...(verifier.requiresParticipation === true ? participation.checks : []),
+        ...(verifier.requiresStableFinalizer === true ? finalizer.checks : [])
+      ];
+      return { required: true, passed: checks.every((item) => item.passed), checks };
+    }
     return { required: false, passed: true, checks: [check("bounded_delegation_not_required", true, "not_required")] };
   }
 
@@ -994,12 +1003,16 @@ export function verifyCampaignCollaboration(verifier = {}, sessions = []) {
 
   const requiredTypes = normalizeCampaignDelegationTypes(verifier);
   const completed = [...delegationSnapshots.values()].filter((snapshot) => isCompletedCampaignDelegation(snapshot, requiredTypes));
-  const checks = requiredTypes.flatMap((type) => collaborationChecksForType({
+  const checks = [
+    ...(verifier.requiresParticipation === true ? participation.checks : []),
+    ...(verifier.requiresStableFinalizer === true ? finalizer.checks : []),
+    ...requiredTypes.flatMap((type) => collaborationChecksForType({
     type,
     completed: completed.filter((snapshot) => snapshot.delegation.type === type),
     ordered,
     verifier
-  }));
+    }))
+  ];
   return {
     required: true,
     passed: checks.every((item) => item.passed),
@@ -1013,6 +1026,63 @@ export function verifyCampaignCollaboration(verifier = {}, sessions = []) {
       ownerAcknowledged: delegation.ownerAcknowledged === true
     }))
   };
+}
+
+function verifyCampaignParticipation(verifier = {}, sessions = []) {
+  if (verifier.requiresParticipation !== true) {
+    return { required: false, passed: true, checks: [check("multi_member_participation_not_required", true, "not_required")] };
+  }
+  const minimum = Math.max(1, Number(verifier.minimumParticipants || 1));
+  const expectedMode = String(verifier.workMode || "collab");
+  const snapshots = (sessions || []).flatMap((session) => [
+    { source: "session_execution", session, state: session?.executionState },
+    { source: "task_run_execution", session, state: session?.taskRun?.execution }
+  ]).filter((item) => item.state?.participation?.participants?.length);
+  const matching = snapshots.filter(({ state }) => (
+    state.workMode === expectedMode
+    && state.participation?.policy === expectedMode
+    && state.participation?.status === "completed"
+  ));
+  const completed = matching.flatMap(({ state, session }) => (state.participation.participants || [])
+    .filter((item) => item.agentId !== state.finalizerId && item.status === "completed" && item.outcome === "substantive" && item.evidence?.some((evidence) => evidence?.kind === "message"))
+    .map((participant) => ({ participant, state, session })));
+  const distinctParticipants = new Set(completed.map((item) => item.participant.agentId));
+  const integrated = completed.filter(({ state, session, participant }) => {
+    if (state.participation?.ownerIntegrationStatus !== "completed") return false;
+    const messages = Array.isArray(session?.messages) ? session.messages : [];
+    const contributorIndex = messages.findIndex((item) => item?.agentId === participant.agentId && item?.response?.status === "speak");
+    return contributorIndex >= 0 && messages.slice(contributorIndex + 1).some((item) => item?.agentId === state.executorId);
+  });
+  const allScheduledTerminal = matching.length > 0 && matching.every(({ state }) => (
+    (state.participation?.participants || []).every((item) => ["completed", "unavailable"].includes(item.status))
+  ));
+  const checks = [
+    check("requested_work_mode_recorded", matching.length > 0, `${matching.length} durable ${expectedMode} participation snapshots`),
+    check("distinct_members_received_provider_turns", distinctParticipants.size >= minimum, `${distinctParticipants.size} distinct non-owner participants with attributable speak messages`),
+    check("scheduled_participants_reached_terminal_state", allScheduledTerminal, allScheduledTerminal ? "all scheduled participants completed or became mechanically unavailable" : "scheduled participation remained unresolved"),
+    check("owner_integrated_after_member_contribution", integrated.length >= minimum, `${integrated.length} participant contributions were followed by the durable owner in the same session`)
+  ];
+  return {
+    required: true,
+    passed: checks.every((item) => item.passed),
+    checks,
+    participants: [...distinctParticipants],
+    integrations: integrated.length
+  };
+}
+
+function verifyCampaignStableFinalizer(verifier = {}, sessions = []) {
+  if (verifier.requiresStableFinalizer !== true) return { required: false, passed: true, checks: [] };
+  const expectedMode = String(verifier.workMode || "collab");
+  const snapshots = (sessions || []).flatMap((session) => [
+    { source: "session_execution", session, state: session?.executionState },
+    { source: "task_run_execution", session, state: session?.taskRun?.execution }
+  ]).filter((item) => item.state?.workMode === expectedMode && item.state?.finalizerId);
+  const finalizerIds = [...new Set(snapshots.map((item) => item.state.finalizerId))];
+  const checks = [
+    check("durable_finalizer_identity_stable", finalizerIds.length === 1, finalizerIds.length ? `durable finalizer=${finalizerIds.join(",")}; snapshots=${snapshots.length}` : "no durable finalizer identity was persisted")
+  ];
+  return { required: true, passed: checks.every((item) => item.passed), checks, finalizerId: finalizerIds[0] || "" };
 }
 
 function normalizeCampaignDelegationTypes(verifier = {}) {
@@ -1040,7 +1110,7 @@ function isCompletedCampaignDelegation(snapshot, allowedTypes) {
 }
 
 function collaborationChecksForType({ type, completed, ordered, verifier }) {
-  const evidence = completed.filter((snapshot) => campaignDelegationEvidenceForType(type, snapshot));
+  const evidence = completed.filter((snapshot) => campaignDelegationEvidenceForType(type, snapshot, ordered));
   const integrated = evidence.filter((snapshot) => campaignOwnerIntegrationForType(type, snapshot, ordered, verifier.file));
   const count = `${completed.length} completed acknowledged native, timestamped ${type} handoffs`;
   if (type === "research") {
@@ -1093,21 +1163,21 @@ function campaignResearchEvidenceItems(snapshot) {
   return campaignReadOnlyEvidenceItems(snapshot);
 }
 
-function campaignDelegationEvidenceForType(type, snapshot) {
-  if (type === "research" || type === "review") return campaignReadOnlyEvidenceItems(snapshot).length > 0;
-  if (type === "implementation") return campaignImplementationEvidenceItems(snapshot).length > 0;
-  if (type === "unblocker") return campaignUnblockerEvidenceItems(snapshot).length > 0;
+function campaignDelegationEvidenceForType(type, snapshot, ordered) {
+  if (type === "research" || type === "review") return campaignReadOnlyEvidenceItems(snapshot, ordered).length > 0;
+  if (type === "implementation") return campaignImplementationEvidenceItems(snapshot, ordered).length > 0;
+  if (type === "unblocker") return campaignUnblockerEvidenceItems(snapshot, ordered).length > 0;
   return false;
 }
 
-function campaignReadOnlyEvidenceItems(snapshot) {
+function campaignReadOnlyEvidenceItems(snapshot, ordered = [snapshot.session]) {
   const { delegation, session } = snapshot;
   if (!isNativeTimestampedCampaignDelegation(delegation) || delegation.allowWorkspaceMutation === true) return [];
   const toolIds = campaignHandoffToolIds(delegation);
   if (!toolIds.size) return [];
 
   const allowedTools = new Set(Array.isArray(delegation.allowedTools) ? delegation.allowedTools : []);
-  return (session?.toolExecutionResults || []).filter((item) => (
+  return ordered.flatMap((item) => item?.toolExecutionResults || []).filter((item) => (
     toolIds.has(item?.id)
     && item?.source_agent_id === delegation.assigneeId
     && item?.status === "completed"
@@ -1118,13 +1188,13 @@ function campaignReadOnlyEvidenceItems(snapshot) {
   ));
 }
 
-function campaignImplementationEvidenceItems(snapshot) {
+function campaignImplementationEvidenceItems(snapshot, ordered = [snapshot.session]) {
   const { delegation } = snapshot;
   if (!isNativeTimestampedCampaignDelegation(delegation) || delegation.allowWorkspaceMutation !== true) return [];
   const allowedPaths = Array.isArray(delegation.allowedPaths) ? delegation.allowedPaths : [];
   const toolIds = campaignHandoffToolIds(delegation);
   if (!allowedPaths.length || !toolIds.size) return [];
-  return campaignSessionActionResults(snapshot.session).filter((item) => (
+  return ordered.flatMap((session) => campaignSessionActionResults(session)).filter((item) => (
     toolIds.has(item?.id)
     && item?.source_agent_id === delegation.assigneeId
     && item?.tool === "workspace_edit"
@@ -1135,13 +1205,13 @@ function campaignImplementationEvidenceItems(snapshot) {
   ));
 }
 
-function campaignUnblockerEvidenceItems(snapshot) {
+function campaignUnblockerEvidenceItems(snapshot, ordered = [snapshot.session]) {
   const { delegation } = snapshot;
   if (!isNativeTimestampedCampaignDelegation(delegation)) return [];
   const toolIds = campaignHandoffToolIds(delegation);
   if (!toolIds.size) return [];
   const unblockerTools = new Set(["read_process_status", "process_control", "provision_tool", "install_package", "skill_install", "skill_enable", "mcp_list_tools", "mcp_call", "mcp_install_npm"]);
-  return campaignSessionActionResults(snapshot.session).filter((item) => (
+  return ordered.flatMap((session) => campaignSessionActionResults(session)).filter((item) => (
     toolIds.has(item?.id)
     && item?.source_agent_id === delegation.assigneeId
     && item?.status === "completed"
@@ -1158,7 +1228,7 @@ function campaignSessionActionResults(session = {}) {
 function campaignHandoffToolIds(delegation = {}) {
   return new Set((delegation.handoffEvidence || [])
     .filter((item) => item?.kind === "tool")
-    .map((item) => String(item.detail || "").match(/#([^\s]+)/)?.[1])
+    .map((item) => String(item.detail || "").split("#").slice(1).join("#").replace(/\s+(?:completed|failed)$/i, "").trim())
     .filter(Boolean));
 }
 
@@ -1185,27 +1255,24 @@ function campaignOwnerIntegrationForType(type, snapshot, ordered, targetFile) {
 
 function campaignOwnerIntegratedHandoff(snapshot, ordered, targetFile) {
   const delegation = snapshot.delegation;
-  const evidenceIndexes = new Set(campaignReadOnlyEvidenceItems(snapshot).map((item) => item.id));
-  if (!evidenceIndexes.size) return false;
-  const sourceEvidenceIndex = (snapshot.session?.toolExecutionResults || []).reduce((latest, item, index) => (
-    evidenceIndexes.has(item?.id) ? index : latest
-  ), -1);
-
-  return ordered.slice(snapshot.sessionIndex).some((session, relativeIndex) => (
-    (session.toolExecutionResults || []).some((item, toolIndex) => (
+  const evidence = campaignReadOnlyEvidenceItems(snapshot, ordered);
+  const latestEvidenceAt = Math.max(...evidence.map((item) => Date.parse(String(item?.createdAt || ""))).filter(Number.isFinite));
+  if (!Number.isFinite(latestEvidenceAt)) return false;
+  return ordered.some((session) => (
+    (session.toolExecutionResults || []).some((item) => (
       item?.tool === "workspace_edit"
       && item?.status === "completed"
        && item?.result?.ok !== false
        && item?.source_agent_id === snapshot.delegation.assignedBy
        && normalizeCampaignPath(item?.path || item?.result?.path) === normalizeCampaignPath(targetFile)
+       && Date.parse(String(item?.createdAt || "")) > latestEvidenceAt
        && occurredAtOrAfter(item?.createdAt, delegation.createdAt)
-       && (relativeIndex > 0 || toolIndex > sourceEvidenceIndex)
     ))
   ));
 }
 
 function campaignOwnerVerificationAfter(snapshot, ordered) {
-  return campaignOwnerActionAfter(snapshot, ordered, campaignImplementationEvidenceItems(snapshot), (item) => (
+  return campaignOwnerActionAfter(snapshot, ordered, campaignImplementationEvidenceItems(snapshot, ordered), (item) => (
     ["run_tests", "run_code", "execute_command"].includes(item?.tool)
       && item?.status === "completed"
       && item?.result?.ok !== false
@@ -1215,7 +1282,7 @@ function campaignOwnerVerificationAfter(snapshot, ordered) {
 }
 
 function campaignOwnerContinuationAfter(snapshot, ordered, targetFile) {
-  return campaignOwnerActionAfter(snapshot, ordered, campaignUnblockerEvidenceItems(snapshot), (item) => (
+  return campaignOwnerActionAfter(snapshot, ordered, campaignUnblockerEvidenceItems(snapshot, ordered), (item) => (
     (item?.tool === "workspace_edit"
       && item?.status === "completed"
       && item?.result?.ok !== false
@@ -1232,7 +1299,7 @@ function campaignOwnerActionAfter(snapshot, ordered, evidence, predicate) {
   const delegation = snapshot.delegation;
   const latestEvidenceAt = Math.max(...evidence.map((item) => Date.parse(String(item?.createdAt || ""))).filter(Number.isFinite));
   if (!Number.isFinite(latestEvidenceAt)) return false;
-  return ordered.slice(snapshot.sessionIndex).some((session) => campaignSessionActionResults(session).some((item) => (
+  return ordered.some((session) => campaignSessionActionResults(session).some((item) => (
     item?.source_agent_id === delegation.assignedBy
       && Date.parse(String(item?.createdAt || "")) > latestEvidenceAt
       && predicate(item)
@@ -1421,6 +1488,8 @@ export async function verifyCampaignDeliverable(verifier = {}, groupPath) {
     checks.push(check("pdf_document_valid", inspection.ok, JSON.stringify(format)));
     checks.push(check("pdf_minimum_pages", format.pagesValid === true, `${format.pageCount || 0} pages`));
     checks.push(check("pdf_raster_image", verifier.requiresImages !== true || format.imagesValid === true, `${format.referencedImageCount || 0} referenced images`));
+  } else if (verifier.kind === "pptx" && fs.existsSync(filePath)) {
+    checks.push(...verifyPptxFile(filePath));
   } else if (["node_cli", "python_cli"].includes(verifier.kind)) {
     const command = verifier.kind === "python_cli" ? "python" : process.execPath;
     const result = await runProcess(command, [filePath, ...(verifier.args || [])]);
@@ -1428,6 +1497,41 @@ export async function verifyCampaignDeliverable(verifier = {}, groupPath) {
     checks.push(check("final_requirement", result.stdout.trim() === verifier.expectedOutput, result.stdout.trim()));
   }
   return { passed: checks.every((item) => item.passed), checks, advisoryChecks };
+}
+
+function verifyPptxFile(filePath) {
+  const required = ["[Content_Types].xml", "_rels/.rels", "ppt/presentation.xml"];
+  try {
+    const entries = inspectZipArchive(filePath).entries.filter((item) => !item.directory).map((item) => item.name);
+    const contents = new Map(readZipArchiveEntries(filePath).map((entry) => [entry.name, entry.content.toString("utf8")]));
+    const entrySet = new Set(entries);
+    const slideEntries = entries.filter((name) => /^ppt\/slides\/slide\d+\.xml$/i.test(name));
+    const contentTypes = contents.get("[Content_Types].xml") || "";
+    const relationships = contents.get("_rels/.rels") || "";
+    const presentation = contents.get("ppt/presentation.xml") || "";
+    const contentTypesNamespace = /<Types\b[^>]*xmlns=["']http:\/\/schemas\.openxmlformats\.org\/package\/2006\/content-types["']/i.test(contentTypes);
+    const presentationRoot = /<p:presentation\b[^>]*xmlns:p=["']http:\/\/schemas\.openxmlformats\.org\/presentationml\/2006\/main["']/i.test(presentation);
+    const presentationSlideList = /<p:sldIdLst\b[\s\S]*?<p:sldId\b/i.test(presentation);
+    const rootRelationship = /<Relationships\b[^>]*xmlns=["']http:\/\/schemas\.openxmlformats\.org\/package\/2006\/relationships["']/i.test(relationships)
+      && /<Relationship\b[^>]*Type=["'][^"']*\/officeDocument["'][^>]*Target=["']ppt\/presentation\.xml["']/i.test(relationships);
+    const slideXml = slideEntries.map((name) => contents.get(name) || "");
+    const slidesValid = slideEntries.length > 0 && slideXml.every((xml) => /<p:sld\b[^>]*xmlns:p=["']http:\/\/schemas\.openxmlformats\.org\/presentationml\/2006\/main["']/i.test(xml) && /<p:cSld\b/i.test(xml));
+    const contentTypesDeclareSlides = slideEntries.length > 0 && slideEntries.every((name) => new RegExp(`<Override\\b[^>]*PartName=["']/${name.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&")}["'][^>]*ContentType=["'][^"']*presentationml\\.slide\\+xml["']`, "i").test(contentTypes));
+    const declaredSlideCount = (presentation.match(/<p:sldId\b/gi) || []).length;
+    return [
+      check("pptx_zip_parses", true, `${entries.length} OOXML entries`),
+      check("pptx_required_parts", required.every((name) => entrySet.has(name)), JSON.stringify(required.filter((name) => !entrySet.has(name)))),
+      check("pptx_content_types_valid", contentTypesNamespace, "[Content_Types].xml namespace"),
+      check("pptx_relationships_valid", rootRelationship, "package relationship to ppt/presentation.xml"),
+      check("pptx_presentation_valid", presentationRoot && presentationSlideList, "presentation root and slide list"),
+      check("pptx_slides_present", slideEntries.length > 0, `${slideEntries.length} slide XML parts`),
+      check("pptx_slides_valid", slidesValid, `${slideEntries.length} slide XML roots`),
+      check("pptx_slide_content_types", contentTypesDeclareSlides, `${slideEntries.length} slide content type overrides`),
+      check("pptx_slide_count_matches", declaredSlideCount === slideEntries.length, `${declaredSlideCount} declared / ${slideEntries.length} files`)
+    ];
+  } catch (error) {
+    return [check("pptx_zip_parses", false, String(error.message || error))];
+  }
 }
 
 function verifyContextRetrievedArtifact(verifier = {}, artifactDelivery = {}) {
@@ -1928,18 +2032,56 @@ async function availablePort() {
   return port;
 }
 
-async function verifyScenario(scenario, groupPath) {
-  const filePath = path.resolve(groupPath, scenario.file);
+export async function verifyScenario(scenario, groupPath) {
+  const requestedPath = path.resolve(groupPath, scenario.file);
+  const filePath = scenario.verify?.kind === "pptx"
+    ? resolvePptxScenarioArtifact(requestedPath, groupPath)
+    : requestedPath;
   const checks = [];
-  checks.push(check("file_exists", fs.existsSync(filePath), scenario.file));
+  const evidencePath = path.relative(groupPath, filePath).replaceAll("\\", "/");
+  checks.push(check("file_exists", fs.existsSync(filePath), evidencePath));
   if (fs.existsSync(filePath)) {
     const stat = fs.statSync(filePath);
     checks.push(check("file_nonempty", stat.size > 0, `${stat.size} bytes`));
+  }
+  if (scenario.verify.kind === "pptx") {
+    checks.push(...verifyPptxFile(filePath));
+    return { passed: checks.every((item) => item.passed), checks };
   }
   const command = await runNode(filePath, scenario.verify.args);
   checks.push(check("command_exit", command.exitCode === 0, `exit=${command.exitCode}; stderr=${command.stderr.slice(0, 300)}`));
   checks.push(check("final_requirement", command.stdout.trim() === scenario.verify.expectedOutput, `expected=${JSON.stringify(scenario.verify.expectedOutput)} actual=${JSON.stringify(command.stdout.trim())}`));
   return { passed: checks.every((item) => item.passed), checks };
+}
+
+function resolvePptxScenarioArtifact(requestedPath, groupPath) {
+  if (fs.existsSync(requestedPath)) return requestedPath;
+  const requestedExtension = path.extname(requestedPath).toLowerCase();
+  if (requestedExtension && requestedExtension !== ".pptx") return requestedPath;
+  const candidates = findFilesByExtension(groupPath, ".pptx")
+    .filter((candidate) => !isHarnessInternalPath(candidate, groupPath));
+  return candidates.length === 1 ? candidates[0] : requestedPath;
+}
+
+function findFilesByExtension(root, extension) {
+  const results = [];
+  const visit = (directory) => {
+    let entries;
+    try { entries = fs.readdirSync(directory, { withFileTypes: true }); } catch { return; }
+    for (const entry of entries) {
+      if (entry.name === ".git" || entry.name === "node_modules") continue;
+      const fullPath = path.join(directory, entry.name);
+      if (entry.isDirectory()) visit(fullPath);
+      else if (entry.isFile() && path.extname(entry.name).toLowerCase() === extension) results.push(fullPath);
+    }
+  };
+  visit(root);
+  return results;
+}
+
+function isHarnessInternalPath(filePath, groupPath) {
+  const relative = path.relative(groupPath, filePath).replaceAll("\\", "/").toLowerCase();
+  return relative.startsWith("shared/") || relative.startsWith("sessions/") || relative.startsWith("members/");
 }
 
 function verifySessions({ interruptedSession, continuedSession, editedSession }) {
@@ -1977,7 +2119,7 @@ function isMaterialActionEvent(event = {}) {
 }
 
 export function isStreamingActivityEvent(event = {}) {
-  return ["agent_start", "model_start", "agent_delta"].includes(event.type);
+  return ["model_start", "agent_delta"].includes(event.type);
 }
 
 function isVerifiedToolActivityEvent(event = {}) {

@@ -36,7 +36,8 @@ test("an explicit collaborative delivery request cannot be downgraded to a singl
   const state = createExecutionState({
     question: "\u4f60\u4eec\u5408\u4f5c\u64b0\u5199\u62a5\u544a\u5e76\u5236\u4f5c PDF\u3002",
     agents: pair,
-    workspaceGroup: { permissions: { defaultTier: "text", seatTiers: { owner: "full", contributor: "text" } } }
+    workspaceGroup: { permissions: { defaultTier: "text", seatTiers: { owner: "full", contributor: "text" } } },
+    workMode: "collab"
   });
   advanceExecutionState({
     state,
@@ -55,11 +56,10 @@ test("an explicit collaborative delivery request cannot be downgraded to a singl
   assert.equal(collaboration.required, true);
   assert.equal(collaboration.pending, true);
   assert.equal(state.taskContract.collaboration.beforeFirstMutation, true);
-  assert.equal(state.ownership.delegations.length, 1);
-  assert.equal(state.ownership.delegations[0].assigneeId, "contributor");
-  assert.equal(state.ownership.delegations[0].native, true);
+  assert.equal(state.ownership.delegations.length, 0);
+  assert.equal(state.participation.participants[0].agentId, "contributor");
   assert.deepEqual(selectExecutionAgents(state, pair).map((agent) => agent.id), ["contributor"]);
-  assert.match(executionInstruction(state, pair[1]), /Delegated research work/);
+  assert.match(executionInstruction(state, pair[1]), /Collaborative deliberation/);
 });
 
 test("system collaboration scheduling prefers an explicitly named enabled member", () => {
@@ -71,7 +71,8 @@ test("system collaboration scheduling prefers an explicitly named enabled member
   const state = createExecutionState({
     question: "你们合作写论文，狗必须参与讨论，讨论好了再制作 PDF。",
     agents: pair,
-    workspaceGroup: { permissions: { defaultTier: "text", seatTiers: { owner: "full" } } }
+    workspaceGroup: { permissions: { defaultTier: "text", seatTiers: { owner: "full" } } },
+    workMode: "collab"
   });
   advanceExecutionState({
     state,
@@ -87,8 +88,55 @@ test("system collaboration scheduling prefers an explicitly named enabled member
     }
   });
   assert.equal(state.taskContract.collaboration.beforeFirstMutation, true);
-  assert.equal(state.ownership.delegations[0].assigneeId, "dog");
-  assert.deepEqual(selectExecutionAgents(state, pair).map((agent) => agent.id), ["dog"]);
+  assert.deepEqual(selectExecutionAgents(state, pair).map((agent) => agent.id), ["dog", "other"]);
+});
+
+test("collab delivery collects attributable member input and then returns integration to the durable owner", () => {
+  const owner = { id: "owner", name: "Owner", role: "Builder", enabled: true };
+  const designer = { id: "designer", name: "Designer", role: "Designer", enabled: true };
+  const state = createExecutionState({
+    question: "Create the requested project.",
+    agents: [owner, designer],
+    workspaceGroup: { permissions: { defaultTier: "text", seatTiers: { owner: "full" } } },
+    workMode: "collab"
+  });
+  const session = { id: "session-collab", toolExecutionResults: [], fileOperationExecutionResults: [], groupSnapshot: { agents: [owner, designer] } };
+  advanceExecutionState({ state, session, agent: owner, response: { status: "speak", task_contract: {
+    mode: "delivery", objective: "Create the project.", requires_workspace: true, requires_verification: true, deliverables: ["project"], completion_criteria: ["Project exists.", "Tests pass."], next_action: "Design and implement the project."
+  } } });
+
+  assert.equal(state.phase, "deliberation");
+  assert.deepEqual(selectExecutionAgents(state, [owner, designer]).map((agent) => agent.id), ["designer"]);
+  assert.match(executionInstruction(state, designer), /Collaborative deliberation/);
+  advanceExecutionState({ state, session, agent: designer, response: { status: "speak", argument: "Separate the parser from the CLI and test both boundaries." } });
+
+  assert.equal(state.phase, "inspect");
+  assert.equal(state.participation.ownerIntegrationStatus, "pending");
+  assert.deepEqual(selectExecutionAgents(state, [owner, designer]).map((agent) => agent.id), ["owner"]);
+  assert.match(executionInstruction(state, owner), /Separate the parser from the CLI/);
+  advanceExecutionState({ state, session, agent: owner, response: { status: "speak", argument: "I integrated the separation into the execution plan." } });
+  assert.equal(state.participation.ownerIntegrationStatus, "completed");
+});
+
+test("independent delivery collects isolated first passes before owner integration", () => {
+  const owner = { id: "owner", name: "Owner", enabled: true };
+  const analyst = { id: "analyst", name: "Analyst", enabled: true };
+  const state = createExecutionState({
+    question: "Create the requested comparison.",
+    agents: [owner, analyst],
+    workspaceGroup: { permissions: { defaultTier: "text", seatTiers: { owner: "full" } } },
+    workMode: "independent"
+  });
+  const session = { id: "session-independent", toolExecutionResults: [], fileOperationExecutionResults: [], groupSnapshot: { agents: [owner, analyst] } };
+  advanceExecutionState({ state, session, agent: owner, response: { status: "speak", task_contract: {
+    mode: "delivery", objective: "Create the comparison.", requires_workspace: true, requires_verification: true, deliverables: ["comparison"], completion_criteria: ["Comparison exists."], next_action: "Draft and verify it."
+  } } });
+
+  assert.deepEqual(selectExecutionAgents(state, [owner, analyst]).map((agent) => agent.id), ["analyst"]);
+  assert.match(executionInstruction(state, analyst), /Independent first pass/);
+  advanceExecutionState({ state, session, agent: analyst, response: { status: "speak", argument: "Compare operational cost and failure recovery separately." } });
+  assert.equal(state.participation.ownerIntegrationStatus, "pending");
+  assert.match(executionInstruction(state, owner), /Compare operational cost/);
 });
 
 test("explicit rerun and verification requests remain delivery work after recovery", () => {
@@ -131,6 +179,76 @@ test("a semantic task contract, rather than task wording, activates delivery exe
   assert.match(instruction, /Produce the requested result/);
   assert.match(instruction, /requested output/);
   assert.match(instruction, /verify the output/);
+});
+
+test("an explicit Chinese PPT request cannot be downgraded to a non-workspace contract", () => {
+  const question = "你们两谁更狗，讨论一下，做一个PPT出来";
+  assert.equal(isDeliveryTask(question), true);
+  const state = createExecutionState({ question, agents, workspaceGroup });
+  advanceExecutionState({
+    state,
+    session: { toolExecutionResults: [], fileOperationExecutionResults: [], groupSnapshot: { agents } },
+    agent: agents[1],
+    response: {
+      status: "speak",
+      task_contract: {
+        mode: "delivery",
+        objective: "Discuss the topic.",
+        requires_workspace: false,
+        requires_verification: false,
+        deliverables: ["debate notes"],
+        completion_criteria: ["The discussion is complete."],
+        next_action: "Discuss the topic."
+      }
+    }
+  });
+
+  assert.equal(state.taskContract.mode, "delivery");
+  assert.equal(state.taskContract.requiresWorkspace, true);
+  assert.equal(state.taskContract.requiresVerification, true);
+  assert.equal(state.taskContract.artifacts.some((item) => item.extension === ".pptx"), true);
+  assert.equal(state.artifactStatus, "not_checked");
+  assert.notEqual(state.phase, "complete");
+});
+
+test("an explicit PPT request can create a durable contract even when the provider omits one", () => {
+  const question = "做一个PPT出来";
+  const state = createExecutionState({ question, agents, workspaceGroup });
+  advanceExecutionState({
+    state,
+    session: { toolExecutionResults: [], fileOperationExecutionResults: [], groupSnapshot: { agents } },
+    agent: agents[1],
+    response: { status: "speak" }
+  });
+
+  assert.equal(state.taskContract.requiresWorkspace, true);
+  assert.equal(state.taskContract.requiresVerification, true);
+  assert.match(state.taskContract.nextAction, /Create and verify|deliverable/i);
+});
+
+test("a successful direct package install is acquisition evidence, never verification evidence", () => {
+  const question = "做一个PPT出来";
+  const state = createExecutionState({ question, agents, workspaceGroup });
+  const session = {
+    toolExecutionResults: [{
+      id: "pip-install",
+      tool: "execute_command",
+      command: "python -m pip install python-pptx",
+      reason: "Install the dependency and verify the environment.",
+      status: "completed",
+      result: { ok: true, exitCode: 0, command: "python -m pip install python-pptx" }
+    }],
+    fileOperationExecutionResults: [],
+    groupSnapshot: { agents }
+  };
+
+  advanceExecutionState({ state, session, agent: agents[1], question });
+
+  assert.equal(state.artifactStatus, "not_checked");
+  assert.notEqual(state.phase, "review");
+  assert.notEqual(state.phase, "complete");
+  assert.equal(state.recovery.pendingCapabilities[0].acquisitionId, "pip-install");
+  assert.match(state.lastAction, /capability_acquired/);
 });
 
 test("a complete provider contract survives equivalent object and scalar field shapes", () => {
@@ -427,6 +545,35 @@ test("a missing intake contract keeps the single owner in intake instead of rele
   assert.deepEqual(selectExecutionAgents(state, agents).map((agent) => agent.id), ["builder"]);
 });
 
+test("runtime prebuilds a non-blocking delivery contract and schedules collaborators immediately", () => {
+  const state = createExecutionState({
+    question: "Create the requested project.",
+    agents,
+    workspaceGroup,
+    workMode: "collab",
+    prebuildContract: true
+  });
+
+  assert.equal(state.taskContract.mode, "delivery");
+  assert.match(state.taskContract.source, /deterministic_request_default/);
+  assert.equal(state.phase, "deliberation");
+  assert.notDeepEqual(selectExecutionAgents(state, agents).map((agent) => agent.id), [state.executorId]);
+});
+
+test("runtime prebuilds a discussion contract without requiring intake", () => {
+  const state = createExecutionState({
+    question: "Explain the tradeoffs without changing files.",
+    agents,
+    workspaceGroup,
+    workMode: "collab",
+    prebuildContract: true
+  });
+
+  assert.equal(state.taskContract.mode, "discussion");
+  assert.equal(state.phase, "discussion");
+  assert.equal(state.active, false);
+});
+
 test("an incomplete task contract is not enough to release intake ownership", () => {
   const state = createExecutionState({ question: "Do the requested task.", agents, workspaceGroup });
   advanceExecutionState({
@@ -687,8 +834,72 @@ test("reviewer blocking evidence sends the same executor back to repair", () => 
   });
 
   assert.equal(state.phase, "repair");
+  assert.equal(state.repair.requiredMaterialChange, true);
+  assert.equal(state.repair.checkpointVersion, 2);
   assert.match(state.lastError, /integration test/);
+  assert.match(executionInstruction(state, agents[1]), /Blocking repair gate/);
   assert.deepEqual(selectExecutionAgents(state, agents).map((agent) => agent.id), ["builder"]);
+});
+
+test("a blocking review rejects unchanged verification until the owner records a real repair", () => {
+  const state = createExecutionState({ question: "Update and validate the current JSON artifact.", agents, workspaceGroup });
+  state.phase = "review";
+  state.checkpointVersion = 4;
+  state.artifactStatus = "not_requested";
+  const session = {
+    toolExecutionResults: [],
+    fileOperationExecutionResults: [],
+    groupSnapshot: { agents }
+  };
+
+  advanceExecutionState({
+    state,
+    session,
+    agent: agents[2],
+    response: {
+      status: "speak",
+      objection_items: [{ id: "wrong-status", issue: "The artifact is still draft instead of review.", blocks_final: true, in_scope: true }]
+    }
+  });
+
+  session.toolExecutionResults.push({
+    id: "unchanged-json-parse",
+    tool: "run_code",
+    reason: "Validate the current JSON artifact.",
+    status: "completed",
+    result: { ok: true, exitCode: 0, verificationIntent: true }
+  });
+  advanceExecutionState({ state, session, agent: agents[1], question: state.taskQuestion });
+
+  assert.equal(state.phase, "repair");
+  assert.equal(state.checkpointVersion, 4);
+  assert.equal(state.repair.requiredMaterialChange, true);
+  assert.equal(state.repair.unproductiveVerificationAttempts, 1);
+  assert.equal(state.lastAction, "repair_verification_without_material_change");
+  assert.match(state.nextAction, /Do not create another review checkpoint/);
+
+  session.toolExecutionResults.push(
+    {
+      id: "status-repair",
+      tool: "workspace_edit",
+      status: "completed",
+      result: { ok: true, workspaceChanges: { totalChanges: 1, modified: [{ path: "deliverables/brief.json" }] } }
+    },
+    {
+      id: "status-review-verified",
+      tool: "run_code",
+      reason: "Validate the repaired JSON artifact.",
+      status: "completed",
+      result: { ok: true, exitCode: 0, verificationIntent: true }
+    }
+  );
+  advanceExecutionState({ state, session, agent: agents[1], question: state.taskQuestion });
+
+  assert.equal(state.phase, "repair");
+  assert.equal(state.checkpointVersion, 5);
+  assert.equal(state.repair.requiredMaterialChange, false);
+  assert.equal(state.repair.unproductiveVerificationAttempts, 0);
+  assert.equal(state.lastAction, "verification_passed:status-review-verified");
 });
 
 test("an interrupted continuation resumes the execution owner and pending phase", () => {
@@ -711,6 +922,42 @@ test("an interrupted continuation resumes the execution owner and pending phase"
   assert.equal(resumed.executorId, "builder");
   assert.equal(resumed.taskQuestion, "构建一个真实项目并打包。");
   assert.equal(resumed.processedToolResults, 0);
+});
+
+test("an explicit continuation reopens a completed checkpoint without drifting its durable finalizer", () => {
+  const priorAgents = [
+    { id: "builder", name: "Builder", role: "Builder", enabled: true },
+    { id: "critic", name: "Critic", role: "Critic", enabled: true },
+    { id: "judge", name: "Judge", role: "Finalizer", judge: true, enabled: true }
+  ];
+  const previousState = createExecutionState({ question: "Create the shared artifact.", agents: priorAgents, workspaceGroup, workMode: "collab" });
+  previousState.phase = "complete";
+  previousState.checkpointVersion = 5;
+  previousState.reviewedCheckpointVersion = 5;
+  previousState.finalizerId = "judge";
+  previousState.artifactStatus = "verified";
+  const mutatedAgents = [
+    { id: "critic", name: "Critic", role: "Summarizer", judge: true, enabled: true },
+    { id: "builder", name: "Builder", role: "Builder", enabled: true },
+    { id: "judge", name: "Judge", role: "Finalizer", judge: true, enabled: true }
+  ];
+
+  const resumed = createExecutionState({
+    question: "continue",
+    agents: mutatedAgents,
+    workspaceGroup,
+    workMode: "collab",
+    previousState,
+    resumeCompleted: true
+  });
+
+  assert.equal(resumed.resumed, true);
+  assert.equal(resumed.phase, "inspect");
+  assert.equal(resumed.finalizerId, "judge");
+  assert.equal(resumed.executorId, "builder");
+  assert.equal(resumed.artifactStatus, "not_checked");
+  assert.equal(resumed.lastAction, "resumed_completed_checkpoint");
+  assert.match(resumed.nextAction, /durable owner or finalizer/);
 });
 
 test("Chinese project requests activate delivery execution", () => {
@@ -823,6 +1070,34 @@ test("checkpoint reviews are durable delegated work and complete only after ever
   assert.equal(state.reviewedCheckpointVersion, 1);
 });
 
+test("checkpoint review failures become explicit terminal outcomes instead of pending forever", () => {
+  const executor = { id: "builder", name: "Builder", role: "Builder", enabled: true };
+  const reviewer = { id: "reviewer", name: "Reviewer", role: "Red Team", mandatoryRedTeam: true, enabled: true };
+  const state = createExecutionState({
+    question: "Create and verify a report.",
+    agents: [executor, reviewer],
+    workspaceGroup: { permissions: { defaultTier: "text", seatTiers: { builder: "full", reviewer: "tool" } } }
+  });
+  state.phase = "review";
+  state.checkpointVersion = 1;
+  state.artifactStatus = "verified";
+  selectExecutionAgents(state, [executor, reviewer]);
+
+  advanceExecutionState({
+    state,
+    session: { groupSnapshot: { agents: [executor, reviewer] } },
+    agent: reviewer,
+    response: { status: "timed_out", reason: "provider deadline", objection_items: [] }
+  });
+
+  const delegation = state.ownership.delegations.find((item) => item.assigneeId === reviewer.id);
+  assert.equal(delegation.status, "timed_out");
+  assert.equal(state.phase, "complete");
+  assert.match(state.lastError, /ended timed_out/);
+  assert.match(state.nextAction, /non-passing outcome/);
+  assert.deepEqual(selectExecutionAgents(state, [executor, reviewer]), []);
+});
+
 test("delivery owner delegates bounded work, receives a durable handoff, and remains the only final executor", () => {
   const owner = { id: "owner", name: "Owner", role: "Builder", enabled: true };
   const researcher = { id: "researcher", name: "Researcher", role: "Research", enabled: true };
@@ -895,6 +1170,133 @@ test("delivery owner delegates bounded work, receives a durable handoff, and rem
   assert.equal(delegation.ownerAcknowledged, true);
   assert.match(executionInstruction(state, owner), /Durable delegated handoffs/);
   assert.equal(state.executorId, "owner");
+});
+
+test("read-only delegations cannot advertise tools that their permission scope will always reject", () => {
+  const owner = { id: "owner", name: "Owner", role: "Builder", enabled: true };
+  const reviewer = { id: "reviewer", name: "Reviewer", role: "Reviewer", enabled: true };
+  const state = createExecutionState({
+    question: "Create and review an artifact.",
+    agents: [owner, reviewer],
+    workspaceGroup: { permissions: { defaultTier: "text", seatTiers: { owner: "full", reviewer: "tool" } } }
+  });
+  state.phase = "inspect";
+  state.taskContract = {
+    mode: "delivery",
+    objective: "Create and review an artifact.",
+    requiresWorkspace: true,
+    requiresVerification: true,
+    deliverables: ["artifact.json"],
+    completionCriteria: ["A reviewer inspects it."],
+    nextAction: "Delegate review."
+  };
+  const session = { toolExecutionResults: [], fileOperationExecutionResults: [], groupSnapshot: { agents: [owner, reviewer] } };
+  advanceExecutionState({
+    state,
+    session,
+    agent: owner,
+    response: {
+      status: "speak",
+      task_delegations: [{
+        type: "review",
+        assignee_id: "reviewer",
+        task: "Inspect the artifact without mutating it.",
+        expected_evidence: ["Read evidence"],
+        allowed_tools: ["read_file", "execute_command", "run_code", "workspace_edit", "install_package"],
+        allow_workspace_mutation: false,
+        allow_runtime_mutation: false
+      }]
+    }
+  });
+
+  const delegation = state.ownership.delegations.find((item) => item.assigneeId === "reviewer");
+  assert.deepEqual(delegation.allowedTools, ["read_file"]);
+  assert.match(executionInstruction(state, reviewer), /Allowed tools: read_file/);
+  assert.doesNotMatch(executionInstruction(state, reviewer), /execute_command|run_code|workspace_edit|install_package/);
+});
+
+test("delegation assignees resolve from a unique current display name after member mutation", () => {
+  const owner = { id: "builder", name: "Builder 0731", role: "Builder", enabled: true };
+  const critic = { id: "critic", name: "Critic", role: "Reviewer", enabled: true, judge: true };
+  const state = createExecutionState({
+    question: "Continue the collaborative review.",
+    agents: [owner, critic],
+    workspaceGroup: { permissions: { defaultTier: "text", seatTiers: { builder: "full", critic: "tool" } } }
+  });
+  state.phase = "inspect";
+  state.taskContract = {
+    mode: "delivery",
+    objective: "Continue the collaborative review.",
+    requiresWorkspace: true,
+    requiresVerification: true,
+    deliverables: ["artifact.json"],
+    completionCriteria: ["The current reviewer contributes."],
+    nextAction: "Delegate the review."
+  };
+  const session = { toolExecutionResults: [], fileOperationExecutionResults: [], groupSnapshot: { agents: [owner, critic] } };
+  advanceExecutionState({
+    state,
+    session,
+    agent: owner,
+    response: {
+      status: "speak",
+      task_delegations: [{
+        type: "review",
+        assignee_id: "Critic",
+        task: "Inspect the current artifact.",
+        expected_evidence: ["Read evidence"],
+        allowed_tools: ["read_file"]
+      }]
+    }
+  });
+
+  const delegation = state.ownership.delegations.find((item) => item.type === "review");
+  assert.equal(delegation.assigneeId, "critic");
+  assert.equal(delegation.status, "pending");
+  assert.deepEqual(selectExecutionAgents(state, [owner, critic]).map((agent) => agent.id), ["critic"]);
+});
+
+test("a durable finalizer does not drift when another member becomes judge and the seats are reordered", () => {
+  const initialAgents = [
+    { id: "builder", name: "Builder", role: "Builder", enabled: true },
+    { id: "critic", name: "Critic", role: "Critic", enabled: true, mandatoryRedTeam: true },
+    { id: "judge", name: "Judge", role: "Finalizer", enabled: true, judge: true }
+  ];
+  const state = createExecutionState({
+    question: "Work together to update the artifact.",
+    agents: initialAgents,
+    workspaceGroup: { permissions: { defaultTier: "text", seatTiers: { builder: "full" } } },
+    workMode: "collab"
+  });
+  const mutatedAndReorderedAgents = [
+    { id: "critic", name: "Critic", role: "Summarizer", enabled: true, judge: true },
+    { id: "builder", name: "Builder 0731", role: "Builder", enabled: true },
+    { id: "judge", name: "Judge", role: "Finalizer", enabled: true, judge: true }
+  ];
+  const session = { toolExecutionResults: [], fileOperationExecutionResults: [], groupSnapshot: { agents: mutatedAndReorderedAgents } };
+  advanceExecutionState({
+    state,
+    session,
+    agent: mutatedAndReorderedAgents[1],
+    response: {
+      status: "speak",
+      task_contract: {
+        mode: "delivery",
+        objective: "Update the artifact collaboratively.",
+        requires_workspace: true,
+        requires_verification: true,
+        deliverables: ["artifact.json"],
+        completion_criteria: ["A non-owner contribution is integrated."],
+        next_action: "Collect a contribution, then update the artifact."
+      }
+    }
+  });
+
+  assert.equal(state.executorId, "builder");
+  assert.equal(state.finalizerId, "judge");
+  assert.deepEqual(state.participation.participants.map((item) => item.agentId), ["critic"]);
+  assert.deepEqual(selectExecutionAgents(state, mutatedAndReorderedAgents).map((agent) => agent.id), ["critic"]);
+  assert.equal(state.participation.participants.some((item) => item.agentId === "judge"), false);
 });
 
 test("delivery recovery persists failed acquisition strategies, blocks exact retries, and requires real use after an alternative succeeds", () => {
@@ -972,4 +1374,50 @@ test("delivery recovery persists failed acquisition strategies, blocks exact ret
   const resumed = createExecutionState({ question: "continue", agents, workspaceGroup, previousState: state });
   assert.equal(resumed.recovery.failures[0].fingerprint, state.recovery.failures[0].fingerprint);
   assert.equal(gateDeliveryRecoveryToolRequests(resumed, agents[1], [{ tool: "install_package", manager: "first-manager", packageName: "chosen-package" }]).rejected[0].code, "recovery_strategy_repeated");
+});
+
+test("failed Skill reads survive collaborator turns and block the same nonexistent Skill retry", () => {
+  const state = createExecutionState({ question: "Create the requested report.", agents, workspaceGroup });
+  const session = {
+    toolExecutionResults: [],
+    fileOperationExecutionResults: [],
+    groupSnapshot: { agents }
+  };
+  advanceExecutionState({
+    state,
+    session,
+    agent: agents[1],
+    question: state.taskQuestion,
+    response: {
+      status: "speak",
+      task_contract: {
+        mode: "delivery",
+        objective: "Create the requested report.",
+        requires_workspace: true,
+        requires_verification: true,
+        deliverables: ["report.pdf"],
+        completion_criteria: ["The report exists and passes validation."],
+        next_action: "Create and validate the report."
+      }
+    }
+  });
+  session.toolExecutionResults.push({
+    id: "missing-skill-read",
+    tool: "skill_read",
+    skillId: "missing-document-skill",
+    status: "failed",
+    error: "Skill not found",
+    result: { ok: false, skillId: "missing-document-skill", error: "Skill not found" }
+  });
+  advanceExecutionState({ state, session, agent: agents[1], question: state.taskQuestion, response: { status: "speak" } });
+
+  assert.match(executionInstruction(state, agents[1]), /Failed strategy \(do not repeat unchanged\): skill instructions for missing-document-skill/);
+  const gate = gateDeliveryRecoveryToolRequests(state, agents[1], [
+    { tool: "skill_read", skillId: "missing-document-skill" },
+    { tool: "skill_list" },
+    { tool: "workspace_edit", action: "write", path: "report.pdf", code: "%PDF-1.4" }
+  ]);
+  assert.equal(gate.rejected.length, 1);
+  assert.equal(gate.rejected[0].code, "recovery_strategy_repeated");
+  assert.deepEqual(gate.accepted.map((item) => item.tool), ["skill_list", "workspace_edit"]);
 });

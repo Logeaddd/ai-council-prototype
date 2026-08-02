@@ -179,11 +179,16 @@ export function Sheet({
 
 const STATE_TONE: Record<AgentState, string> = {
   idle: "bg-muted-foreground/50",
+  scheduled: "bg-info",
+  waiting: "bg-muted-foreground/70",
+  handoff_ready: "bg-primary",
+  integrating: "bg-warning",
   thinking: "bg-info",
   speaking: "bg-primary",
   completed: "bg-success",
   skipped: "bg-muted-foreground/40",
   unavailable: "bg-danger",
+  blocked: "bg-danger",
 }
 
 export function StateDot({
@@ -215,18 +220,23 @@ export function StateDot({
 }
 
 export function StatePill({ state }: { state: AgentState }) {
-  const tone: Record<AgentState, string> = {
+  const tone: Record<string, string> = {
     idle: "text-muted-foreground",
+    scheduled: "text-info",
+    waiting: "text-muted-foreground",
+    handoff_ready: "text-primary",
+    integrating: "text-warning",
     thinking: "text-info",
     speaking: "text-primary",
     completed: "text-success",
     skipped: "text-muted-foreground",
     unavailable: "text-danger",
+    blocked: "text-danger",
   }
   return (
     <span className={cn("inline-flex items-center gap-1.5 text-xs", tone[state])}>
       <StateDot state={state} />
-      {STATE_LABEL[state]}
+      {state === "blocked" ? "任务卡住" : STATE_LABEL[state] || state}
     </span>
   )
 }

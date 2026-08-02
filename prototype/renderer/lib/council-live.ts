@@ -97,6 +97,27 @@ export interface CouncilEvent {
   consensus?: unknown
   session?: CouncilSession
   finalDecision?: CouncilFinalDecision
+  execution?: {
+    phase?: string
+    workMode?: string
+    executorId?: string
+    executorName?: string
+    nextAction?: string
+    participation?: {
+      policy?: string
+      status?: string
+      ownerIntegrationStatus?: string
+      participants?: Array<{
+        agentId?: string
+        agentName?: string
+        role?: string
+        scope?: string
+        status?: string
+        outcome?: string
+        summary?: string
+      }>
+    }
+  }
   taskRun?: {
     id?: string
     state?: string
@@ -106,6 +127,9 @@ export interface CouncilEvent {
       phase?: string
       nextAction?: string
       artifactStatus?: string
+      workMode?: string
+      executorId?: string
+      participation?: CouncilEvent["execution"] extends { participation?: infer P } ? P : never
     }
   }
   result?: {
@@ -886,6 +910,18 @@ export async function addWorkspaceMember(body: {
     "/api/workspace/add-member",
     body,
   )
+}
+
+export async function deleteWorkspaceMember(body: {
+  groupPath: string
+  seatId: string
+}) {
+  return api<{
+    ok: boolean
+    group: WorkspaceGroup
+    deletedSeat: WorkspaceSeat
+    preservedPrivateFolder: string
+  }>("/api/workspace/delete-member", body)
 }
 
 export async function saveGroupSettings(body: {

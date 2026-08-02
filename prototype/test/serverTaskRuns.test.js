@@ -128,7 +128,7 @@ test("real HTTP/SSE rejects an unconfigured UI seat before it can call a provide
   }
 });
 
-test("a malformed intake reply stays with its owner and becomes an honest incomplete run", async () => {
+test("a missing model-authored contract does not trap the server run in intake", async () => {
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-server-intake-contract-"));
   const groupPath = path.join(sandbox, "group");
   fs.mkdirSync(groupPath, { recursive: true });
@@ -169,23 +169,13 @@ test("a malformed intake reply stays with its owner and becomes an honest incomp
       runtimeGroup: runtimeGroupWithHelper(provider.apiBaseUrl)
     });
     const messages = events.filter((event) => event.type === "agent_message");
-    assert.equal(messages.length, 2, JSON.stringify(messages));
-    assert.equal(messages.every((event) => event.message?.agentId === "builder"), true, JSON.stringify(messages));
+    assert.equal(messages.length, 4, JSON.stringify(messages));
+    assert.deepEqual(messages.map((event) => event.message?.agentId), ["builder", "helper", "builder", "helper"]);
     assert.equal(events.some((event) => event.type === "tool_success" && event.agentId !== "builder"), false);
     assert.equal(events.some((event) => event.type === "tool_success"), false);
     const completed = events.find((event) => event.type === "done");
-    assert.equal(completed?.result?.session?.status, "incomplete", JSON.stringify(completed));
-    assert.equal(completed?.result?.session?.executionState?.phase, "intake");
-    assert.equal(completed?.result?.session?.executionState?.intakeAttempts, 2);
-    assert.equal(completed?.result?.session?.executionState?.lastAction, "task_contract_missing");
-
-    const taskEvent = events.find((event) => event.type === "task_run" && event.taskRun?.id);
-    assert.ok(taskEvent, "SSE must publish the blocked intake TaskRun");
-    const detail = await requestJson(port, `/api/task-runs/${encodeURIComponent(taskEvent.taskRun.id)}?groupPath=${encodeURIComponent(groupPath)}`, undefined, "GET");
-    assert.equal(detail.status, 200);
-    assert.equal(detail.body.taskRun.execution.phase, "intake");
-    assert.equal(detail.body.taskRun.execution.intakeAttempts, 2);
-    assert.match(detail.body.taskRun.execution.lastError, /without a valid task contract/i);
+    assert.notEqual(completed?.result?.session?.roundAdvanceBlockedReason, "task_contract_required_before_round_advance");
+    assert.equal(completed?.result?.session?.executionState?.phase, "discussion");
   } finally {
     child.kill();
     await waitForExit(child);
@@ -237,7 +227,7 @@ test("real server HTTP/SSE preserves a skip-status bounded contributor handoff a
       runtimeGroup: runtimeGroupWithResearcher(provider.apiBaseUrl)
     });
     const messages = events.filter((event) => event.type === "agent_message");
-    assert.deepEqual(messages.map((event) => event.message.agentId), ["builder", "researcher", "builder"]);
+    assert.deepEqual(messages.map((event) => event.message.agentId), ["researcher", "builder", "researcher", "builder"]);
     const writes = events.filter((event) => event.type === "tool_success" && event.tool === "workspace_edit");
     assert.equal(writes.length, 1, JSON.stringify(events.map((event) => ({ type: event.type, tool: event.tool, agentId: event.agentId, error: event.error, message: event.message?.displayText }))));
     assert.equal(writes[0].agentId, "builder");
@@ -688,6 +678,13 @@ async function startDelegatingProvider() {
     let payload;
     if (prompt.includes("FinalDecision JSON object")) {
       payload = finalDecision();
+    } else if (prompt.includes("[Collaborative deliberation]") && prompt.includes("Researcher")) {
+      payload = {
+        status: "speak",
+        argument: "The owner should delegate reading shared/research.txt before writing the final document.",
+        objections: [],
+        memory_candidates: []
+      };
     } else if (prompt.includes("[Delegated research work]") && !researcherReadIssued) {
       researcherReadIssued = true;
       payload = {
@@ -718,7 +715,7 @@ async function startDelegatingProvider() {
         objections: [],
         memory_candidates: []
       };
-    } else if (!intakeHandled && prompt.includes("[Task intake owner]")) {
+    } else if (!intakeHandled && (prompt.includes("[Task intake owner]") || prompt.includes("[Execution owner]"))) {
       intakeHandled = true;
       const contract = {
         status: "speak",

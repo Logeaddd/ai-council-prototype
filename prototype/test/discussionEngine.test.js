@@ -174,6 +174,63 @@ test("continuation restores the durable TaskRun checkpoint before older session 
   assert.equal(resumed.sessionIds.includes(session.id), true);
 });
 
+test("a temporarily disabled durable finalizer blocks synthesis instead of transferring it", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-durable-finalizer-unavailable-"));
+  const priorExecution = {
+    active: true,
+    executorId: "builder",
+    executorName: "Builder",
+    finalizerId: "judge",
+    taskQuestion: "Continue the retained delivery.",
+    phase: "repair",
+    nextAction: "Run the retained repair.",
+    artifactStatus: "needs_revision",
+    taskContract: {
+      mode: "delivery",
+      objective: "Continue the retained delivery.",
+      requires_workspace: true,
+      requires_verification: true,
+      deliverables: ["shared/result.txt"],
+      completion_criteria: ["Verify the repaired result."],
+      next_action: "Run the retained repair."
+    }
+  };
+  const priorRun = createTaskRun({
+    groupPath: tmp,
+    sessionId: "session-before-finalizer-disable",
+    question: priorExecution.taskQuestion,
+    session: { executionState: priorExecution }
+  });
+  syncTaskRunFromSession({
+    groupPath: tmp,
+    taskRun: priorRun,
+    session: { id: "session-before-finalizer-disable", status: "interrupted", interruptionReason: "member_disabled", executionState: priorExecution }
+  });
+  const group = validateGroupConfig({
+    id: "durable-finalizer-unavailable",
+    name: "Durable Finalizer Unavailable",
+    settings: { maxRounds: 1, minConsensusWeight: 1, stopWhenAllSkip: true, agentTimeoutMs: 1000 },
+    agents: [
+      { id: "builder", name: "Builder", role: "Builder", provider: "mock", apiBaseUrl: "mock://local", model: "mock-builder", weight: 1, enabled: true },
+      { id: "critic", name: "Critic", role: "Critic", provider: "mock", apiBaseUrl: "mock://local", model: "mock-critic", weight: 1, enabled: true, judge: true },
+      { id: "judge", name: "Judge", role: "Judge", provider: "mock", apiBaseUrl: "mock://local", model: "mock-judge", weight: 1, enabled: false, judge: true }
+    ]
+  });
+  const calls = [];
+
+  const { session } = await runCouncil("continue", group, tmp, {
+    groupPath: tmp,
+    continuationContext: { previousQuestion: priorExecution.taskQuestion, taskRunId: priorRun.id },
+    onModelCall: (record) => calls.push(record)
+  });
+
+  assert.equal(session.executionState.finalizerId, "judge");
+  assert.equal(session.guardStopReason, "durable_finalizer_unavailable:judge");
+  assert.equal(session.finalizationStatus.reason, "durable_finalizer_unavailable:judge");
+  assert.equal(calls.some((call) => call.phase === "final" || call.phase === "final_repair"), false);
+  assert.equal(session.finalDecision.risks.includes("final_judge_unavailable:durable_finalizer_unavailable:judge"), true);
+});
+
 test("file delivery work stops after the configured real model-call budget without workspace progress", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-no-progress-"));
   const calls = [];
@@ -450,9 +507,7 @@ test("invalid finalizer output receives one format repair attempt", async () => 
     assert.equal(finalCalls, 2);
     assert.equal(session.finalizationStatus.status, "completed");
     assert.equal(session.finalDecision.answer, "The analysis is complete.");
-    // The round itself still has no consensus support, which is independent
-    // from whether the finalizer repair returned a valid machine-readable answer.
-    assert.equal(session.status, "incomplete");
+    assert.equal(session.status, "completed");
   } finally {
     await close(server);
   }
@@ -2468,6 +2523,8 @@ test("context search tool requests return archived public snippets to follow-up 
     assert.equal(result.session.toolExecutionResults.length, 1);
     assert.equal(result.session.toolExecutionResults[0].tool, "search_context");
     assert.equal(result.session.toolExecutionResults[0].status, "completed");
+    assert.equal(result.session.toolExecutionResults[0].result.results[0].sessionId, "session_context_tool_runtime_1");
+    assert.notEqual(result.session.toolExecutionResults[0].result.results[0].sessionId, result.session.id);
     assert.match(followupPrompt, /Tool execution results/);
     assert.match(followupPrompt, /CONTEXT_TOOL_RUNTIME_FACT/);
     assert.ok(events.some((event) => event.type === "tool_start" && event.tool === "search_context"));
@@ -3359,17 +3416,69 @@ test("event runner emits ordered per-agent progress before final result", async 
 
   assert.deepEqual(events
     .filter((event) => event.type !== "agent_delta")
-    .slice(0, 6)
+    .slice(0, 8)
     .map((event) => `${event.type}:${event.agentName || event.message?.agentName}`), [
     "agent_start:Builder",
     "agent_message:Builder",
+    "execution_state:undefined",
     "agent_start:Critic",
     "agent_message:Critic",
+    "execution_state:undefined",
     "round_complete:undefined",
     "final_start:Judge"
   ]);
   assert.equal(events.at(-1).type, "done");
   assert.equal(events.at(-1).result.session.status, "completed");
+});
+
+test("a missing model-authored contract cannot block collaborators or later rounds", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-intake-round-guard-"));
+  const requests = [];
+  const server = http.createServer(async (req, res) => {
+    const body = JSON.parse(await readRequestBody(req));
+    requests.push(body);
+    const prompt = JSON.stringify(body.messages || []);
+    if (prompt.includes("FinalDecision JSON object")) {
+      writeOpenAiStream(res, JSON.stringify({
+        answer: "The run stopped before a valid task contract.",
+        consensus_score: 0,
+        supporting_agents: [],
+        dissenting_agents: ["Owner"],
+        minority_report: "",
+        risks: [],
+        next_actions: ["Retry intake with a valid contract."],
+        memory_candidates: []
+      }));
+      return;
+    }
+    writeOpenAiStream(res, JSON.stringify({ status: "speak", argument: "I need another turn to interpret this request.", objections: [], memory_candidates: [] }));
+  });
+  await listen(server);
+  const address = server.address();
+  try {
+    const group = validateGroupConfig({
+      id: "intake-round-guard",
+      name: "Intake Round Guard",
+      settings: { maxRounds: 3, minConsensusWeight: 1, stopWhenAllSkip: false, agentTimeoutMs: 3000 },
+      agents: [
+        { id: "owner", name: "Owner", role: "Builder", provider: "openai-compatible", apiBaseUrl: `http://127.0.0.1:${address.port}/v1`, allowUnsafePrivateNetwork: true, apiKey: "secret-runtime-key", model: "owner", weight: 1, enabled: true },
+        { id: "helper", name: "Helper", role: "Contributor", provider: "openai-compatible", apiBaseUrl: `http://127.0.0.1:${address.port}/v1`, allowUnsafePrivateNetwork: true, apiKey: "secret-runtime-key", model: "helper", weight: 1, enabled: true }
+      ]
+    });
+    const events = [];
+    for await (const event of runCouncilEvents("Create the requested artifact.", group, tmp)) events.push(event);
+    const starts = events.filter((event) => event.type === "agent_start");
+    assert.equal(starts.some((event) => event.round > 1), true, JSON.stringify(starts));
+    assert.equal(starts.some((event) => event.agentId === "helper"), true, JSON.stringify(starts));
+    assert.equal(events.some((event) => event.type === "round_complete"), true);
+    const done = events.find((event) => event.type === "done");
+    assert.equal(done?.result?.session?.status, "incomplete");
+    assert.notEqual(done?.result?.session?.executionState?.phase, "intake");
+    assert.notEqual(done?.result?.session?.roundAdvanceBlockedReason, "task_contract_required_before_round_advance");
+    assert.equal(requests.filter((body) => JSON.stringify(body.messages || []).includes("FinalDecision JSON object")).length, 1);
+  } finally {
+    await close(server);
+  }
 });
 
 test("event runner can emit token deltas before an agent message", async () => {
@@ -3614,7 +3723,8 @@ test("runtime OpenAI-compatible agents use direct API keys without storing secre
           model: "runtime-model",
           weight: 1,
           enabled: true,
-          judge: true
+          judge: true,
+          retry: { maxRetries: 1, backoffMs: 0 }
         }
       ]
     });
@@ -3685,7 +3795,8 @@ test("failed runtime calls become unavailable and do not count as support", asyn
           model: "runtime-model",
           weight: 1,
           enabled: true,
-          judge: true
+          judge: true,
+          retry: { maxRetries: 1, backoffMs: 0 }
         }
       ]
     });
@@ -4698,14 +4809,14 @@ test("workspace round prompts gate file_operations by seat permission tier", asy
 
     const promptTexts = requests.map((request) => request.messages?.[0]?.content || "");
     assert.equal(promptTexts.some((text) => /text-only file permission/.test(text)), true);
-    assert.equal(promptTexts.some((text) => /text-only file permission/.test(text) && /use native workspace_edit tool calls/.test(text)), false);
-    assert.equal(promptTexts.some((text) => /use native workspace_edit tool calls/.test(text)), true);
+    assert.equal(promptTexts.some((text) => /text-only file permission/.test(text) && /full audited workspace permission/.test(text)), false);
+    assert.equal(promptTexts.some((text) => /full audited workspace permission/.test(text)), true);
   } finally {
     await close(server);
   }
 });
 
-test("delivery work calls one full-permission executor instead of every ordinary member", async () => {
+test("collaborative delivery keeps one owner while every enabled non-finalizer receives a meaningful turn", async () => {
   const groupPath = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-primary-executor-"));
   fs.mkdirSync(path.join(groupPath, "sessions"), { recursive: true });
   fs.writeFileSync(path.join(groupPath, "group.json"), JSON.stringify({
@@ -4737,10 +4848,12 @@ test("delivery work calls one full-permission executor instead of every ordinary
     onModelCall: (record) => calls.push(record)
   });
 
-  assert.deepEqual(calls.filter((item) => item.phase === "round").map((item) => item.agentId), ["executor"]);
+  assert.deepEqual(calls.filter((item) => item.phase === "round").map((item) => item.agentId), ["architect", "reviewer", "executor"]);
   assert.equal(session.executionState.executorId, "executor");
-  assert.equal(session.messages.some((message) => message.agentId === "architect"), false);
-  assert.equal(session.messages.some((message) => message.agentId === "reviewer"), false);
+  assert.equal(session.messages.some((message) => message.agentId === "architect"), true);
+  assert.equal(session.messages.some((message) => message.agentId === "reviewer"), true);
+  assert.equal(session.executionState.participation.status, "completed");
+  assert.equal(session.executionState.participation.ownerIntegrationStatus, "completed");
 });
 
 test("report delivery keeps one executor and recovers from a missing skill into a real verified artifact", async () => {
@@ -4784,6 +4897,15 @@ test("report delivery keeps one executor and recovers from a missing skill into 
       writeOpenAiStream(res, JSON.stringify({ status: "skip", reason: "The PDF header verification passed.", objection_items: [], memory_candidates: [] }));
       return;
     }
+    if (prompt.includes("[Collaborative deliberation]")) {
+      writeOpenAiStream(res, JSON.stringify({
+        status: "speak",
+        argument: "Keep the report generation path generic and verify the resulting PDF structure after creation.",
+        objection_items: [],
+        memory_candidates: []
+      }));
+      return;
+    }
     if (executorStep === 0) {
       executorStep += 1;
       writeOpenAiStream(res, JSON.stringify({
@@ -4797,8 +4919,8 @@ test("report delivery keeps one executor and recovers from a missing skill into 
       return;
     }
     if (executorStep === 1) {
-      assert.match(prompt, /Do not retry the same skill_read unchanged/);
-      assert.match(prompt, /generic package, runtime, CLI, or code path/);
+      assert.match(prompt, /Failed strategy \(do not repeat unchanged\): skill instructions for missing-document-skill/);
+      assert.match(prompt, /missing-document-skill/);
       executorStep += 1;
       writeOpenAiStream(res, JSON.stringify({
         status: "speak",
@@ -4853,7 +4975,7 @@ test("report delivery keeps one executor and recovers from a missing skill into 
     assert.equal(taskRun.evidence.artifactVerification.status, "verified");
     assert.equal(taskRun.evidence.verificationEvidenceIds.length > 0, true);
     assert.equal(readTaskRunEvents(groupPath, taskRun.id).some((event) => event.type === "context_compiled"), true);
-    assert.equal(roundAgents.includes("Designer"), false);
+    assert.equal(roundAgents.includes("Designer"), true);
   } finally {
     await close(server);
   }
@@ -4874,6 +4996,7 @@ test("primary executor completes a deterministic project through real writes tes
   }), "utf8");
   const calls = [];
   let executorStep = 0;
+  let intakeRecorded = false;
   const server = http.createServer(async (req, res) => {
     const body = JSON.parse(await readRequestBody(req));
     const prompt = JSON.stringify(body.messages || []);
@@ -4894,6 +5017,21 @@ test("primary executor completes a deterministic project through real writes tes
     }
     if (prompt.includes("[Checkpoint review]")) {
       writeOpenAiStream(res, JSON.stringify({ status: "skip", reason: "Real test evidence passed.", objection_items: [], memory_candidates: [] }));
+      return;
+    }
+    if (prompt.includes("[Collaborative deliberation]")) {
+      writeOpenAiStream(res, JSON.stringify({ status: "speak", argument: "Keep implementation and its executable test in separate files, then run the declared test command.", objection_items: [], memory_candidates: [] }));
+      return;
+    }
+    if (!intakeRecorded && prompt.includes("[Task intake owner]")) {
+      intakeRecorded = true;
+      writeOpenAiStream(res, JSON.stringify({
+        status: "speak",
+        argument: "I recorded the delivery contract before execution.",
+        task_contract: { mode: "delivery", objective: "Create and test the requested Node project.", requires_workspace: true, requires_verification: true, deliverables: ["shared/project"], completion_criteria: ["Project files exist.", "The declared test command passes."], next_action: "Collect collaborator input, then create and test the project." },
+        objection_items: [],
+        memory_candidates: []
+      }));
       return;
     }
     if (executorStep === 0) {
@@ -4991,12 +5129,13 @@ test("primary executor completes a deterministic project through real writes tes
     assert.equal(testResult.status, "completed");
     assert.equal(testResult.result.exitCode, 0);
     assert.equal(testResult.result.passed, true);
-    assert.equal(session.executionState.phase, "complete");
+    assert.equal(session.executionState.phase, "complete", JSON.stringify({ executionState: session.executionState, actors: session.messages.map((item) => ({ round: item.round, agentId: item.agentId, status: item.response.status, argument: item.response.argument })) }));
     assert.equal(session.executionState.reviewedCheckpointVersion, session.executionState.checkpointVersion);
     assert.equal(session.guardStopReason, "");
-    assert.match(calls[1], /Current phase: verify/);
+    assert.equal(calls.some((prompt) => /Current phase: verify/.test(prompt)), true);
+    assert.equal(calls.some((prompt) => /Collaborator contributions to integrate/.test(prompt)), true);
     assert.equal(executorStep, 2);
-    assert.equal(calls.length, 4);
+    assert.ok(calls.length >= 5);
   } finally {
     await close(server);
   }
@@ -5015,6 +5154,7 @@ test("provider-native tool calls execute through the council permission and veri
     ]
   }), "utf8");
   let executorStep = 0;
+  let intakeRecorded = false;
   const requestBodies = [];
   const server = http.createServer(async (req, res) => {
     const body = JSON.parse(await readRequestBody(req));
@@ -5095,10 +5235,13 @@ test("provider-native tool calls execute through the council permission and veri
     assert.equal(fs.readFileSync(path.join(groupPath, "shared", "native", "app.js"), "utf8"), "export const value = 42;\n");
     const testResult = session.toolExecutionResults.find((item) => item.tool === "run_tests");
     assert.equal(testResult.result.passed, true);
-    assert.equal(session.executionState.phase, "complete");
-    assert.deepEqual(requestBodies[0].tools.map((item) => item.function.name), ["record_task_contract"]);
-    assert.equal(requestBodies[0].tool_choice, "required");
-    assert.equal(requestBodies[0].tools[0].function.parameters.additionalProperties, false);
+    assert.equal(session.executionState.phase, "complete", JSON.stringify({ executionState: session.executionState, actors: session.messages.map((item) => ({ round: item.round, agentId: item.agentId, status: item.response.status, argument: item.response.argument })) }));
+    const firstToolNames = requestBodies[0].tools.map((item) => item.function.name);
+    assert.equal(firstToolNames.includes("record_task_contract"), true);
+    assert.equal(firstToolNames.includes("read_file"), true);
+    assert.equal(firstToolNames.includes("workspace_edit"), true);
+    assert.equal(requestBodies[0].tool_choice, "auto");
+    assert.equal(requestBodies[0].tools.find((item) => item.function.name === "record_task_contract").function.parameters.additionalProperties, false);
     assert.equal(session.executionState.taskContract.objective, "Create and test a small project.");
     const nativeFollowup = requestBodies.find((body) => body.messages?.some((item) => item.role === "tool"));
     assert.ok(nativeFollowup);
@@ -5107,6 +5250,174 @@ test("provider-native tool calls execute through the council permission and veri
     assert.equal(session.toolRequests.filter((item) => item.tool === "workspace_edit").length, 3);
     assert.equal(session.interimMessages.length, 3);
     assert.equal(session.interimMessages.every((item) => item.interim === true), true);
+  } finally {
+    await close(server);
+  }
+});
+
+test("an invalid optional task-contract supplement cannot block a same-turn legal tool", async () => {
+  const groupPath = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-contract-nonblocking-"));
+  fs.mkdirSync(path.join(groupPath, "shared"), { recursive: true });
+  fs.writeFileSync(path.join(groupPath, "shared", "fact.txt"), "CONTRACT_GATE_RELEASED\n", "utf8");
+  fs.writeFileSync(path.join(groupPath, "group.json"), JSON.stringify({
+    id: "contract-nonblocking",
+    name: "Contract Nonblocking",
+    permissions: { defaultTier: "tool", seatTiers: { executor: "tool" } },
+    seats: [
+      { seatId: "executor", displayName: "Executor", enabled: true, privateFolder: "members/Executor" },
+      { seatId: "finalizer", displayName: "Finalizer", enabled: true, judge: true, privateFolder: "members/Finalizer" }
+    ]
+  }), "utf8");
+  let step = 0;
+  const server = http.createServer(async (req, res) => {
+    const body = JSON.parse(await readRequestBody(req));
+    const prompt = JSON.stringify(body.messages || []);
+    if (prompt.includes("FinalDecision JSON object")) {
+      writeOpenAiStream(res, JSON.stringify({ answer: "The file was read successfully.", consensus_score: 1, supporting_agents: ["Executor"], dissenting_agents: [], minority_report: "", risks: [], next_actions: [], memory_candidates: [] }));
+      return;
+    }
+    if (step === 0) {
+      step += 1;
+      writeOpenAiDirectNativeToolStream(res, [
+        { tool: "record_task_contract", taskContract: { mode: "交付", objective: "Inspect the file." } },
+        { tool: "read_file", path: "shared/fact.txt", reason: "Read the user-requested fact." }
+      ], "contract-and-read");
+      return;
+    }
+    assert.match(prompt, /invalid_task_contract/);
+    assert.match(prompt, /CONTRACT_GATE_RELEASED/);
+    writeOpenAiStream(res, JSON.stringify({ status: "speak", argument: "The file says CONTRACT_GATE_RELEASED.", objections: [], memory_candidates: [] }));
+  });
+  await listen(server);
+
+  try {
+    const apiBaseUrl = `http://127.0.0.1:${server.address().port}/v1`;
+    const group = validateGroupConfig({
+      id: "contract-nonblocking",
+      name: "Contract Nonblocking",
+      settings: { maxRounds: 1, minConsensusWeight: 1, stopWhenAllSkip: true, agentTimeoutMs: 3000, allowSoloCouncil: true },
+      agents: [
+        { id: "executor", name: "Executor", role: "Reader", provider: "openai-compatible", apiBaseUrl, allowUnsafePrivateNetwork: true, apiKey: "test-key", model: "test-model", weight: 1, enabled: true },
+        { id: "finalizer", name: "Finalizer", role: "Finalizer", provider: "openai-compatible", apiBaseUrl, allowUnsafePrivateNetwork: true, apiKey: "test-key", model: "test-model", weight: 1, enabled: true, judge: true }
+      ]
+    });
+    const { session } = await runCouncil("Read shared/fact.txt and explain it without changing files.", group, groupPath, { groupPath });
+    assert.equal(session.toolExecutionResults.some((item) => item.tool === "record_task_contract" && item.status === "failed" && item.code === "invalid_task_contract"), true);
+    assert.equal(session.toolExecutionResults.some((item) => item.tool === "read_file" && item.status === "completed"), true);
+    assert.equal(session.rejectedToolRequests.some((item) => item.code === "task_contract_required"), false);
+  } finally {
+    await close(server);
+  }
+});
+
+test("native task-contract intake yields to scheduled collaborators before the owner writes", async () => {
+  const groupPath = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-native-collab-yield-"));
+  fs.mkdirSync(path.join(groupPath, "sessions"), { recursive: true });
+  fs.writeFileSync(path.join(groupPath, "group.json"), JSON.stringify({
+    id: "native-collab-yield",
+    name: "Native Collaboration Yield",
+    permissions: { defaultTier: "text", seatTiers: { owner: "full" } },
+    seats: [
+      { seatId: "owner", displayName: "Owner", enabled: true, privateFolder: "members/Owner" },
+      { seatId: "critic", displayName: "Critic", enabled: true, privateFolder: "members/Critic" },
+      { seatId: "finalizer", displayName: "Finalizer", enabled: true, judge: true, privateFolder: "members/Finalizer" }
+    ]
+  }), "utf8");
+  const callOrder = [];
+  let contractRecorded = false;
+  let contributorSpoke = false;
+  let writeRequested = false;
+  const server = http.createServer(async (req, res) => {
+    const body = JSON.parse(await readRequestBody(req));
+    const prompt = JSON.stringify(body.messages || []);
+    if (prompt.includes("FinalDecision JSON object")) {
+      writeOpenAiStream(res, JSON.stringify({
+        answer: "The owner integrated the critic's input and wrote the artifact.",
+        final_state: "needs_revision",
+        consensus_score: 1,
+        supporting_agents: ["Owner", "Critic"],
+        dissenting_agents: [],
+        minority_report: "",
+        risks: [],
+        next_actions: [],
+        selected_file_operation_ids: [],
+        memory_candidates: []
+      }));
+      return;
+    }
+    if (prompt.includes("[Collaborative deliberation]")) {
+      callOrder.push("critic_contribution");
+      contributorSpoke = true;
+      writeOpenAiStream(res, JSON.stringify({
+        status: "speak",
+        argument: "Include the contributor identity and a mechanically checkable status field.",
+        objection_items: [],
+        memory_candidates: []
+      }));
+      return;
+    }
+    if (!contractRecorded && prompt.includes("[Task intake owner]")) {
+      callOrder.push("owner_contract");
+      contractRecorded = true;
+      writeOpenAiDirectNativeToolStream(res, [{
+        tool: "record_task_contract",
+        reason: "Record the collaborative artifact contract before any mutation.",
+        taskContract: {
+          mode: "delivery",
+          objective: "Create a collaborative JSON artifact.",
+          requiresWorkspace: true,
+          requiresVerification: false,
+          deliverables: ["shared/collab/result.json"],
+          artifacts: [],
+          completionCriteria: ["The JSON artifact records an attributable contribution."],
+          nextAction: "Collect the critic contribution, then write the artifact."
+        }
+      }], "contract");
+      return;
+    }
+    if (!writeRequested) {
+      callOrder.push(contributorSpoke ? "owner_write_after_contributor" : "owner_write_before_contributor");
+      writeRequested = true;
+      writeOpenAiDirectNativeToolStream(res, [{
+        tool: "workspace_edit",
+        action: "write",
+        path: "shared/collab/result.json",
+        code: "{\"status\":\"draft\",\"contributor\":\"Critic\"}\n",
+        reason: "Integrate the attributable critic contribution."
+      }], "write");
+      return;
+    }
+    writeOpenAiStream(res, JSON.stringify({
+      status: "speak",
+      argument: "The collaborator contribution was integrated into the artifact.",
+      objections: [],
+      objection_items: [],
+      tool_requests: [],
+      memory_candidates: []
+    }));
+  });
+  await listen(server);
+
+  try {
+    const apiBaseUrl = `http://127.0.0.1:${server.address().port}/v1`;
+    const group = validateGroupConfig({
+      id: "native-collab-yield",
+      name: "Native Collaboration Yield",
+      settings: { maxRounds: 1, minConsensusWeight: 1, stopWhenAllSkip: true, agentTimeoutMs: 3000, maxToolIterations: 4 },
+      agents: [
+        { id: "owner", name: "Owner", role: "Delivery builder", provider: "openai-compatible", apiBaseUrl, allowUnsafePrivateNetwork: true, apiKey: "test-key", model: "test-model", weight: 1, enabled: true },
+        { id: "critic", name: "Critic", role: "Critique delivery risks", provider: "openai-compatible", apiBaseUrl, allowUnsafePrivateNetwork: true, apiKey: "test-key", model: "test-model", weight: 1, enabled: true, mandatoryRedTeam: true },
+        { id: "finalizer", name: "Finalizer", role: "Finalizer", provider: "openai-compatible", apiBaseUrl, allowUnsafePrivateNetwork: true, apiKey: "test-key", model: "test-model", weight: 1, enabled: true, judge: true }
+      ]
+    });
+    const { session } = await runCouncil("Work together in collaboration mode to create shared/collab/result.json.", group, groupPath, { groupPath });
+
+    assert.deepEqual(callOrder.slice(0, 2), ["critic_contribution", "owner_write_after_contributor"]);
+    assert.equal(callOrder.includes("owner_write_before_contributor"), false);
+    assert.equal(fs.existsSync(path.join(groupPath, "shared", "collab", "result.json")), true);
+    assert.equal(session.executionState.participation.participants[0].agentId, "critic");
+    assert.equal(session.executionState.participation.participants[0].outcome, "substantive");
+    assert.equal(session.executionState.participation.ownerIntegrationStatus, "completed");
   } finally {
     await close(server);
   }
@@ -5364,6 +5675,10 @@ test("a same-turn collaboration contract rejects the owner's premature legacy fi
       }));
       return;
     }
+    if (JSON.stringify(body.messages || []).includes("[Collaborative deliberation]")) {
+      writeOpenAiStream(res, JSON.stringify({ status: "speak", argument: "Research contribution is ready for the owner.", objections: [], file_operations: [], tool_requests: [], memory_candidates: [] }));
+      return;
+    }
     if (ownerStep === 0) {
       ownerStep += 1;
       writeOpenAiStream(res, JSON.stringify({
@@ -5405,7 +5720,7 @@ test("a same-turn collaboration contract rejects the owner's premature legacy fi
     assert.equal(fs.existsSync(path.join(groupPath, "shared", "guarded.txt")), false);
     assert.equal(session.rejectedFileOperationProposals.some((item) => item.code === "collaboration_prerequisite_pending"), true);
     assert.equal(session.executionState.ownership.delegations.some((item) => item.assigneeId === "researcher" && item.status === "pending" && item.native === true), true);
-    assert.match(prompts[1], /Do not write the artifact yet/);
+    assert.equal(prompts.some((prompt) => /Do not write the artifact yet/.test(prompt)), true);
   } finally {
     await close(server);
   }
@@ -5425,6 +5740,7 @@ test("executor repairs a real failing test and reruns verification before comple
     ]
   }), "utf8");
   let executorStep = 0;
+  let intakeRecorded = false;
   const prompts = [];
   const server = http.createServer(async (req, res) => {
     const body = JSON.parse(await readRequestBody(req));
@@ -5446,6 +5762,21 @@ test("executor repairs a real failing test and reruns verification before comple
     }
     if (prompt.includes("[Checkpoint review]")) {
       writeOpenAiStream(res, JSON.stringify({ status: "skip", reason: "The repaired test passed.", objection_items: [], memory_candidates: [] }));
+      return;
+    }
+    if (prompt.includes("[Collaborative deliberation]")) {
+      writeOpenAiStream(res, JSON.stringify({ status: "speak", argument: "Use the first failing test output as the repair target and rerun the same command after the patch.", objection_items: [], memory_candidates: [] }));
+      return;
+    }
+    if (!intakeRecorded && prompt.includes("[Task intake owner]")) {
+      intakeRecorded = true;
+      writeOpenAiStream(res, JSON.stringify({
+        status: "speak",
+        argument: "I recorded the repair delivery contract before execution.",
+        task_contract: { mode: "delivery", objective: "Create the project, observe a failing test, repair it, and verify the repair.", requires_workspace: true, requires_verification: true, deliverables: ["shared/repair"], completion_criteria: ["The initial failure is observed.", "The repaired test passes."], next_action: "Collect collaborator input, then create and test the project." },
+        objection_items: [],
+        memory_candidates: []
+      }));
       return;
     }
     if (executorStep === 0) {
@@ -5925,7 +6256,7 @@ test("ready final state auto-executes safe file proposals for full tier", async 
     const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
     requests.push(body);
     callCount += 1;
-    const roundPromptRequiresFileOperations = body.messages?.[0]?.content?.includes("use native workspace_edit tool calls");
+    const roundPromptRequiresFileOperations = body.messages?.[0]?.content?.includes("full audited workspace permission");
     const payload = callCount === 1
       ? roundPromptRequiresFileOperations
         ? {
@@ -5998,7 +6329,7 @@ test("ready final state auto-executes safe file proposals for full tier", async 
     const targetPath = path.join(groupPath, "src", "auto-created.js");
 
     assert.equal(requests.length, 2);
-    assert.match(requests[0].messages[0].content, /use native workspace_edit tool calls/);
+    assert.match(requests[0].messages[0].content, /full audited workspace permission/);
     assert.equal(session.fileOperationProposals.length, 1);
     assert.equal(session.pendingFileOperationProposals.length, 1);
     assert.equal(fs.readFileSync(targetPath, "utf8"), "export const autoCreated = true;\n");
@@ -6060,7 +6391,7 @@ test("full permission executes approved round proposals before final selection",
     requests.push(body);
     callCount += 1;
     if (callCount === 1) {
-      const roundPromptRequiresFileOperations = body.messages?.[0]?.content?.includes("use native workspace_edit tool calls");
+      const roundPromptRequiresFileOperations = body.messages?.[0]?.content?.includes("full audited workspace permission");
       writeOpenAiStream(res, JSON.stringify(roundPromptRequiresFileOperations ? {
         status: "speak",
         argument: "I propose one rejected and one selected file operation.",
@@ -6142,7 +6473,7 @@ test("full permission executes approved round proposals before final selection",
     const { session } = await runCouncil("Create only the selected module.", group, tmp, { groupPath });
 
     assert.equal(requests.length, 2);
-    assert.match(requests[0].messages[0].content, /use native workspace_edit tool calls/);
+    assert.match(requests[0].messages[0].content, /full audited workspace permission/);
     assert.equal(session.fileOperationProposals.length, 2);
     assert.equal(session.pendingFileOperationProposals.length, 2);
     assert.equal(fs.existsSync(path.join(groupPath, "src", "selected.js")), true);
@@ -6268,7 +6599,7 @@ test("round prompts use member context sections instead of full transcript repla
   }
 });
 
-test("round prompts include persisted member and group summaries", async () => {
+test("unrelated new-task prompts do not inject persisted conversational summaries", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-summary-"));
   const groupPath = path.join(tmp, "group");
   fs.mkdirSync(path.join(groupPath, "members", "Builder", "private_memory"), { recursive: true });
@@ -6354,9 +6685,9 @@ test("round prompts include persisted member and group summaries", async () => {
     await runCouncil("Question", group, tmp, { groupPath });
     const prompt = requests[0].messages.at(-1).content;
 
-    assert.match(prompt, /Builder private summary from cache/);
-    assert.match(prompt, /Group shared summary from cache/);
-    assert.match(prompt, /Earlier transcript compressed into cache/);
+    assert.doesNotMatch(prompt, /Builder private summary from cache/);
+    assert.doesNotMatch(prompt, /Group shared summary from cache/);
+    assert.doesNotMatch(prompt, /Earlier transcript compressed into cache/);
   } finally {
     await close(server);
   }
@@ -6729,7 +7060,6 @@ test("cleared reviewer flags override stale reviewer role text at provider bound
     assert.doesNotMatch(systemPrompt, /You are code reviewer\./);
     assert.match(systemPrompt, /Current assignment: ordinary member/);
     assert.match(systemPrompt, /old role text says you were a reviewer, that content is stale/);
-    assert.match(userPrompt, /Current assignment: ordinary member/);
     assert.doesNotMatch(userPrompt, /Role: code reviewer/);
   } finally {
     await close(server);
@@ -6983,6 +7313,94 @@ test("a plain continue message automatically carries the latest real group discu
   } finally {
     await close(server);
   }
+});
+
+test("a named retained artifact resumes its completed durable task without capturing a fresh task", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-retained-artifact-followup-"));
+  const priorExecution = {
+    active: true,
+    executorId: "builder",
+    executorName: "Builder",
+    finalizerId: "judge",
+    taskQuestion: "Apply the final retained requirement and validate the current artifact.",
+    phase: "complete",
+    nextAction: "The retained artifact is complete.",
+    checkpointEvidence: [{
+      id: "verified-retained-brief",
+      tool: "read_file",
+      status: "completed",
+      target: "deliverables/retained-brief.json",
+      outcome: "completed"
+    }],
+    checkpointVersion: 2,
+    reviewedCheckpointVersion: 2,
+    artifactStatus: "verified",
+    taskContract: {
+      mode: "delivery",
+      objective: "Apply the final retained requirement and validate the current artifact.",
+      requires_workspace: true,
+      requires_verification: true,
+      deliverables: ["Complete the user-requested outcome.", "User-requested .json artifact"],
+      artifacts: [{ extension: ".json" }],
+      completion_criteria: ["The retained JSON exists and validates."],
+      next_action: "Verify the retained JSON."
+    }
+  };
+  writeGroupSession({
+    id: "session_retained_artifact",
+    question: priorExecution.taskQuestion,
+    status: "completed",
+    createdAt: "2026-07-31T09:00:00.000Z",
+    completedAt: "2026-07-31T09:01:00.000Z",
+    messages: [],
+    toolExecutionResults: [],
+    fileOperationExecutionResults: [],
+    fileOperationProposals: [],
+    executionState: priorExecution,
+    finalDecision: { answer: "The retained artifact is complete." }
+  }, tmp);
+  writeTaskState(tmp, {
+    sourceSessionId: "session_retained_artifact",
+    sourceQuestion: priorExecution.taskQuestion,
+    executionCheckpoint: { ...priorExecution, sourceSessionId: "session_retained_artifact" }
+  });
+
+  const group = validateGroupConfig({
+    id: "retained-artifact-followup",
+    name: "Retained Artifact Follow-up",
+    settings: { maxRounds: 1, minConsensusWeight: 1, stopWhenAllSkip: true, agentTimeoutMs: 1000, allowSoloCouncil: true },
+    agents: [
+      { id: "critic", name: "Critic", role: "Critic", provider: "mock", apiBaseUrl: "mock://local", model: "mock-critic", weight: 1, enabled: true, judge: true },
+      { id: "builder", name: "Builder", role: "Builder", provider: "mock", apiBaseUrl: "mock://local", model: "mock-builder", weight: 1, enabled: true },
+      { id: "judge", name: "Judge", role: "Finalizer", provider: "mock", apiBaseUrl: "mock://local", model: "mock-judge", weight: 1, enabled: true, judge: true }
+    ]
+  });
+
+  const resumed = await runCouncil(
+    "After recovery, validate deliverables/retained-brief.json and retain its integrated member contributions.",
+    group,
+    tmp,
+    { groupPath: tmp }
+  );
+  assert.equal(resumed.session.continuationContext.previousSessionId, "session_retained_artifact");
+  assert.equal(resumed.session.executionState.resumed, true);
+  assert.equal(resumed.session.executionState.executorId, "builder");
+  assert.equal(resumed.session.executionState.finalizerId, "judge");
+
+  const requirementOnly = await runCouncil(
+    "Use only the current retained requirements. Do not restore an obsolete field layout.",
+    group,
+    tmp,
+    { groupPath: tmp }
+  );
+  assert.ok(requirementOnly.session.continuationContext?.previousSessionId);
+  assert.equal(requirementOnly.session.executionState.resumed, true);
+  assert.equal(requirementOnly.session.executionState.taskQuestion, priorExecution.taskQuestion);
+
+  const fresh = await runCouncil("Create deliverables/fresh-unrelated.json as a new artifact.", group, tmp, { groupPath: tmp });
+  assert.equal(fresh.session.continuationContext, null);
+  assert.equal(fresh.session.executionState.taskQuestion, "Create deliverables/fresh-unrelated.json as a new artifact.");
+  assert.equal(fresh.session.executionState.finalizerId, "critic");
 });
 
 test("public memory reaches model prompts as editable shared memory", async () => {
@@ -7403,7 +7821,7 @@ test("final summarizer durable memory is saved once and reaches the next provide
   }
 });
 
-test("task state ledger is written after a session and injected into the next run", async () => {
+test("task state ledger is persisted but not injected into an unrelated new run", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-task-state-run-"));
   const group = validateGroupConfig({
     id: "task-state-run",
@@ -7440,8 +7858,8 @@ test("task state ledger is written after a session and injected into the next ru
     onModelCall: (call) => calls.push(call)
   });
   const roundPrompt = calls.find((call) => call.phase === "round").inputMessages.map((message) => message.content).join("\n");
-  assert.match(roundPrompt, /Task state ledger/);
-  assert.match(roundPrompt, /Proceed with a CLI-first prototype/);
+  assert.doesNotMatch(roundPrompt, /Task state ledger/);
+  assert.doesNotMatch(roundPrompt, /Proceed with a CLI-first prototype/);
   assert.doesNotMatch(roundPrompt, /private-chat\.jsonl/);
 });
 
@@ -7623,7 +8041,7 @@ test("saved public archive snippets are retrieved and injected into later prompt
 
   assert.equal(result.session.contextRetrievalResults.length >= 1, true);
   assert.match(roundPrompt, /Relevant archived context/);
-  assert.match(roundPrompt, /Group history catalogue/);
+  assert.doesNotMatch(roundPrompt, /Group history catalogue/);
   assert.match(roundPrompt, /ARCHIVE_RUNTIME_FACT/);
   assert.match(roundPrompt, /session_archive_runtime_1/);
   assert.match(roundPrompt, /Earlier retrieval planning/);

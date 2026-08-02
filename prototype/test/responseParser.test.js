@@ -104,6 +104,26 @@ test("round response parser normalizes a semantic task contract", () => {
   });
 });
 
+test("task contract normalization accepts Chinese mode aliases and string booleans", () => {
+  const parsed = parseRoundResponse(JSON.stringify({
+    status: "speak",
+    argument: "补充契约语义。",
+    task_contract: {
+      mode: "交付",
+      objective: "生成结果。",
+      requires_workspace: "false",
+      requires_verification: "true",
+      deliverables: ["结果"],
+      completion_criteria: ["结果经过验证。"],
+      next_action: "执行验证。"
+    }
+  }));
+
+  assert.equal(parsed.task_contract.mode, "delivery");
+  assert.equal(parsed.task_contract.requires_workspace, false);
+  assert.equal(parsed.task_contract.requires_verification, true);
+});
+
 test("round response parser keeps bounded owner delegations and contributor handoffs", () => {
   const parsed = parseRoundResponse(JSON.stringify({
     status: "speak",
@@ -209,6 +229,22 @@ test("round response parser retains structured contributor handoff evidence inst
       "facts.window: 2026-Q1",
       "encoding_notes: plain UTF-8 key=value lines"
     ]
+  });
+});
+
+test("round response parser accepts result as the contributor handoff summary alias", () => {
+  const parsed = parseRoundResponse(JSON.stringify({
+    status: "speak",
+    delegation_handoff: {
+      delegation_id: "delegation:0:1:critic",
+      result: "Extracted the requested source facts.",
+      evidence: ["read_file#source"]
+    }
+  }));
+  assert.deepEqual(parsed.delegation_handoff, {
+    delegation_id: "delegation:0:1:critic",
+    summary: "Extracted the requested source facts.",
+    evidence: ["read_file#source"]
   });
 });
 

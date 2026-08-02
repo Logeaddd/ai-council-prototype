@@ -402,6 +402,15 @@ Completed on 2026-07-27:
 
 Still open before the real-provider release gate:
 
+* P0 collaboration semantics were found to be architecturally disconnected
+  from delivery dispatch on 2026-07-30. The complete evidence and binding
+  remediation contract are in `COLLABORATION_RUNTIME_AUDIT_2026-07-30.md`.
+  A durable delivery owner remains required, but `collab` must schedule real
+  multi-member participation and `independent` must collect isolated first
+  passes. Commit `1aecf3d` is only a temporary deadlock bridge and is not
+  accepted as the final collaboration runtime. T119 must expand beyond the
+  single `delegated-brief` research handoff before this P0 can close.
+
 * Interactive command work now has a durable real PTY path: terminal input,
   resize, offset-based output, explicit stop, workspace-change evidence, SSE
   disconnect survival, and redaction of typed terminal input are covered by a

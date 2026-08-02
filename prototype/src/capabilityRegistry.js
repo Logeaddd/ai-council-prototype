@@ -1,11 +1,15 @@
 import fs from "node:fs";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
+import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { capabilityEnabled } from "./capabilityPolicy.js";
 import { listCapabilityFacts, mergeCapabilityFacts } from "./capabilityFacts.js";
 
 const MODULE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const execFileAsync = promisify(execFile);
+const RUNTIME_CACHE_TTL_MS = 60_000;
+const runtimeCache = new Map();
 
 export function listCapabilities(options = {}) {
   const keyInfo = resolveSearchApiKeyInfo(options);
@@ -126,8 +130,15 @@ export function listCapabilities(options = {}) {
   return mergeCapabilityFacts(capabilities, options.capabilityFacts || listCapabilityFacts(options.groupPath));
 }
 
+export async function listCapabilitiesAsync(options = {}) {
+  const runtime = options.runtimeFacts || await probeCapabilityRuntimeAsync(options);
+  return listCapabilities({ ...options, runtimeFacts: runtime });
+}
+
 export function probeCapabilityRuntime(options = {}) {
   const root = path.resolve(options.baseDir || MODULE_ROOT);
+  const cached = cachedRuntime(root);
+  if (cached) return cached;
   const shellProbe = process.platform === "win32"
     ? probeCandidates([["powershell.exe", ["-NoProfile", "-Command", "$PSVersionTable.PSVersion.ToString()"]], ["cmd.exe", ["/d", "/c", "ver"]]])
     : probeCandidates([["sh", ["-lc", "printf ok"]], ["bash", ["-lc", "printf ok"]]]);
@@ -161,6 +172,119 @@ export function probeCapabilityRuntime(options = {}) {
   const archiveRuntime = fs.existsSync(path.join(root, "src", "archiveTools.js"));
   const nodeSqlite = nodeSqliteProbe.ok;
 
+  const runtime = {
+    webRuntime,
+    filesystem,
+    archiveRuntime,
+    shell: shellProbe.ok,
+    shellDetail: probeDetail(shellProbe, "no supported shell found"),
+    backgroundRuntime: nodeProbe.ok && fs.existsSync(backgroundSupervisor),
+    codeRuntime: codeCommands.length > 0,
+    codeRuntimeDetail: codeCommands.length ? `verified: ${codeCommands.join(", ")}` : "no supported code runtime found",
+    packageRuntime: packageCommands.length > 0,
+    packageRuntimeDetail: packageCommands.length ? `verified: ${packageCommands.join(", ")}` : "no supported language package manager found",
+    provisionRuntime: shellProbe.ok && (systemManagerProbe.ok || process.platform === "win32" || curlProbe.ok),
+    provisionRuntimeDetail: systemManagerProbe.ok ? `verified system package manager: ${systemManagerProbe.command}` : shellProbe.ok ? "custom install or direct download path available" : "no shell available for provisioning",
+    testRuntime: shellProbe.ok && codeCommands.length > 0,
+    testRuntimeDetail: shellProbe.ok && codeCommands.length ? `shell plus ${codeCommands.join(", ")}` : "test command runtime unavailable",
+    git: gitProbe.ok,
+    gitDetail: probeDetail(gitProbe, "git command unavailable"),
+    browser: Boolean(electronPath) && fs.existsSync(browserRunner),
+    browserDetail: electronPath && fs.existsSync(browserRunner) ? `verified Electron runtime: ${path.basename(electronPath)}` : "Electron browser runtime unavailable",
+    database: nodeSqlite || sqliteProbe.ok,
+    databaseDetail: nodeSqlite ? "node:sqlite available" : probeDetail(sqliteProbe, "SQLite runtime unavailable"),
+    memoryRuntime: filesystem && fs.existsSync(path.join(root, "src", "publicMemory.js")),
+    skillRuntime: filesystem && fs.existsSync(path.join(root, "src", "skillPacks.js")),
+    mcpRuntime: nodeProbe.ok && fs.existsSync(path.join(root, "src", "mcpServer.js")),
+    mcpRuntimeDetail: nodeProbe.ok ? "Node.js MCP stdio runtime present" : "Node.js MCP runtime unavailable",
+    mcpMarketplaceRuntime: npmProbe.ok,
+    mcpMarketplaceDetail: probeDetail(npmProbe, "npm runtime unavailable")
+  };
+  cacheRuntime(root, runtime);
+  return runtime;
+}
+
+export async function probeCapabilityRuntimeAsync(options = {}) {
+  const root = path.resolve(options.baseDir || MODULE_ROOT);
+  const cached = cachedRuntime(root);
+  if (cached) return cached;
+  const pending = runtimeCache.get(root)?.promise;
+  if (pending) return pending;
+
+  const promise = probeRuntimeAsync()
+    .then((probes) => {
+      const runtime = buildRuntimeFacts(root, probes);
+      cacheRuntime(root, runtime);
+      return runtime;
+    })
+    .catch((error) => {
+      const entry = runtimeCache.get(root);
+      if (entry?.promise === promise) runtimeCache.delete(root);
+      throw error;
+    });
+  runtimeCache.set(root, { promise, expiresAt: 0 });
+  return promise;
+}
+
+export function clearCapabilityRuntimeCache(root) {
+  if (root) runtimeCache.delete(path.resolve(root));
+  else runtimeCache.clear();
+}
+
+function cachedRuntime(root) {
+  const entry = runtimeCache.get(root);
+  if (!entry?.value) return undefined;
+  if (entry.expiresAt > Date.now()) return entry.value;
+  runtimeCache.delete(root);
+  return undefined;
+}
+
+function cacheRuntime(root, runtime) {
+  runtimeCache.set(root, { value: runtime, expiresAt: Date.now() + RUNTIME_CACHE_TTL_MS });
+}
+
+async function probeRuntimeAsync() {
+  const [shellProbe, nodeProbe, npmProbe, pythonProbe, pipProbe, gitProbe, cargoProbe, goProbe, gemProbe, systemManagerProbe, sqliteProbe, curlProbe] = await Promise.all([
+    probeCandidatesAsync(process.platform === "win32"
+      ? [["powershell.exe", ["-NoProfile", "-Command", "$PSVersionTable.PSVersion.ToString()"]], ["cmd.exe", ["/d", "/c", "ver"]]]
+      : [["sh", ["-lc", "printf ok"]], ["bash", ["-lc", "printf ok"]]]),
+    probeCandidatesAsync([[process.execPath, ["--version"]], ["node", ["--version"]]]),
+    probeCandidatesAsync(process.platform === "win32" ? [["npm.cmd", ["--version"]], ["npm", ["--version"]]] : [["npm", ["--version"]]]),
+    probeCandidatesAsync(process.platform === "win32"
+      ? [["python", ["--version"]], ["py", ["-3", "--version"]]]
+      : [["python3", ["--version"]], ["python", ["--version"]]]),
+    probeCandidatesAsync(process.platform === "win32"
+      ? [["python", ["-m", "pip", "--version"]], ["py", ["-3", "-m", "pip", "--version"]]]
+      : [["python3", ["-m", "pip", "--version"]], ["python", ["-m", "pip", "--version"]]]),
+    probeCandidatesAsync([["git", ["--version"]]]),
+    probeCandidatesAsync([["cargo", ["--version"]]]),
+    probeCandidatesAsync([["go", ["version"]]]),
+    probeCandidatesAsync([["gem", ["--version"]]]),
+    probeCandidatesAsync(process.platform === "win32"
+      ? [["winget", ["--version"]], ["choco", ["--version"]], ["scoop", ["--version"]]]
+      : process.platform === "darwin" ? [["brew", ["--version"]]] : [["apt-get", ["--version"]], ["apt", ["--version"]], ["brew", ["--version"]]]),
+    probeCandidatesAsync(process.platform === "win32"
+      ? [["python", ["-c", "import sqlite3; print(sqlite3.sqlite_version)"]], ["py", ["-3", "-c", "import sqlite3; print(sqlite3.sqlite_version)"]]]
+      : [["python3", ["-c", "import sqlite3; print(sqlite3.sqlite_version)"]], ["python", ["-c", "import sqlite3; print(sqlite3.sqlite_version)"]]]),
+    probeCandidatesAsync([["curl", ["--version"]]])
+  ]);
+  const nodeSqliteProbe = nodeProbe.ok
+    ? await probeCandidatesAsync([[process.execPath, ["--no-warnings", "-e", "require('node:sqlite'); process.stdout.write('node:sqlite')"]]])
+    : { ok: false, command: "", version: "" };
+  return { shellProbe, nodeProbe, npmProbe, pythonProbe, pipProbe, gitProbe, cargoProbe, goProbe, gemProbe, systemManagerProbe, sqliteProbe, curlProbe, nodeSqliteProbe };
+}
+
+function buildRuntimeFacts(root, probes) {
+  const { shellProbe, nodeProbe, npmProbe, pythonProbe, pipProbe, gitProbe, systemManagerProbe, sqliteProbe, curlProbe, nodeSqliteProbe } = probes;
+  const electronPath = resolveElectronPath(root);
+  const browserRunner = path.join(root, "src", "browserRunner.mjs");
+  const backgroundSupervisor = path.join(root, "src", "backgroundSupervisor.mjs");
+  const filesystem = writableDirectory(root);
+  const packageCommands = [npmProbe, pipProbe, probes.cargoProbe, probes.goProbe, probes.gemProbe].filter((item) => item.ok).map((item) => item.command);
+  const codeCommands = [nodeProbe, pythonProbe].filter((item) => item.ok).map((item) => item.command);
+  const webRuntime = ["webTools.js", "apiTools.js"].every((file) => fs.existsSync(path.join(root, "src", file)));
+  const archiveRuntime = fs.existsSync(path.join(root, "src", "archiveTools.js"));
+  const nodeSqlite = nodeSqliteProbe.ok;
   return {
     webRuntime,
     filesystem,
@@ -246,6 +370,30 @@ function probeCandidates(candidates) {
     });
     if (!result.error && result.status === 0) {
       return { ok: true, command, version: String(result.stdout || result.stderr || "").trim().split(/\r?\n/)[0].slice(0, 160) };
+    }
+  }
+  return { ok: false, command: "", version: "" };
+}
+
+async function probeCandidatesAsync(candidates) {
+  for (const [command, args] of candidates) {
+    const isCommandScript = process.platform === "win32" && /\.(?:cmd|bat)$/i.test(command);
+    const file = isCommandScript ? "cmd.exe" : command;
+    const invocationArgs = isCommandScript ? ["/d", "/c", command, ...args] : args;
+    try {
+      const result = await execFileAsync(file, invocationArgs, {
+        encoding: "utf8",
+        windowsHide: true,
+        timeout: 3000,
+        maxBuffer: 64 * 1024
+      });
+      return {
+        ok: true,
+        command,
+        version: String(result.stdout || result.stderr || "").trim().split(/\r?\n/)[0].slice(0, 160)
+      };
+    } catch {
+      // Try the next known command alias, if one exists.
     }
   }
   return { ok: false, command: "", version: "" };

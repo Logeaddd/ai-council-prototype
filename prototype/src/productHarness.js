@@ -226,7 +226,28 @@ function latestCampaignTaskEvidence(reports, root, gate = {}) {
 function campaignReportPassesGate(report = {}, gate = {}, options = {}) {
   return report.status === "passed"
     && (gate.requireDelegationEvidence !== true || currentCampaignDelegationEvidence(report, options).passed === true)
+    && (gate.requireParticipationEvidence !== true || currentCampaignParticipationEvidence(report, options).passed === true)
     && (!campaignTaskRequiresAcquisitionEvidence(report, gate) || hasCurrentCapabilityUseEvidence(report, options));
+}
+
+function currentCampaignParticipationEvidence(report = {}, options = {}) {
+  const reportPath = String(options.reportPath || "");
+  if (!reportPath) return { required: true, passed: false, checks: [campaignEvidenceCheck("durable_campaign_sessions", false, "missing_report_path")] };
+  const receipt = readReceiptSessions(
+    report.collaboration?.executionReceipt,
+    "ai-council.collaboration-execution-receipt.v1",
+    reportPath,
+    { requireCompleteDirectory: true }
+  );
+  if (receipt.error) return { required: true, passed: false, checks: [campaignEvidenceCheck("durable_collaboration_execution_receipt", false, receipt.error)] };
+  return {
+    ...verifyCampaignCollaboration({
+      requiresParticipation: true,
+      workMode: report.scenario?.task?.workMode || "collab",
+      minimumParticipants: Number(report.scenario?.task?.minimumParticipants || 1)
+    }, receipt.sessions),
+    executionReceipt: { schema: receipt.schema, sessionCount: receipt.sessions.length }
+  };
 }
 
 function currentCampaignDelegationEvidence(report = {}, options = {}) {

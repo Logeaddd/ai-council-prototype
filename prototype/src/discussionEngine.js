@@ -4,7 +4,7 @@ import { buildContextPromptSections, buildMemberContext, materializeContextRecei
 import { hasValidFinalDecision, parseFinalDecision, parseRoundModelResult } from "./responseParser.js";
 import { makeId, nowIso } from "./types.js";
 import { isConsensusParticipant, scoreConsensus, shouldStop, updateUnresolvedObjections } from "./consensusEngine.js";
-import { appendMemoryCandidates, listSessionHistoryCatalogue, readRecentGroupSessions, searchSessionContextArchive, writeContextArchive, writeGroupSession, writeSession } from "./storage.js";
+import { appendMemoryCandidates, readRecentGroupSessions, searchSessionContextArchive, writeContextArchive, writeGroupSession, writeSession } from "./storage.js";
 import { assessBudgetUsage, assessSizeUsage } from "./tokenLimits.js";
 import { appendSessionTranscriptChunk, readSummaryCache, updateDeterministicSummaries } from "./summaryCache.js";
 import { appendProviderUsageSample, appendSessionUsage, estimateCost, estimateMemberAccruedCost, readProviderUsageCalibration } from "./usageStats.js";
@@ -28,10 +28,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { createObservationCache, hasMaterialWorkspaceChange } from "./observationCache.js";
-import { acknowledgeOwnerDelegations, activeDelegationForAgent, advanceExecutionState, collaborationRequirementStatus, createExecutionState, executionInstruction, gateDeliveryRecoveryToolRequests, hasPendingWorkDelegations, requiresWorkspaceExecution, selectExecutionAgents } from "./executionState.js";
+import { acknowledgeOwnerDelegations, acknowledgeOwnerIntegration, activeDelegationForAgent, advanceExecutionState, collaborationRequirementStatus, createExecutionState, executionInstruction, gateDeliveryRecoveryToolRequests, hasPendingWorkDelegations, normalizeTaskContract, requiresWorkspaceExecution, resolveDelegationAssigneeId, selectExecutionAgents } from "./executionState.js";
 import { nativeToolDefinitions } from "./nativeToolProtocol.js";
 import { markNativeModelSource } from "./nativeToolProvenance.js";
-import { readPublicEventHotCache } from "./publicEventJournal.js";
 import { appendTaskRunEvent, createTaskRun, readTaskRun, recordTaskRunArtifactVerification, recordTaskRunFileEvidence, recordTaskRunToolAttempts, syncTaskRunFromSession } from "./taskRuntime.js";
 
 export async function runCouncil(question, group, baseDir, options = {}) {
@@ -57,12 +56,30 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
   });
   const globalRequirement = options.globalRequirement || group.settings?.globalRequirement || "";
   const workspaceGroup = options.groupPath ? readWorkspaceGroup(options.groupPath) : undefined;
-  const memoryEnabled = capabilityEnabled(options.appSettings, "memory");
-  const recentGroupSessions = options.groupPath && memoryEnabled
+const memoryEnabled = capabilityEnabled(options.appSettings, "memory");
+  const recentGroupSessions = options.groupPath
     ? readRecentGroupSessions(options.groupPath, { limit: 12 })
     : [];
-  const automaticContinuationSource = isContinuationRequest(question)
-    ? selectAutomaticContinuationSource(recentGroupSessions)
+  // Durable task ownership and checkpoints are execution state, not optional
+  // memory. They must remain available even when historical memory retrieval
+  // is disabled, otherwise a retained delivery can silently select a new
+  // finalizer after a member mutation or restart.
+  let taskState = options.groupPath ? readTaskState(options.groupPath) : undefined;
+  const explicitContinuationRequest = isContinuationRequest(question);
+  // An exact reference to an already-recorded deliverable is a retained-task
+  // follow-up, even when the user does not spell it as "continue".  This is
+  // deliberately narrower than general semantic similarity: a new request
+  // must name a current durable artifact before it can inherit ownership.
+  const retainedTaskFollowup = isRetainedTaskFollowup(question, taskState?.executionCheckpoint);
+  const retainedRequirementFollowup = isRetainedRequirementFollowup(question, taskState?.executionCheckpoint);
+  const retainedCheckpointFollowup = retainedTaskFollowup || retainedRequirementFollowup;
+  const continuationRequested = explicitContinuationRequest || retainedCheckpointFollowup;
+  const contextRecallRequested = continuationRequested || isContextCorrectionRequest(question);
+  const automaticContinuationSource = continuationRequested
+    ? selectAutomaticContinuationSource(
+      recentGroupSessions,
+      retainedCheckpointFollowup ? taskState?.executionCheckpoint?.sourceSessionId : ""
+    )
     : undefined;
   const continuationContext = normalizeContinuationContext(options.continuationContext)
     || (options.groupPath && memoryEnabled && automaticContinuationSource
@@ -80,11 +97,13 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
   const excludedLegacyContinuationIds = automaticContinuationSource
     ? recentGroupSessions.filter(isLegacyContinuationShell).map((session) => session.id)
     : [];
-  let taskState = options.groupPath && memoryEnabled ? readTaskState(options.groupPath) : undefined;
-  let contextInvalidations = mergeContextInvalidations(taskState?.invalidations, options.contextInvalidations);
+  let contextInvalidations = mergeContextInvalidations(
+    contextRecallRequested ? taskState?.invalidations : [],
+    options.contextInvalidations
+  );
   const runtimeDiscoveryOptions = { managedToolRoots: [path.join(baseDir, "tools")] };
   const runtimeEnvironment = formatRuntimeEnvironment(discoverRuntimeEnvironment(options.groupPath || baseDir, runtimeDiscoveryOptions));
-  const retrievedContext = options.groupPath && memoryEnabled
+  const retrievedContext = options.groupPath && memoryEnabled && contextRecallRequested
     ? searchSessionContextArchive(options.groupPath, [
       options.latestBossInstruction,
       continuationContext?.previousQuestion,
@@ -95,18 +114,6 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
       excludeSessionIds: excludedLegacyContinuationIds
     })
     : [];
-  const historyCatalogue = options.groupPath && memoryEnabled
-    ? listSessionHistoryCatalogue(options.groupPath, {
-      limit: group.settings?.historyCatalogueLimit || 12,
-      excludeSessionIds: excludedLegacyContinuationIds
-    })
-    : [];
-  const publicEventHotCache = options.groupPath && memoryEnabled
-    ? readPublicEventHotCache(options.groupPath, {
-      limit: group.settings?.publicEventHotCacheLimit || 12,
-      excludeSessionIds: excludedLegacyContinuationIds
-    })
-    : { events: [] };
   const session = {
     id: makeId("session"),
     question,
@@ -114,6 +121,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
     startedAt: sessionStartedAt,
     continuationContext,
     groupId: group.id,
+    workMode,
     authorizedProjectRoots,
     groupSnapshot: redactGroupForSession(group),
     status: "running",
@@ -136,6 +144,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
     modelCallCount: 0,
     modelCallBudget: Number(group.settings.maxModelCalls || 0),
     guardStopReason: "",
+    roundAdvanceBlockedReason: "",
     finalizationStatus: { status: "pending", reason: "" },
     messages: [],
     interimMessages: [],
@@ -143,10 +152,19 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
       question: executionQuestion,
       agents: enabledAgents,
       workspaceGroup,
+      workMode,
       previousState: continuationTaskRun?.execution?.active
         ? continuationTaskRun.execution
+        : retainedCheckpointFollowup && taskState?.executionCheckpoint?.active
+          ? taskState.executionCheckpoint
         : automaticContinuationSource?.executionState
-        || (isContinuationRequest(question) ? taskState?.executionCheckpoint : undefined)
+        || (continuationRequested ? taskState?.executionCheckpoint : undefined),
+      // A retained-task follow-up resumes the same delivery even if its last
+      // checkpoint reached review completion. The renewed phase below is
+      // deliberately executable, but ownership and finalizer identity stay
+      // with the durable task rather than being reselected from a mutated row.
+      resumeCompleted: Boolean(continuationContext) || retainedCheckpointFollowup,
+      prebuildContract: true
     })
   };
   session.taskRun = options.groupPath && session.executionState.active
@@ -181,6 +199,17 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
     return writeGroupSession(session, options.groupPath);
   };
   const refreshExecutionCheckpoint = () => {
+    if (!session.taskRun && options.groupPath && session.executionState?.active) {
+      session.taskRun = createTaskRun({
+        groupPath: options.groupPath,
+        session,
+        question: executionQuestion,
+        authorizedProjectRoots,
+        attachments,
+        parentTaskRunId: continuationContext?.taskRunId || "",
+        resumeTaskRunId: continuationContext?.taskRunId || ""
+      });
+    }
     const updated = updateExecutionCheckpoint(options.groupPath, session);
     if (updated) taskState = updated;
     return updated;
@@ -242,7 +271,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
       const agentStartMs = Date.now();
       const agentStartedAt = nowIso();
       const seat = findWorkspaceSeat(workspaceGroup, agent);
-      const transcriptVisibility = contextVisibilityForAgent(agent, workMode);
+      const transcriptVisibility = contextVisibilityForAgent(agent, workMode, session.executionState);
       if (acknowledgeOwnerDelegations(session.executionState, agent)) {
         refreshExecutionCheckpoint();
         persistRunningSession();
@@ -256,12 +285,12 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
         transcriptVisibility,
         latestBossInstruction: [options.latestBossInstruction, executionDirective].filter(Boolean).join("\n\n"),
         attachments,
-        taskState,
         retrievedContext,
-        historyCatalogue,
-        publicEventHotCache,
+        includeStableContext: false,
+        includeRetainedExecutionEvidence: false,
+        enableContextInvalidationRefs: contextRecallRequested,
         enabledSkills: loadEnabledSkills(baseDir, options.groupPath, options.appSettings),
-        ...loadSummaryContext(options.groupPath, agent, options.appSettings),
+        ...loadSummaryContext(options.groupPath, agent, options.appSettings, { includeHistoricalSummaries: continuationRequested }),
         privateBossMessages: loadPrivateBossMessages(options.groupPath, agent, options.appSettings),
         contextInvalidations,
         providerUsageCalibration: loadProviderUsageCalibration(options.groupPath, agent)
@@ -359,7 +388,9 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
         memberContext,
         messages,
         timeoutMs: group.settings.agentTimeoutMs,
-        nativeToolPermissionTier: fileOperationPermissionTier
+        nativeToolPermissionTier: fileOperationPermissionTier,
+        nativeToolChoice: requiresBlockingRepairMutation(session.executionState, agent, fileOperationPermissionTier) ? "required" : "auto",
+        nativeToolSubset: requiresBlockingRepairMutation(session.executionState, agent, fileOperationPermissionTier) ? REPAIR_MUTATION_NATIVE_TOOLS : undefined
       });
       let response = applyRoundResponseRules(callOutcome.response, agent, round);
       captureSemanticMemory(response, "round");
@@ -444,7 +475,6 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
       const establishTaskContractBeforeActions = (currentResponse) => {
         if (
           agent.id !== session.executionState?.executorId
-          || session.executionState?.phase !== "intake"
           || !currentResponse?.task_contract
         ) return;
         advanceExecutionState({
@@ -467,9 +497,10 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
         if (agent.id !== session.executionState?.executorId) {
           return { ok: false, code: "delegation_owner_required", error: "Only the durable delivery owner can create a bounded delegation." };
         }
+        const assigneeId = resolveDelegationAssigneeId(request.assigneeId, session.groupSnapshot?.agents || []);
         const delegation = {
           type: String(request.delegationType || "").trim().toLowerCase(),
-          assignee_id: String(request.assigneeId || "").trim(),
+          assignee_id: assigneeId || String(request.assigneeId || "").trim(),
           task: String(request.delegationTask || "").trim(),
           expected_evidence: Array.isArray(request.expectedEvidence) ? request.expectedEvidence : [],
           allowed_tools: Array.isArray(request.allowedTools) ? request.allowedTools : [],
@@ -510,12 +541,12 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
       };
 
       const registerNativeTaskContract = async (request, provenance = {}) => {
-        if (agent.id !== session.executionState?.executorId || session.executionState?.phase !== "intake") {
-          return { ok: false, code: "task_contract_owner_required", error: "Only the active intake owner may record the task contract before execution begins." };
+        if (agent.id !== session.executionState?.executorId || session.executionState?.phase === "complete") {
+          return { ok: false, code: "task_contract_owner_required", error: "Only the active delivery owner may supplement the task contract." };
         }
         const taskContract = request.taskContract;
-        if (!taskContract || typeof taskContract !== "object" || Array.isArray(taskContract)) {
-          return { ok: false, code: "invalid_task_contract", error: "record_task_contract requires one complete taskContract object." };
+        if (!normalizeTaskContract(taskContract)) {
+          return { ok: false, code: "invalid_task_contract", error: "The optional task-contract supplement was incomplete. Other authorized tools remain available; correct the supplement only if its semantics are still useful." };
         }
         if (provenance.nativeToolCall === true) markNativeModelSource(taskContract);
         response.task_contract = taskContract;
@@ -534,9 +565,6 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
         });
         refreshExecutionCheckpoint();
         executionDirective = executionInstruction(session.executionState, agent);
-        if (session.executionState?.phase === "intake") {
-          return { ok: false, code: "invalid_task_contract", error: "The task contract is incomplete. Include its mode, objective, requirements, deliverables, completion criteria, and next action." };
-        }
         return {
           ok: true,
           mode: session.executionState?.taskContract?.mode,
@@ -545,6 +573,10 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
       };
 
       establishTaskContractBeforeActions(response);
+      if (acknowledgeOwnerIntegration(session.executionState, agent, response)) {
+        refreshExecutionCheckpoint();
+        executionDirective = executionInstruction(session.executionState, agent);
+      }
       const intakeContractAttemptPending = agent.id === session.executionState?.executorId
         && session.executionState?.phase === "intake"
         && (response.tool_requests || []).some((request) => String(request?.tool || "").trim().toLowerCase() === "record_task_contract");
@@ -618,25 +650,20 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
         const allRequestedTools = response.tool_requests || [];
         const contractRequests = allRequestedTools.filter((request) => String(request?.tool || "").trim().toLowerCase() === "record_task_contract");
         const requestsAfterContract = allRequestedTools.filter((request) => String(request?.tool || "").trim().toLowerCase() !== "record_task_contract");
-        const taskContractStillRequired = agent.id === session.executionState?.executorId
-          && session.executionState?.phase === "intake"
-          && contractRequests.length > 0;
-        const deferredForDelegation = !taskContractStillRequired && ownerDelegationTurn
+        const deferredForDelegation = ownerDelegationTurn
           ? requestsAfterContract.filter((request) => String(request?.tool || "").trim().toLowerCase() !== "delegate_task")
             .map((request) => deferredToolRequestForDelegation(request))
           : [];
-        const deferredForTaskIntake = taskContractStillRequired
-          ? requestsAfterContract.map((request) => deferredToolRequestForTaskIntake(request))
-          : [];
         const executableRequests = [
           ...contractRequests,
-          ...(!taskContractStillRequired && ownerDelegationTurn
+          ...(ownerDelegationTurn
             ? requestsAfterContract.filter((request) => String(request?.tool || "").trim().toLowerCase() === "delegate_task")
-            : !taskContractStillRequired ? requestsAfterContract : [])
+            : requestsAfterContract)
         ];
         const recoveryGate = gateDeliveryRecoveryToolRequests(session.executionState, agent, executableRequests);
         const executedToolResult = await executeToolRequests({
           requests: recoveryGate.accepted,
+          toolCatalog: nativeToolDefinitions(fileOperationPermissionTier),
           permissionTier: fileOperationPermissionTier,
           agent,
           round,
@@ -660,6 +687,8 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
           managedToolRoots: runtimeDiscoveryOptions.managedToolRoots,
           onToolEvent: options.onToolEvent,
           signal: options.signal,
+          currentSession: session,
+          transcriptVisibility,
           observationCache,
           previousResults: [
             ...session.toolExecutionResults.filter((item) => item.source_agent_id === agent.id),
@@ -672,7 +701,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
         });
         const toolResult = {
           ...executedToolResult,
-          rejected: [...recoveryGate.rejected, ...executedToolResult.rejected, ...deferredForDelegation, ...deferredForTaskIntake],
+          rejected: [...recoveryGate.rejected, ...executedToolResult.rejected, ...deferredForDelegation],
           events: [
             ...recoveryGate.rejected.map((item) => ({
               type: "tool_failure",
@@ -687,7 +716,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
               createdAt: item.createdAt
             })),
             ...executedToolResult.events,
-            ...[...deferredForDelegation, ...deferredForTaskIntake].map((item) => ({
+            ...deferredForDelegation.map((item) => ({
               type: "tool_failure",
               id: item.id,
               tool: item.tool,
@@ -751,6 +780,20 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
           yield event;
         }
 
+        const ownerMustYieldForParticipation = agent.id === session.executionState?.executorId
+          && session.executionState?.phase === "deliberation"
+          && session.executionState?.participation?.status === "collecting";
+        if (ownerMustYieldForParticipation) {
+          response = {
+            ...response,
+            tool_requests: [],
+            argument: "The task contract is recorded. Yielding this turn so the scheduled collaborators can contribute before the delivery owner mutates or finalizes the workspace."
+          };
+          rawTextForMessage = "";
+          errorForMessage = "";
+          break;
+        }
+
         if (ownerMustWaitForDelegation) {
           response = {
             ...response,
@@ -794,12 +837,12 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
           transcriptVisibility,
           latestBossInstruction: [recoveryInstruction, executionDirective].filter(Boolean).join("\n\n"),
           attachments,
-          taskState,
           retrievedContext,
-          historyCatalogue,
-          publicEventHotCache,
+          includeStableContext: false,
+          includeRetainedExecutionEvidence: false,
+          enableContextInvalidationRefs: contextRecallRequested,
           enabledSkills: loadEnabledSkills(baseDir, options.groupPath, options.appSettings),
-          ...loadSummaryContext(options.groupPath, agent, options.appSettings),
+          ...loadSummaryContext(options.groupPath, agent, options.appSettings, { includeHistoricalSummaries: continuationRequested }),
           privateBossMessages: loadPrivateBossMessages(options.groupPath, agent, options.appSettings),
           contextInvalidations,
           providerUsageCalibration: loadProviderUsageCalibration(options.groupPath, agent),
@@ -830,7 +873,7 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
             ...runtimeDiscoveryOptions,
             refresh: true
           })),
-          resumeInstruction: recoveryInstruction,
+          resumeInstruction: "",
           contextSections: buildContextPromptSections(followupContext),
         });
         const continuingNatively = Boolean(nativeToolConversation?.turns.length);
@@ -852,9 +895,12 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
           toolIteration: toolIterations,
           nativeToolConversation: continuingNatively ? nativeToolConversation : undefined,
           nativeToolPermissionTier: fileOperationPermissionTier,
-          nativeToolChoice: toolLoopStagnated.recoveryRequired && fileOperationPermissionTier === "full" && !isReviewerLike(agent)
+          nativeToolChoice: requiresBlockingRepairMutation(session.executionState, agent, fileOperationPermissionTier)
             ? "required"
-            : "auto"
+            : toolLoopStagnated.recoveryRequired && fileOperationPermissionTier === "full" && !isReviewerLike(agent)
+            ? "required"
+            : "auto",
+          nativeToolSubset: requiresBlockingRepairMutation(session.executionState, agent, fileOperationPermissionTier) ? REPAIR_MUTATION_NATIVE_TOOLS : undefined
         });
         response = applyRoundResponseRules(callOutcome.response, agent, round);
         captureSemanticMemory(response, toolLoopStagnated.recoveryRequired ? "tool_stagnation_recovery" : "tool_followup");
@@ -901,7 +947,12 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
             };
           }
         }
-        if (toolLoopStagnated.recoveryRequired && requiresStagnationWorkspaceEdit(agent, question, fileOperationPermissionTier, session.executionState) && !hasMaterialExecutionRequest(response)) {
+        if (
+          toolLoopStagnated.recoveryRequired
+          && requiresStagnationWorkspaceEdit(agent, question, fileOperationPermissionTier, session.executionState)
+          && !hasMaterialExecutionRequest(response)
+          && !response.tool_requests?.length
+        ) {
           nativeToolConversation = undefined;
           callOutcome = yield* callRoundModel({
             options,
@@ -1037,14 +1088,64 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
       recordObjections(session, agent, message.response, round, group.settings);
       persistRunningSession();
       appendDiscussionFallbackAgents({ agentsToCall, enabledAgents, session, round, firstRoundAgents });
+      // Intake is a protocol gate, not a discussion round. Give the durable
+      // owner one bounded same-round retry to repair a malformed/empty
+      // contract response. The retry is appended to this round's queue so a
+      // second outer round can never be mistaken for intake recovery.
+      if (
+        session.executionState?.active
+        && session.executionState.phase === "intake"
+        && agent.id === session.executionState.executorId
+        && enabledAgents.some((candidate) => (
+          candidate.enabled !== false
+          && candidate.id !== session.executionState.executorId
+          && candidate.id !== session.executionState.finalizerId
+        ))
+        && agentsToCall.filter((item) => item.id === agent.id).length < 2
+      ) {
+        agentsToCall.push(agent);
+      }
+      persistRunningSession();
       yield {
         type: "agent_message",
         message,
         createdAt: message.createdAt
       };
+      yield {
+        type: "execution_state",
+        execution: executionStateSnapshot(session.executionState),
+        createdAt: nowIso()
+      };
     }
 
     if (!results.length) break;
+
+    // A round is not complete while the durable execution owner is still
+    // in intake.  In that state the owner has not recorded a valid task
+    // contract, so emitting round_complete would make the outer loop start
+    // another round (often calling only the same owner again) while silently
+    // skipping every collaborator. Stop at this boundary with an explicit
+    // guard reason instead of advancing the round or fabricating participation.
+    if (session.executionState?.active && session.executionState.phase === "intake") {
+      session.roundAdvanceBlockedReason ||= "task_contract_required_before_round_advance";
+      persistRunningSession();
+      break;
+    }
+
+    // The per-message fallback normally appends collaborators as soon as the
+    // owner enters deliberation. Keep a final invariant here as well: a
+    // collecting participation set must be fully scheduled before a round can
+    // close. If the set is incomplete, stop explicitly rather than starting a
+    // later round with an unspoken member.
+    if (session.executionState?.active && session.executionState.phase === "deliberation") {
+      const pending = selectExecutionAgents(session.executionState, enabledAgents)
+        .filter((agent) => !results.some((message) => message.agentId === agent.id));
+      if (pending.length) {
+        session.roundAdvanceBlockedReason ||= "collaboration_schedule_incomplete_before_round_advance";
+        persistRunningSession();
+        break;
+      }
+    }
 
     consensus = scoreConsensus(enabledAgents, session, { round });
     session.consensusByRound.push({ round, ...consensus });
@@ -1069,7 +1170,13 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
   }
 
   throwIfAborted(options.signal);
+  const durableFinalizerId = String(session.executionState?.finalizerId || session.taskRun?.execution?.finalizerId || "").trim();
   const judge = selectFinalizer(enabledAgents, session);
+  // A retained task must never silently change finalizer when the original
+  // finalizer is temporarily disabled. Keep the durable identity visible and
+  // block final synthesis until that member is restored (or the user starts a
+  // new task with an explicitly different finalizer).
+  const durableFinalizerUnavailable = Boolean(durableFinalizerId && judge?.id !== durableFinalizerId);
   const finalStartMs = Date.now();
   const finalStartedAt = nowIso();
   const fallback = fallbackFinalDecision(session, consensus);
@@ -1082,11 +1189,12 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
     continuationContext,
     latestBossInstruction: options.latestBossInstruction || "",
     attachments,
-    taskState,
     retrievedContext,
-    publicEventHotCache,
+    includeStableContext: false,
+    includeRetainedExecutionEvidence: true,
+    enableContextInvalidationRefs: contextRecallRequested,
     enabledSkills: loadEnabledSkills(baseDir, options.groupPath, options.appSettings),
-    ...loadSummaryContext(options.groupPath, judge, options.appSettings),
+    ...loadSummaryContext(options.groupPath, judge, options.appSettings, { includeHistoricalSummaries: continuationRequested }),
     privateBossMessages: loadPrivateBossMessages(options.groupPath, judge, options.appSettings),
     contextInvalidations,
     providerUsageCalibration: loadProviderUsageCalibration(options.groupPath, judge)
@@ -1103,12 +1211,21 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
   });
   yield {
     type: "final_start",
-    agentId: judge.id,
-    agentName: judge.name,
+    agentId: durableFinalizerUnavailable ? durableFinalizerId : judge.id,
+    agentName: durableFinalizerUnavailable ? "" : judge.name,
     contextStatus: finalContextStatus,
+    unavailable: durableFinalizerUnavailable,
+    reason: durableFinalizerUnavailable ? `durable_finalizer_unavailable:${durableFinalizerId}` : "",
     createdAt: finalStartedAt
   };
-  if (finalContext.coreOverflow) {
+  if (durableFinalizerUnavailable) {
+    finalizationFailure = `durable_finalizer_unavailable:${durableFinalizerId}`;
+    session.guardStopReason ||= finalizationFailure;
+    session.finalDecision = {
+      ...fallback,
+      risks: [...fallback.risks, `final_judge_unavailable:${finalizationFailure}`]
+    };
+  } else if (finalContext.coreOverflow) {
     finalizationFailure = `non_compressible_core_exceeds_input_limit:${finalContextStatus.nonCompressibleCoreTokens}/${finalContextStatus.effectiveInputLimit}`;
     session.finalDecision = {
       ...fallback,
@@ -1237,6 +1354,23 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
   applyEngineFinalState(session, consensus, group.settings);
   applyFinalizationFailure(session);
   applyIncompleteExecutionState(session);
+  if (session.roundAdvanceBlockedReason) {
+    session.finalDecision.final_state = "needs_revision";
+    session.finalDecision.blocking_issues = [
+      ...(session.finalDecision.blocking_issues || []),
+      {
+        id: "round-advance-blocked",
+        issue: session.roundAdvanceBlockedReason,
+        severity: "critical",
+        blocks_final: true,
+        in_scope: true,
+        source_agent_id: "engine",
+        source_agent_name: "AI Council",
+        status: "open"
+      }
+    ];
+    session.finalDecision.risks = mergeRiskTexts(session.finalDecision.risks, session.finalDecision.blocking_issues, []);
+  }
   if (session.guardStopReason) {
     session.finalDecision.final_state = "needs_revision";
     session.finalDecision.blocking_issues = [
@@ -1349,9 +1483,23 @@ export async function* runCouncilEvents(question, group, baseDir, options = {}) 
 
 function appendDiscussionFallbackAgents({ agentsToCall, enabledAgents, session, round, firstRoundAgents }) {
   const execution = session.executionState;
-  if (execution?.active || execution?.phase !== "discussion") return;
-  if (round === 1 && firstRoundAgents.length < enabledAgents.length) return;
+  const participationDelivery = ["collab", "independent"].includes(session.workMode) && execution?.active && execution?.phase === "deliberation";
+  const ownerIntegration = ["collab", "independent"].includes(session.workMode)
+    && execution?.active
+    && execution?.participation?.ownerIntegrationStatus === "pending"
+    && execution?.phase !== "complete";
+  const releasedDiscussion = !execution?.active && execution?.phase === "discussion";
+  if (!participationDelivery && !ownerIntegration && !releasedDiscussion) return;
+  if (releasedDiscussion && round === 1 && firstRoundAgents.length < enabledAgents.length) return;
   const scheduled = new Set(agentsToCall.map((agent) => agent.id));
+  if (ownerIntegration) {
+    const owner = enabledAgents.find((agent) => agent.id === execution.executorId && agent.enabled !== false);
+    if (owner) {
+      execution.participation.ownerIntegrationStatus = "scheduled";
+      agentsToCall.push(owner);
+    }
+    return;
+  }
   for (const agent of selectAgents(enabledAgents, session, round, firstRoundAgents)) {
     if (scheduled.has(agent.id)) continue;
     scheduled.add(agent.id);
@@ -1469,7 +1617,7 @@ function persistAgentSemanticPublicMemory(groupPath, candidates, options = {}) {
   }
 }
 
-async function* callRoundModel({ options, session, phase, round, agent, memberContext, messages, timeoutMs, toolIteration, formatRecovery = true, nativeToolPermissionTier = "text", nativeToolChoice = "auto", nativeToolConversation = undefined }) {
+async function* callRoundModel({ options, session, phase, round, agent, memberContext, messages, timeoutMs, toolIteration, formatRecovery = true, nativeToolPermissionTier = "text", nativeToolChoice = "auto", nativeToolSubset = undefined, nativeToolConversation = undefined }) {
   if (!reserveModelCall(session)) {
     session.guardStopReason = "model_call_budget_exhausted";
     return {
@@ -1480,6 +1628,12 @@ async function* callRoundModel({ options, session, phase, round, agent, memberCo
       nativeAssistantText: ""
     };
   }
+  const taskIntakeCall = agent.id === session.executionState?.executorId && session.executionState?.phase === "intake";
+  const nativeTools = taskIntakeCall
+    ? nativeToolDefinitions(nativeToolPermissionTier, { tools: ["record_task_contract"] })
+    : nativeToolDefinitions(nativeToolPermissionTier, {
+      tools: nativeToolSubset || DEFAULT_INLINE_NATIVE_TOOLS
+    });
   const contextReceipt = recordContextReceipt(session, memberContext, {
     groupPath: options.groupPath,
     sessionId: session.id,
@@ -1488,7 +1642,8 @@ async function* callRoundModel({ options, session, phase, round, agent, memberCo
     round,
     toolIteration,
     agentId: agent.id,
-    inputMessages: messages
+    inputMessages: messages,
+    nativeTools
   });
   const modelCallRecord = notifyModelCall(options, {
     sessionId: session.id,
@@ -1500,13 +1655,10 @@ async function* callRoundModel({ options, session, phase, round, agent, memberCo
     model: agent.model || "",
     provider: agent.provider || "",
     inputMessages: messages,
+    nativeTools,
     contextReceipt
   });
   throwIfAborted(options.signal);
-  const taskIntakeCall = agent.id === session.executionState?.executorId && session.executionState?.phase === "intake";
-  const nativeTools = taskIntakeCall
-    ? nativeToolDefinitions(nativeToolPermissionTier, { tools: ["record_task_contract"] })
-    : nativeToolDefinitions(nativeToolPermissionTier);
   const streamingCall = startAgentCallWithDeltaQueue(
     agent,
     messages,
@@ -1523,8 +1675,11 @@ async function* callRoundModel({ options, session, phase, round, agent, memberCo
     pendingDeltas.push(delta);
   }
   const raw = await streamingCall.result();
+  if (raw.errorCode === "credential_pool_exhausted") {
+    session.guardStopReason ||= `credential_pool_exhausted:${agent.id}`;
+  }
   const parsedResponse = raw.error
-    ? { status: "unavailable", reason: raw.error, retryable: true }
+    ? { status: "unavailable", reason: raw.error, retryable: raw.errorCode !== "credential_pool_exhausted" }
     : parseRoundModelResult(raw.text, raw.nativeToolCalls);
   const safeRawText = raw.error ? "" : redactToolInputFromRawText(raw.text, parsedResponse);
   const safeRaw = raw.error ? raw : { ...raw, text: safeRawText };
@@ -1585,6 +1740,7 @@ async function* callRoundModel({ options, session, phase, round, agent, memberCo
       formatRecovery: false,
       nativeToolPermissionTier,
       nativeToolChoice: nativeToolPermissionTier === "full" ? "required" : "auto",
+      nativeToolSubset,
       messages: [...messages, {
         role: "user",
         content: nativeToolPermissionTier === "full"
@@ -1734,22 +1890,22 @@ function hasMaterialWorkspaceProgress(session = {}) {
 
 export function updateStagnantToolLoopCount({ requests = [], results = [], rejected = [], current = 0, seenTargets = new Set(), history = [], capabilityReady = false } = {}) {
   const material = (results || []).some(hasMaterialWorkspaceChange);
-  const actionableFailure = (rejected || []).some((item) => ["permission_denied", "capability_disabled", "invalid_tool"].includes(String(item.code || "")))
-    || (results || []).some((item) => item.status === "failed" && !isRepeatableInspectionTool(item));
+  const actionableFailure = (rejected || []).length > 0
+    || (results || []).some((item) => item.status === "failed" || item.result?.ok === false);
   const targets = (requests || []).map(toolLoopTarget).filter(Boolean);
   const allTargetsNovel = targets.length > 0 && targets.every((target) => !seenTargets.has(target));
   for (const target of targets) seenTargets.add(target);
   const acquiredCapabilityReady = capabilityReady || hasReadyAcquiredCapability(history);
-  const inspectionOnly = results.length > 0 && results.every(isRepeatableInspectionTool);
-  const repeatedInspection = inspectionOnly && !allTargetsNovel;
-  const scoreIncrement = acquiredCapabilityReady || repeatedInspection ? 3 : 1;
+  const nonMaterialOutcome = results.length > 0 || rejected.length > 0;
+  const repeatedNonMaterialAction = nonMaterialOutcome && !allTargetsNovel;
+  const scoreIncrement = acquiredCapabilityReady || repeatedNonMaterialAction ? 3 : 1;
   const count = material
     ? 0
     : actionableFailure
       ? Number(current || 0) + 3
-      : !inspectionOnly
-        ? 0
-        : Number(current || 0) + scoreIncrement;
+      : nonMaterialOutcome
+        ? Number(current || 0) + scoreIncrement
+        : Number(current || 0);
   return { count, recoveryRequired: count >= 9 };
 }
 
@@ -1809,10 +1965,6 @@ function toolLoopTarget(request = {}) {
   return `${tool}:generic`;
 }
 
-function isRepeatableInspectionTool(item = {}) {
-  return ["list_directory", "read_file", "search_files", "grep_content", "web_search", "fetch_url", "api_request", "execute_command", "git_operation", "run_tests"].includes(item.tool);
-}
-
 function buildStagnantToolLoopRecoveryInstruction(agent, question, toolFollowupInstruction, executionState) {
   const reviewer = isReviewerLike(agent);
   const roleDirective = reviewer
@@ -1840,6 +1992,41 @@ function requiresStagnationVerification(agent, permissionTier, executionState) {
     && executionState?.active
     && executionState?.phase === "verify";
 }
+
+function requiresBlockingRepairMutation(executionState, agent, permissionTier) {
+  return permissionTier === "full"
+    && agent?.id === executionState?.executorId
+    && executionState?.phase === "repair"
+    && executionState?.repair?.requiredMaterialChange === true;
+}
+
+const REPAIR_MUTATION_NATIVE_TOOLS = [
+  "workspace_edit",
+  "execute_command",
+  "run_code",
+  "git_operation",
+  "create_archive",
+  "extract_archive"
+];
+
+const DEFAULT_INLINE_NATIVE_TOOLS = [
+  "record_task_contract",
+  "search_context",
+  "load_context",
+  "tool_search",
+  "tool_inspect",
+  "tool_invoke",
+  "list_directory",
+  "read_file",
+  "search_files",
+  "grep_content",
+  "workspace_edit",
+  "execute_command",
+  "process_control",
+  "run_code",
+  "run_tests",
+  "delegate_task"
+];
 
 function hasWorkspaceMutationRequest(response = {}) {
   return (response.tool_requests || []).some((request) => (
@@ -1985,8 +2172,37 @@ function taskRunSnapshot(taskRun) {
     execution: {
       phase: taskRun.execution?.phase || "",
       nextAction: taskRun.execution?.nextAction || "",
-      artifactStatus: taskRun.execution?.artifactStatus || ""
+      artifactStatus: taskRun.execution?.artifactStatus || "",
+      workMode: taskRun.execution?.workMode || "",
+      executorId: taskRun.execution?.executorId || "",
+      finalizerId: taskRun.execution?.finalizerId || "",
+      participation: taskRun.execution?.participation || undefined
     }
+  };
+}
+
+function executionStateSnapshot(state = {}) {
+  return {
+    phase: String(state.phase || ""),
+    workMode: String(state.workMode || ""),
+    executorId: String(state.executorId || ""),
+    executorName: String(state.executorName || ""),
+    finalizerId: String(state.finalizerId || ""),
+    nextAction: String(state.nextAction || ""),
+    participation: state.participation ? {
+      policy: String(state.participation.policy || ""),
+      status: String(state.participation.status || ""),
+      ownerIntegrationStatus: String(state.participation.ownerIntegrationStatus || ""),
+      participants: (state.participation.participants || []).map((item) => ({
+        agentId: String(item.agentId || ""),
+        agentName: String(item.agentName || ""),
+        role: String(item.role || ""),
+        scope: String(item.scope || ""),
+        status: String(item.status || ""),
+        outcome: String(item.outcome || ""),
+        summary: String(item.summary || "")
+      }))
+    } : undefined
   };
 }
 
@@ -2006,6 +2222,7 @@ function appendModelCallTrace(record, { event, raw } = {}) {
     provider: record.provider || "",
     model: record.model || "",
     input: summarizePromptMessages(record.inputMessages || []),
+    nativeTools: summarizeNativeToolSchemas(record.nativeTools || []),
     contextReceipt: record.contextReceipt || undefined
   };
   if (raw?.error) payload.error = String(raw.error).slice(0, 500);
@@ -2013,6 +2230,15 @@ function appendModelCallTrace(record, { event, raw } = {}) {
   if (raw?.usage) payload.usage = raw.usage;
   if (record.usageCalibrationError) payload.usageCalibrationError = record.usageCalibrationError;
   fs.appendFileSync(filePath, `${JSON.stringify(payload)}\n`, "utf8");
+}
+
+function summarizeNativeToolSchemas(definitions = []) {
+  const tools = Array.isArray(definitions) ? definitions : [];
+  return {
+    count: tools.length,
+    chars: tools.length ? JSON.stringify(tools).length : 0,
+    names: tools.map((tool) => String(tool?.name || "")).filter(Boolean)
+  };
 }
 
 function buildFinalRepairPrompt(finalMessages = [], invalidOutput = "") {
@@ -2213,13 +2439,22 @@ function compactContextInvalidation(item = {}) {
   };
 }
 
-function contextVisibilityForAgent(agent, workMode) {
+function contextVisibilityForAgent(agent, workMode, executionState) {
   if (workMode !== "independent") return "full";
+  if (
+    agent.id === executionState?.executorId
+    && ["scheduled", "completed"].includes(executionState?.participation?.ownerIntegrationStatus)
+  ) return "full";
   if (agent.judge || isReviewerLike(agent)) return "full";
   return "own";
 }
 
 function selectFinalizer(enabledAgents, session) {
+  const durableFinalizerId = String(session?.executionState?.finalizerId || session?.taskRun?.execution?.finalizerId || "").trim();
+  if (durableFinalizerId) {
+    const durableFinalizer = enabledAgents.find((agent) => agent.id === durableFinalizerId);
+    if (durableFinalizer) return durableFinalizer;
+  }
   const explicitJudge = enabledAgents.find((agent) => agent.judge);
   if (explicitJudge) return explicitJudge;
   const byId = new Map(enabledAgents.map((agent) => [agent.id, agent]));
@@ -2259,7 +2494,50 @@ function normalizeContinuationContext(value) {
 function isContinuationRequest(question) {
   const text = String(question || "").trim().toLowerCase();
   if (!text) return false;
+  if (/^(?:please|kindly)\s+(?:continue\b|go\s+on\b|keep\s+going\b)/iu.test(text)) return true;
   return /^(?:好(?:的)?|可以|行|嗯|那)?[\s，,。.!！?？]*(?:继续|接着|往下(?:做)?|继续完善|继续完成|continue\b|go\s+on\b|keep\s+going\b)/iu.test(text);
+}
+
+function isContextCorrectionRequest(question) {
+  const text = String(question || "").trim().toLowerCase();
+  if (!text) return false;
+  return /\b(?:change(?:d|s)?|replace(?:d|s)?|correct(?:ed|s)?|supersede(?:d|s)?|override(?:n|s)?|instead\s+of)\b|(?:修改|改成|替换|更正|纠正|覆盖|不要再用|以.+为准)/iu.test(text);
+}
+
+function isRetainedTaskFollowup(question, checkpoint) {
+  if (!checkpoint?.active) return false;
+  const text = String(question || "").trim().replace(/\\/g, "/").toLowerCase();
+  if (!text) return false;
+  return retainedArtifactPaths(checkpoint).some((artifactPath) => text.includes(artifactPath));
+}
+
+function isRetainedRequirementFollowup(question, checkpoint) {
+  if (!checkpoint?.active) return false;
+  const text = String(question || "").trim().toLowerCase();
+  if (!text) return false;
+  const retainedReference = /\b(?:current|latest|newest|existing|retained|previous)\s+(?:requirement|requirements|task|work|artifact|project|version|field|fields|layout|context)\b/u;
+  const reversalReference = /\b(?:do\s+not|don't)\s+(?:restore|revert|recreate|replace|revive|bring\s+back)\b/u;
+  const chineseReference = /(?:\u5f53\u524d|\u6700\u65b0|\u73b0\u6709|\u4fdd\u7559\u7684|\u4e0a\u4e00\u7248)(?:\u8981\u6c42|\u4efb\u52a1|\u5de5\u4f5c|\u4ea4\u4ed8\u7269|\u9879\u76ee|\u7248\u672c|\u5b57\u6bb5|\u5e03\u5c40|\u4e0a\u4e0b\u6587)|(?:\u4e0d\u8981|\u522b)(?:\u6062\u590d|\u56de\u6eda|\u91cd\u5efa|\u66ff\u6362|\u6539\u56de)/u;
+  return retainedReference.test(text) || reversalReference.test(text) || chineseReference.test(text);
+}
+
+function retainedArtifactPaths(checkpoint = {}) {
+  const contract = checkpoint?.taskContract || {};
+  const artifacts = Array.isArray(contract.artifacts) ? contract.artifacts : [];
+  const deliverables = Array.isArray(contract.deliverables) ? contract.deliverables : [];
+  const checkpointEvidence = Array.isArray(checkpoint.checkpointEvidence) ? checkpoint.checkpointEvidence : [];
+  return [...new Set([
+    ...artifacts.map((artifact) => artifact?.path),
+    ...deliverables.map((deliverable) => String(deliverable || "").split(/[:(]/, 1)[0]),
+    ...checkpointEvidence.map((evidence) => evidence?.target),
+    ...extractRetainedArtifactPaths([checkpoint.taskQuestion, contract.objective, contract.nextAction].filter(Boolean).join("\n"))
+  ].map((artifactPath) => String(artifactPath || "").trim().replace(/\\/g, "/").replace(/^\.\//, "").toLowerCase()).filter((artifactPath) => (
+    artifactPath && !path.isAbsolute(artifactPath) && Boolean(path.extname(artifactPath))
+  )))];
+}
+
+function extractRetainedArtifactPaths(value) {
+  return String(value || "").match(/(?:[\w.-]+\/)+[\w.-]+\.[a-z0-9]{1,12}/giu) || [];
 }
 
 function buildAutomaticContinuationContext(previousSession) {
@@ -2513,17 +2791,6 @@ function deferredToolRequestForDelegation(request = {}) {
   };
 }
 
-function deferredToolRequestForTaskIntake(request = {}) {
-  return {
-    id: String(request.id || `task_contract_deferred:${request.tool || "tool"}`),
-    tool: String(request.tool || ""),
-    status: "rejected",
-    code: "task_contract_required",
-    error: "The task contract has not been accepted. No file, command, package, network, or delegation action may run until the intake owner records one complete semantic contract.",
-    createdAt: nowIso()
-  };
-}
-
 function buildNativeToolContinuationInstruction(recoveryInstruction, executionDirective) {
   return [
     "The preceding native tool-result messages are the authoritative result of your requested actions. Continue from them. Do not repeat a completed observation or command unless the workspace changed or the result requires a repair.",
@@ -2544,7 +2811,10 @@ async function safeCall(agent, messages, timeoutMs, signal, onDelta, nativeTools
     });
   } catch (error) {
     if (error.name === "AbortError") throw error;
-    return { error: `agent_call_failed:${agent.id}:${error.message}` };
+    return {
+      error: `agent_call_failed:${agent.id}:${error.message}`,
+      errorCode: String(error?.code || "")
+    };
   }
 }
 
@@ -2646,7 +2916,19 @@ function mergeBlockingIssue(items = [], issue) {
 }
 
 function deriveSessionStatus(session) {
-  if (session.guardStopReason) return "guard_stopped";
+  const roundAdvanceBlockedReason = String(session.roundAdvanceBlockedReason || "");
+  if (session.guardStopReason) {
+    // Intake and collaboration scheduling guards describe an incomplete
+    // execution contract, not an infrastructure stop. Keep those runs in
+    // the same honest status used by other unfinished deliveries so callers
+    // can offer recovery instead of treating them as an opaque guard halt.
+    if ([
+      "task_contract_required_before_round_advance",
+      "collaboration_schedule_incomplete_before_round_advance"
+    ].includes(session.guardStopReason)) return "incomplete";
+    return "guard_stopped";
+  }
+  if (roundAdvanceBlockedReason) return "incomplete";
   const state = session.finalDecision?.final_state;
   if (state === "ready_to_execute" || state === "usable_with_risks") return "completed";
   if (state === "failed_to_converge") return "failed";
@@ -2846,18 +3128,20 @@ function loadProviderUsageCalibration(groupPath, agent = {}) {
   }
 }
 
-function loadSummaryContext(groupPath, agent, appSettings) {
+function loadSummaryContext(groupPath, agent, appSettings, options = {}) {
   if (!groupPath) return {};
   if (!capabilityEnabled(appSettings, "memory")) return {};
   try {
     const group = readWorkspaceGroup(groupPath);
     const cache = readSummaryCache(groupPath, agent, group);
     return {
-      memberShortSummary: cache.memberShortSummary,
-      memberShortSummaryRecord: cache.memberShortSummaryRecord,
-      groupSharedSummary: cache.groupSharedSummary,
-      groupSharedSummaryRecord: cache.groupSharedSummaryRecord,
-      compressedTranscriptChunks: cache.compressedTranscriptChunks,
+      ...(options.includeHistoricalSummaries ? {
+        memberShortSummary: cache.memberShortSummary,
+        memberShortSummaryRecord: cache.memberShortSummaryRecord,
+        groupSharedSummary: cache.groupSharedSummary,
+        groupSharedSummaryRecord: cache.groupSharedSummaryRecord,
+        compressedTranscriptChunks: cache.compressedTranscriptChunks
+      } : {}),
       publicMemorySummary: formatPublicMemoriesForPrompt(groupPath)
     };
   } catch {

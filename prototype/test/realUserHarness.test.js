@@ -5,7 +5,7 @@ import path from "node:path";
 import zlib from "node:zlib";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { assertCampaignInterruptionStopped, campaignProviderFailureReason, classifyCampaignDelivery, isStreamingActivityEvent, postCouncilEvents, prepareCampaignFixtures, prepareGroupWorkspace, providerCallMetrics, runSeededRealUserBaseline, runSeededRealUserCampaign, seedCampaignHistory, verifyCampaignCollaboration, verifyCampaignDeliverable, verifyCampaignPersistence, verifyCampaignResumption, verifyCampaignToolEvidence, verifyNoDuplicateVerifiedWork, waitForHarnessHealth } from "../src/realUserHarness.js";
+import { assertCampaignInterruptionStopped, campaignProviderFailureReason, classifyCampaignDelivery, isStreamingActivityEvent, postCouncilEvents, prepareCampaignFixtures, prepareGroupWorkspace, providerCallMetrics, runSeededRealUserBaseline, runSeededRealUserCampaign, seedCampaignHistory, verifyCampaignCollaboration, verifyCampaignDeliverable, verifyCampaignPersistence, verifyCampaignResumption, verifyScenario, verifyCampaignToolEvidence, verifyNoDuplicateVerifiedWork, waitForHarnessHealth } from "../src/realUserHarness.js";
 
 test("campaign interruption reports an exhausted payment guard rather than a false stop endpoint failure", () => {
   assert.throws(
@@ -156,7 +156,8 @@ test("harness startup times out when a listening server never answers health req
 });
 
 test("model-stream interruption can close at real agent start before text or tool output", () => {
-  assert.equal(isStreamingActivityEvent({ type: "agent_start" }), true);
+  assert.equal(isStreamingActivityEvent({ type: "agent_start" }), false);
+  assert.equal(isStreamingActivityEvent({ type: "model_start" }), true);
   assert.equal(isStreamingActivityEvent({ type: "agent_delta" }), true);
   assert.equal(isStreamingActivityEvent({ type: "tool_start" }), false);
 });
@@ -175,6 +176,15 @@ test("provider exhaustion is infrastructure evidence instead of an agent interru
       { response: { status: "speak", argument: "Another member completed the work." } }
     ]
   }), "");
+});
+
+test("credential-pool exhaustion is provider infrastructure evidence", () => {
+  const exhausted = campaignProviderFailureReason({
+    messages: [
+      { response: { status: "unavailable", reason: "agent_call_failed:builder:All credential-pool keys are temporarily unavailable for agent: builder." } }
+    ]
+  });
+  assert.match(exhausted, /provider calls were unavailable/i);
 });
 
 test("campaign recovery requires completed visible work after every interruption", () => {
@@ -679,7 +689,10 @@ test("campaign collaboration verifier accepts durable TaskRun-only delegation ev
 
   const writeFirst = {
     ...taskRunOnly,
-    toolExecutionResults: [...taskRunOnly.toolExecutionResults].reverse()
+    toolExecutionResults: [
+      { ...taskRunOnly.toolExecutionResults[1], createdAt: "2026-07-27T00:02:00.500Z" },
+      taskRunOnly.toolExecutionResults[0]
+    ]
   };
   assert.equal(verifyCampaignCollaboration(verifier, [writeFirst]).passed, false);
 });
@@ -712,6 +725,47 @@ test("campaign collaboration verifier rejects model-reported or pre-delegation h
   modelReported.executionState.ownership.delegations[0].native = false;
   modelReported.toolExecutionResults[0].createdAt = "2026-07-27T00:03:01.000Z";
   assert.equal(verifyCampaignCollaboration(verifier, [modelReported]).passed, false);
+});
+
+test("campaign participation verifier requires attributable member speech followed by owner integration", () => {
+  const session = {
+    id: "collab-session",
+    executionState: {
+      workMode: "collab",
+      executorId: "owner",
+      finalizerId: "finalizer",
+      participation: {
+        policy: "collab",
+        status: "completed",
+        ownerIntegrationStatus: "completed",
+        participants: [{
+          agentId: "critic",
+          agentName: "Critic",
+          status: "completed",
+          outcome: "substantive",
+          summary: "Separate source evidence from the final recommendation.",
+          evidence: [{ kind: "message", detail: "session=collab-session; agent=critic" }]
+        }]
+      }
+    },
+    messages: [
+      { agentId: "critic", response: { status: "speak", argument: "Separate source evidence from the final recommendation." } },
+      { agentId: "owner", response: { status: "speak", argument: "I integrated that separation." } }
+    ]
+  };
+  const verifier = { requiresParticipation: true, workMode: "collab", minimumParticipants: 1 };
+  assert.equal(verifyCampaignCollaboration(verifier, [session]).passed, true);
+  assert.equal(verifyCampaignCollaboration(verifier, [{ ...session, messages: session.messages.slice(0, 1) }]).passed, false);
+  assert.equal(verifyCampaignCollaboration(verifier, [{ ...session, executionState: { ...session.executionState, participation: { ...session.executionState.participation, ownerIntegrationStatus: "pending" } } }]).passed, false);
+});
+
+test("campaign collaboration verifier rejects finalizer drift after member role mutation", () => {
+  const sessions = [
+    { executionState: { workMode: "collab", finalizerId: "judge" } },
+    { executionState: { workMode: "collab", finalizerId: "critic" } }
+  ];
+  assert.equal(verifyCampaignCollaboration({ requiresStableFinalizer: true, workMode: "collab" }, sessions).passed, false);
+  assert.equal(verifyCampaignCollaboration({ requiresStableFinalizer: true, workMode: "collab" }, [{ executionState: { workMode: "collab", finalizerId: "judge" } }]).passed, true);
 });
 
 test("capability-acquisition PNG verifier checks the real binary structure, dimensions and every RGBA pixel", async () => {
@@ -785,6 +839,54 @@ test("campaign ZIP verifier checks extracted entry names and content", async () 
   }
 });
 
+test("PPTX campaign verifier checks the OOXML package and requires a slide part", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-campaign-pptx-"));
+  const verifier = { kind: "pptx", file: "deliverables/debate.pptx" };
+  try {
+    const target = path.join(root, verifier.file);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, makeZip([
+      { name: "[Content_Types].xml", content: "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Override PartName=\"/ppt/presentation.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml\"/><Override PartName=\"/ppt/slides/slide1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.slide+xml\"/></Types>" },
+      { name: "_rels/.rels", content: "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"ppt/presentation.xml\"/></Relationships>" },
+      { name: "ppt/presentation.xml", content: "<p:presentation xmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\"><p:sldIdLst><p:sldId id=\"256\"/></p:sldIdLst></p:presentation>" },
+      { name: "ppt/slides/slide1.xml", content: "<p:sld xmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\"><p:cSld/></p:sld>" }
+    ]));
+    const valid = await verifyCampaignDeliverable(verifier, root);
+    assert.equal(valid.passed, true, JSON.stringify(valid));
+    assert.equal(classifyCampaignDelivery(valid).minimumUsableDelivery.passed, true);
+
+    fs.writeFileSync(target, makeZip([
+      { name: "[Content_Types].xml", content: "<Types/>" },
+      { name: "_rels/.rels", content: "<Relationships/>" },
+      { name: "ppt/presentation.xml", content: "<p:presentation/>" }
+    ]));
+    const missingSlide = await verifyCampaignDeliverable(verifier, root);
+    assert.equal(missingSlide.passed, false);
+    assert.equal(classifyCampaignDelivery(missingSlide).minimumUsableDelivery.passed, true);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("baseline PPTX verifier discovers a uniquely named artifact when the model chooses its own filename", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-baseline-pptx-discovery-"));
+  try {
+    fs.writeFileSync(path.join(root, "谁更狗_辩论赛.pptx"), makeZip([
+      { name: "[Content_Types].xml", content: "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Override PartName=\"/ppt/presentation.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml\"/><Override PartName=\"/ppt/slides/slide1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.slide+xml\"/></Types>" },
+      { name: "_rels/.rels", content: "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"ppt/presentation.xml\"/></Relationships>" },
+      { name: "ppt/presentation.xml", content: "<p:presentation xmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\"><p:sldIdLst><p:sldId id=\"256\"/></p:sldIdLst></p:presentation>" },
+      { name: "ppt/slides/slide1.xml", content: "<p:sld xmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\"><p:cSld/></p:sld>" }
+    ]));
+    const result = await verifyScenario({
+      file: "deliverables/debate.pptx",
+      verify: { kind: "pptx" }
+    }, root);
+    assert.equal(result.passed, true, JSON.stringify(result));
+    assert.equal(result.checks.find((item) => item.id === "file_exists")?.evidence, "谁更狗_辩论赛.pptx");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
 test("API collection campaign uses the real API tool, persists its evidence, and mechanically verifies the collected JSON", async () => {
   const campaign = createSeededCampaignScenario({ seed: 6 });
   const outputDir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-campaign-api-"));

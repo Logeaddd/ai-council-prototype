@@ -54,6 +54,7 @@ export function RightPanel({
   mode,
   onAddMember,
   onConfigureMember,
+  onDeleteMember,
   onToggleMuteMember,
   onReorderMembers,
   onApproveFileOp,
@@ -74,6 +75,7 @@ export function RightPanel({
   mode: WorkMode
   onAddMember: () => void
   onConfigureMember: (id: string) => void
+  onDeleteMember: (id: string) => void
   onToggleMuteMember: (id: string) => void
   onReorderMembers: (ids: string[]) => void
   onApproveFileOp: (id: string) => void
@@ -154,6 +156,7 @@ export function RightPanel({
                 setDragOverMemberId(null)
               }}
               onConfigure={() => onConfigureMember(member.id)}
+              onDelete={() => onDeleteMember(member.id)}
               onToggleMute={() => onToggleMuteMember(member.id)}
             />
           ))}
@@ -281,6 +284,7 @@ function MemberCard({
   onDrop,
   onDragEnd,
   onConfigure,
+  onDelete,
   onToggleMute,
 }: {
   member: AgentMember
@@ -294,6 +298,7 @@ function MemberCard({
   onDrop: (event: React.DragEvent<HTMLDivElement>) => void
   onDragEnd: () => void
   onConfigure: () => void
+  onDelete: () => void
   onToggleMute: () => void
 }) {
   const keyTone: Tone =
@@ -356,6 +361,16 @@ function MemberCard({
         </div>
         <div className="flex flex-col items-end gap-1.5">
           <StatePill state={member.state} />
+          <button
+            type="button"
+            onClick={onDelete}
+            disabled={!draggable}
+            className="rounded p-1 text-muted-foreground transition-colors hover:bg-danger/10 hover:text-danger disabled:cursor-not-allowed disabled:opacity-35"
+            aria-label={`删除成员 ${member.name}`}
+            title={draggable ? "删除成员" : "至少保留一名成员"}
+          >
+            <X className="size-3.5" />
+          </button>
           <button
             onClick={onToggleMute}
             className={cn(

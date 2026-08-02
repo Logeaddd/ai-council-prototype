@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { addMember, initGroupWorkspace, reorderSeats, replaceMember } from "../src/workspaceManager.js";
+import { addMember, deleteMember, initGroupWorkspace, reorderSeats, replaceMember } from "../src/workspaceManager.js";
 
 test("initializes custom group workspace with shared and member folders", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-ws-"));
@@ -170,5 +170,51 @@ test("reordering seats persists the exact member order", () => {
   assert.throws(
     () => reorderSeats({ groupPath: group.groupPath, seatIds: ["judge", "judge", "member"] }),
     /duplicate/,
+  );
+});
+
+test("deleting a member persists removal, cleans permissions, and preserves private data", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-delete-member-"));
+  const group = initGroupWorkspace({
+    root,
+    groupFolderName: "delete-member-group",
+    members: [
+      { seatId: "builder", displayName: "Builder", model: "mock-builder" },
+      { seatId: "reviewer", displayName: "Reviewer", model: "mock-reviewer" }
+    ]
+  });
+  const privateFolder = group.seats[1].privateFolder;
+  const groupFile = path.join(group.groupPath, "group.json");
+  const configured = JSON.parse(fs.readFileSync(groupFile, "utf8"));
+  configured.permissions = { defaultTier: "text", seatTiers: { builder: "full", reviewer: "tool" } };
+  fs.writeFileSync(groupFile, JSON.stringify(configured, null, 2), "utf8");
+
+  const result = deleteMember({ groupPath: group.groupPath, seatId: "reviewer" });
+  const saved = JSON.parse(fs.readFileSync(groupFile, "utf8"));
+
+  assert.equal(result.deletedSeat.seatId, "reviewer");
+  assert.equal(result.preservedPrivateFolder, privateFolder);
+  assert.deepEqual(saved.seats.map((seat) => seat.seatId), ["builder"]);
+  assert.deepEqual(saved.permissions.seatTiers, { builder: "full" });
+  assert.equal(fs.existsSync(path.join(group.groupPath, privateFolder, "handoff.md")), true);
+  assert.throws(
+    () => deleteMember({ groupPath: group.groupPath, seatId: "builder" }),
+    /last member/,
+  );
+});
+
+test("deleting the last enabled member is rejected", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-delete-enabled-"));
+  const group = initGroupWorkspace({
+    root,
+    groupFolderName: "delete-enabled-group",
+    members: [
+      { seatId: "enabled", displayName: "Enabled", model: "mock", enabled: true },
+      { seatId: "disabled", displayName: "Disabled", model: "mock", enabled: false }
+    ]
+  });
+  assert.throws(
+    () => deleteMember({ groupPath: group.groupPath, seatId: "enabled" }),
+    /last enabled member/,
   );
 });
