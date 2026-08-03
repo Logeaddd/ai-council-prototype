@@ -98,10 +98,12 @@ export function buildCommandEnvironment(groupPath, options = {}) {
     corrections.push("ignored invalid JAVA_HOME");
     delete env.JAVA_HOME;
   }
-  if (!env.JAVA_HOME && discovered.javaHomes?.length) {
-    env.JAVA_HOME = discovered.javaHomes[0].path;
+  const projectJavaVersion = projectJavaVersionHint(root);
+  const preferredJavaHome = preferredProjectJavaHome(root, discovered.javaHomes, env.JAVA_HOME, projectJavaVersion);
+  if (preferredJavaHome && preferredJavaHome !== env.JAVA_HOME) {
+    env.JAVA_HOME = preferredJavaHome;
     additions.unshift(path.join(env.JAVA_HOME, "bin"));
-    corrections.push(`selected JAVA_HOME=${displayPath(env.JAVA_HOME)}`);
+    corrections.push(`${projectJavaVersion ? "selected project-compatible" : "selected"} JAVA_HOME=${displayPath(env.JAVA_HOME)}`);
   }
 
   const currentPath = String(env.Path || env.PATH || "");
@@ -278,6 +280,32 @@ function javaVersionHint(value) {
   const matches = String(value || "").match(/(?:jdk|java|corretto|openjdk)[-_ ]?(\d+)(?:\.\d+)*/ig) || [];
   const versions = matches.map((item) => Number(item.match(/\d+/)?.[0] || 0));
   return Math.max(0, ...versions);
+}
+
+function preferredProjectJavaHome(root, javaHomes = [], currentJavaHome = "", projectJavaVersion = 0) {
+  if (projectJavaVersion) {
+    const compatible = javaHomes.find((item) => javaVersionHint(item.path) === projectJavaVersion);
+    if (compatible) return compatible.path;
+  }
+  if (isJavaHome(currentJavaHome)) return currentJavaHome;
+  return javaHomes[0]?.path || "";
+}
+
+function projectJavaVersionHint(root) {
+  if (!root) return 0;
+  const files = ["gradle.properties", "build.gradle", "build.gradle.kts", "pom.xml"];
+  const text = files.map((name) => {
+    try {
+      return fs.readFileSync(path.join(root, name), "utf8");
+    } catch {
+      return "";
+    }
+  }).join("\n");
+  if (!text) return 0;
+  const explicitToolchain = text.match(/languageVersion\s*=\s*JavaLanguageVersion\.of\(\s*(\d+)\s*\)/i);
+  if (explicitToolchain) return Number(explicitToolchain[1]);
+  const configuredInstallation = text.match(/org\.gradle\.java\.installations\.paths\s*=\s*[^\r\n]*?(?:jdk|java)[-_ ]?(\d+)/i);
+  return configuredInstallation ? Number(configuredInstallation[1]) : 0;
 }
 
 function uniquePaths(values) {
