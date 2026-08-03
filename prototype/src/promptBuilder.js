@@ -197,7 +197,12 @@ function toolRequestProtocolLine(options = {}) {
 }
 
 function toolRuntimeEnvironmentLine(runtimeEnvironment) {
-  if (runtimeEnvironment) return runtimeEnvironment;
+  if (runtimeEnvironment) {
+    const buildGuidance = /gradle|gradlew/i.test(runtimeEnvironment)
+      ? " For Gradle builds, honor the project's declared Java toolchain; Forge/Minecraft 1.20.x projects normally require Java 17. If a build fails, read the first compiler or runtime error, repair that cause, and rerun the same build before claiming completion."
+      : "";
+    return `${runtimeEnvironment}${buildGuidance}`;
+  }
   if (process.platform === "win32") {
     return "Tool runtime: Windows. Use system/cmd/PowerShell syntax unless a real result proves another shell is available; pass PowerShell scripts directly.";
   }
